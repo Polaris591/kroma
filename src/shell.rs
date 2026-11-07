@@ -397,6 +397,8 @@ impl Drop for ProcessGroupGuard {
 pub struct ShellOutput {
     pub(crate) exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     signal: Option<i32>,
     stdout: String,
     stderr: String,
@@ -591,20 +593,43 @@ pub async fn execute_for_session_with_progress(
     execute_internal(command, workdir, Some(session), on_output).await
 }
 
+#[derive(Default)]
+struct PreviewCursor {
+    offset: u64,
+    utf8_tail: Vec<u8>,
+}
+
+// Streaming output can split one UTF-8 code point across timer ticks. Keep
+// the unfinished bytes until the next read instead of emitting U+FFFD twice.
+fn complete_utf8_chunk(bytes: &[u8], tail: &mut Vec<u8>) -> String {
+    let mut joined = std::mem::take(tail);
+    joined.extend_from_slice(bytes);
+    match std::str::from_utf8(&joined) {
+        Ok(value) => value.to_owned(),
+        Err(error) if error.error_len().is_none() => {
+            let valid = error.valid_up_to();
+            let text = String::from_utf8_lossy(&joined[..valid]).into_owned();
+            tail.extend_from_slice(&joined[valid..]);
+            text
+        }
+        Err(_) => String::from_utf8_lossy(&joined).into_owned(),
+    }
+}
+
 fn preview_new_bytes(
     path: &Path,
-    offset: &mut u64,
+    cursor: &mut PreviewCursor,
     label: &str,
     on_output: &OutputCallback<'_>,
 ) -> Result<()> {
     let mut file = File::open(path)?;
     let size = file.metadata()?.len();
-    if size <= *offset {
+    if size <= cursor.offset {
         return Ok(());
     }
     // Reading a tail is cheap even for multi-gigabyte command output. All
     // original bytes remain intact in the file-based capture.
-    let previous = *offset;
+    let previous = cursor.offset;
     let start = size.saturating_sub(4096).max(previous);
     file.seek(SeekFrom::Start(start))?;
     // Read only the snapshot we sized: the file can keep growing while this
@@ -613,12 +638,21 @@ fn preview_new_bytes(
     let limit = size.saturating_sub(start).min(4096);
     let mut bytes = Vec::with_capacity(usize::try_from(limit).unwrap_or(0));
     (&mut file).take(limit).read_to_end(&mut bytes)?;
-    *offset = start.saturating_add(bytes.len() as u64);
+    cursor.offset = start.saturating_add(bytes.len() as u64);
     let mut preview = String::new();
     if start > previous {
+        cursor.utf8_tail.clear();
         preview.push_str("[... earlier live output omitted ...]\n");
     }
-    preview.push_str(&String::from_utf8_lossy(&bytes));
+    let skip = if start > previous {
+        bytes
+            .iter()
+            .take_while(|byte| (**byte & 0xc0) == 0x80)
+            .count()
+    } else {
+        0
+    };
+    preview.push_str(&complete_utf8_chunk(&bytes[skip..], &mut cursor.utf8_tail));
     if !preview.is_empty() {
         on_output(label, &preview);
     }
@@ -887,24 +921,31 @@ async fn execute_internal(
     session: Option<&Path>,
     on_output: Option<&OutputCallback<'_>>,
 ) -> Result<ShellOutput> {
+    execute_with_deadline(command, workdir, session, on_output, shell_deadline()).await
+}
+
+async fn execute_with_deadline(
+    command: &str,
+    workdir: &Path,
+    session: Option<&Path>,
+    on_output: Option<&OutputCallback<'_>>,
+    deadline: Option<Duration>,
+) -> Result<ShellOutput> {
     if command.trim().is_empty() {
         bail!("shell command cannot be empty");
     }
-
-    // Coding models commonly use Bash features (pipefail, arrays, PIPESTATUS).
-    // Use Bash when it is installed and reachable, and keep the resolved
-    // dialect in the tool description so the model knows what it may write.
     let shell = resolve_shell();
+    let program_name = shell.program.to_string_lossy().into_owned();
+    let mut cmd = Command::new(&shell.program);
+    shell.configure(&mut cmd);
+    cmd.arg(shell.command_text(command));
 
     let dir = capture_dir(workdir)?;
     let (stdout_path, stdout_file) = capture_file(&dir, "stdout", session)?;
     let mut cleanup_stdout = CaptureCleanup::new(vec![stdout_path.clone()]);
     let (stderr_path, stderr_file) = capture_file(&dir, "stderr", session)?;
     let mut cleanup_stderr = CaptureCleanup::new(vec![stderr_path.clone()]);
-    let mut cmd = Command::new(&shell.program);
-    shell.configure(&mut cmd);
-    cmd.arg(shell.command_text(command))
-        .current_dir(workdir)
+    cmd.current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
@@ -918,11 +959,11 @@ async fn execute_internal(
 
     #[cfg(windows)]
     let (mut child, mut guard) = crate::winsys::ChildTreeGuard::spawn(&mut cmd)
-        .with_context(|| format!("failed to launch contained {}", shell.program.display()))?;
+        .with_context(|| format!("failed to launch contained {program_name}"))?;
     #[cfg(not(windows))]
     let mut child = cmd
         .spawn()
-        .with_context(|| format!("failed to launch {}", shell.program.display()))?;
+        .with_context(|| format!("failed to launch {program_name}"))?;
     #[cfg(unix)]
     let pid = child.id().context("shell process has no PID")?;
     #[cfg(unix)]
@@ -931,11 +972,11 @@ async fn execute_internal(
         if let Some(on_output) = on_output {
             let mut ticker = tokio::time::interval(Duration::from_millis(100));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut stdout_offset = 0;
-            let mut stderr_offset = 0;
+            let mut stdout_offset = PreviewCursor::default();
+            let mut stderr_offset = PreviewCursor::default();
             let status = loop {
                 tokio::select! {
-                    result = child.wait() => break result.with_context(|| format!("failed to run {}", shell.program.display()))?,
+                    result = child.wait() => break result.with_context(|| format!("failed to run {program_name}"))?,
                     _ = ticker.tick() => {
                         preview_new_bytes(&stdout_path, &mut stdout_offset, "stdout", on_output)?;
                         preview_new_bytes(&stderr_path, &mut stderr_offset, "stderr", on_output)?;
@@ -949,25 +990,25 @@ async fn execute_internal(
             child
                 .wait()
                 .await
-                .with_context(|| format!("failed to run {}", shell.program.display()))
+                .with_context(|| format!("failed to run {program_name}"))
         }
     };
-    let status = match shell_deadline() {
+    let (status, timeout_ms) = match deadline {
         Some(limit) => match tokio::time::timeout(limit, wait).await {
-            Ok(status) => status?,
+            Ok(status) => (Some(status?), None),
             Err(_) => {
                 // The wait future is dropped before touching the child again.
                 #[cfg(any(unix, windows))]
                 guard.terminate();
                 let _ = child.start_kill();
                 let _ = child.wait().await;
-                bail!(
-                    "shell command exceeded KROMA_SHELL_TIMEOUT_SECS ({}s)",
-                    limit.as_secs()
-                );
+                // A timeout still has useful stdout/stderr evidence. Return a
+                // structured failed result instead of deleting the captures
+                // and sending the model an evidence-free error message.
+                (None, Some(limit.as_millis()))
             }
         },
-        None => wait.await?,
+        None => (Some(wait.await?), None),
     };
     #[cfg(any(unix, windows))]
     guard.disarm();
@@ -979,12 +1020,13 @@ async fn execute_internal(
     cleanup_stdout.disarm();
     cleanup_stderr.disarm();
     Ok(ShellOutput {
-        exit_code: status.code(),
+        exit_code: status.as_ref().and_then(std::process::ExitStatus::code),
+        timeout_ms,
         signal: {
             #[cfg(unix)]
             {
                 use std::os::unix::process::ExitStatusExt;
-                status.signal()
+                status.as_ref().and_then(ExitStatusExt::signal)
             }
             #[cfg(not(unix))]
             {
@@ -1004,6 +1046,45 @@ async fn execute_internal(
 mod tests {
     use super::*;
     use crate::protocol::Message;
+
+    #[test]
+    fn streamed_utf8_split_across_timer_ticks_is_not_corrupted() {
+        let bytes = "中文🙂".as_bytes();
+        let mut tail = Vec::new();
+        let first = complete_utf8_chunk(&bytes[..2], &mut tail);
+        let second = complete_utf8_chunk(&bytes[2..4], &mut tail);
+        let third = complete_utf8_chunk(&bytes[4..7], &mut tail);
+        let fourth = complete_utf8_chunk(&bytes[7..], &mut tail);
+        assert_eq!(format!("{first}{second}{third}{fourth}"), "中文🙂");
+        assert!(tail.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timed_out_shell_keeps_partial_stdout_and_structured_failure() -> Result<()> {
+        let dir = env::temp_dir().join(format!(
+            "kroma-shell-timeout-capture-{}-{}",
+            std::process::id(),
+            CAPTURE_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir)?;
+        let output = execute_with_deadline(
+            "printf 'useful-partial-output\\n'; sleep 3",
+            &dir,
+            None,
+            None,
+            Some(Duration::from_millis(150)),
+        )
+        .await?;
+        assert_eq!(output.exit_code, None);
+        assert_eq!(output.timeout_ms, Some(150));
+        assert!(output.stdout.contains("useful-partial-output"));
+        let record = serde_json::to_value(&output)?;
+        assert_eq!(record["timeout_ms"], 150);
+        assert_eq!(record["stdout"], "useful-partial-output\n");
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
 
     #[test]
     fn forked_mcp_image_remains_readable_after_clearing_source() -> Result<()> {

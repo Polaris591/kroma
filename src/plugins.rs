@@ -1571,6 +1571,16 @@ impl PluginCatalog {
             if !plugin.enabled {
                 continue;
             }
+            // A child Kroma cannot delegate again. Do not advertise an
+            // unusable subagent tool to its model: this prevents wasted
+            // model rounds on a request that the worker would reject.
+            if plugin.manifest.id == "subagents"
+                && std::env::var("KROMA_SUBAGENT_DEPTH")
+                    .ok()
+                    .is_some_and(|depth| depth.parse::<u32>().map_or(true, |n| n > 0))
+            {
+                continue;
+            }
             if let Some(conflict) = plugin.manifest.tools.iter().find(|tool| {
                 (!tool.replace && names.contains(&tool.name))
                     || (tool.replace

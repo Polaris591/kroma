@@ -1,6 +1,6 @@
 id = "web"
 name = "Web Search & Fetch"
-version = "1.6.0"
+version = "1.7.0"
 description = "Search the web and fetch readable text from webpages"
 command = "node"
 args = ["main.js"]
@@ -14,6 +14,8 @@ timeout_ms = 15000
 fetch_provider = "http"
 search_priority = ["parallel", "you", "exa", "tavily"]
 search_attempt_timeout_ms = 8000
+allow_paid_fallback = false
+allow_model_provider_override = false
 
 [[tools]]
 name = "web_search"
@@ -35,11 +37,6 @@ type = "integer"
 description = "Maximum results, between 1 and 10"
 minimum = 1
 maximum = 10
-
-[tools.parameters.properties.provider]
-type = "string"
-enum = ["auto", "free", "exa", "brave", "tavily", "you", "parallel", "firecrawl", "searxng", "mwmbl", "bing", "duckduckgo", "duckduckgo_lite"]
-description = "Optional search backend override; auto uses configured API priority or keyless fallback; free forces keyless search. Other explicit providers never switch."
 
 [[tools]]
 name = "web_fetch"
@@ -64,8 +61,3 @@ maximum = 30000
 type = "integer"
 minimum = 0
 description = "Character offset for continuation; use next_start from the previous result with the same URL. Defaults to 0 (fresh read)."
-
-[tools.parameters.properties.provider]
-type = "string"
-enum = ["http", "firecrawl"]
-description = "Optional read backend override. HTTP is default; Firecrawl is a separately billed remote extraction API."

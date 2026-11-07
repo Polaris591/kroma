@@ -169,6 +169,7 @@ test("JSONL priority failover reports actual provider and preserves diagnostics 
   const origin = `http://127.0.0.1:${server.address().port}`;
   const req = {type: "tool", name: "web_search", request_id: 11, arguments: {query: "ok"}};
   const result = await runWorker(t, {provider: "auto", search_priority: ["searxng", "firecrawl"],
+    allow_paid_fallback: true, allow_model_provider_override: true,
     searxng_url: origin, firecrawl_base_url: origin, firecrawl_api_key: "fake-local-key"}, [req,
     {...req, request_id: 12, arguments: {query: "fail"}},
     {...req, request_id: 13, arguments: {query: "ok", provider: "searxng"}}]);

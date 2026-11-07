@@ -313,14 +313,22 @@ impl ContextConfig {
     /// upstream/catalog hard cap cannot be silently bypassed a second time.
     pub fn from_limits(window: usize, output: Option<usize>) -> Result<Self> {
         let default_reserve = output.unwrap_or_else(|| (window / 8).min(4096));
-        let reserve = match env::var("KROMA_OUTPUT_RESERVE_TOKENS") {
+        let requested_reserve = match env::var("KROMA_OUTPUT_RESERVE_TOKENS") {
             Ok(raw) => raw
                 .parse()
                 .context("KROMA_OUTPUT_RESERVE_TOKENS must be an integer token count")?,
             Err(env::VarError::NotPresent) => default_reserve,
             Err(error) => return Err(error.into()),
         };
+        // A smaller environment reserve must never allow an otherwise valid
+        // request to exceed the shared input + wire output window. The setting
+        // may increase the safety margin, not overcommit the model endpoint.
+        let reserve = Self::reserve_for_wire(requested_reserve, output);
         Self::with_output_reserve(window, reserve)
+    }
+
+    fn reserve_for_wire(requested: usize, wire: Option<usize>) -> usize {
+        wire.map_or(requested, |wire| requested.max(wire))
     }
 
     pub fn with_output_reserve(window: usize, reserve: usize) -> Result<Self> {
@@ -1670,6 +1678,14 @@ fn count(value: Option<u64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_reserve_never_understates_the_actual_wire_output_limit() {
+        assert_eq!(ContextConfig::reserve_for_wire(512, Some(4096)), 4096);
+        assert_eq!(ContextConfig::reserve_for_wire(8192, Some(4096)), 8192);
+        assert_eq!(ContextConfig::reserve_for_wire(512, None), 512);
+        assert!(ContextConfig::with_output_reserve(4096, 4096).is_err());
+    }
 
     // Frozen pre-experiment planner: compare exact boundaries, bytes and tokens.
     impl Compression {

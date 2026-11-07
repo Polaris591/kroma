@@ -446,7 +446,7 @@ test("all new credentials participate in auto and per-call provider overrides co
     await assert.rejects(search("test", {exa_api_key: "other-key", search_priority: [provider, "exa"]}), {code: "HTTP_ERROR"});
     delete process.env[env];
     global.fetch = async () => mock(JSON.stringify({results: [{title: "Found", url: "https://example.org"}]}), "application/json");
-    const result = JSON.parse(await dispatch({type: "tool", name: "web_search", config: {provider, exa_api_key: "key"},
+    const result = JSON.parse(await dispatch({type: "tool", name: "web_search", config: {provider, exa_api_key: "key", allow_model_provider_override: true},
       arguments: {query: "test", provider: "exa"}}));
     assert.equal(result.provider, "exa");
   }
@@ -500,7 +500,33 @@ test("Firecrawl reads apply the same target check instead of forwarding a privat
   }
 });
 
-const priorityKeys = {parallel_api_key: "fake-p", you_api_key: "fake-y", exa_api_key: "fake-e", tavily_api_key: "fake-t"};
+// These tests explicitly exercise opt-in multi-provider billing and override
+// compatibility. Production defaults do not allow either silently.
+const priorityKeys = {parallel_api_key: "fake-p", you_api_key: "fake-y", exa_api_key: "fake-e", tavily_api_key: "fake-t",
+  allow_paid_fallback: true, allow_model_provider_override: true};
+
+test("default auto never spends on a second paid backend after one failure", async () => {
+  const calls = [];
+  global.fetch = async url => { calls.push(new URL(url).hostname); throw Error("transient"); };
+  await assert.rejects(search("network outage", {...priorityKeys, allow_paid_fallback: false}), error => {
+    assert.equal(error.code, "NETWORK_ERROR");
+    assert.deepEqual(error.attempts.map(attempt => attempt.provider), ["parallel"]);
+    return true;
+  });
+  assert.deepEqual(calls, ["api.parallel.ai"]);
+});
+
+test("model cannot select a paid provider or Firecrawl extraction without explicit opt-in", async () => {
+  let calls = 0;
+  global.fetch = async () => { calls++; throw Error("must not make a request"); };
+  await assert.rejects(dispatch({type: "tool", name: "web_search",
+    config: {provider: "free", exa_api_key: "key"},
+    arguments: {query: "test", provider: "exa"}}), {code: "PROVIDER_OVERRIDE_DISABLED"});
+  await assert.rejects(dispatch({type: "tool", name: "web_fetch",
+    config: {fetch_provider: "http", firecrawl_api_key: "key"},
+    arguments: {url: "https://example.org", provider: "firecrawl"}}), {code: "PROVIDER_OVERRIDE_DISABLED"});
+  assert.equal(calls, 0);
+});
 const found = {title: "Docs", url: "https://nodejs.org/api/globals.html", snippets: ["Source"], highlights: ["Source"], content: "Source", excerpts: ["Source"]};
 function priorityResponse(host) {
   return mock(JSON.stringify(host === "ydc-index.io" ? {results: {web: [found]}} : {results: [found]}), "application/json");

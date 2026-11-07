@@ -206,6 +206,36 @@ fn dispatch(request: &Value, request_id: &Value) -> Value {
     let Some(kind) = object.get("type").and_then(Value::as_str) else {
         return make_reply(request_id, "Request is missing its type".to_string(), true);
     };
+    // Child Kromas may consult the same project facts, but cannot silently
+    // teach the parent project's memory from speculative subtask output.
+    // This includes task-end auto capture and user-facing mutation commands.
+    if child_memory_read_only(std::env::var("KROMA_SUBAGENT_DEPTH").ok().as_deref()) {
+        match kind {
+            "task_summary" => return make_reply(request_id, TASK_SUMMARY_OK.into(), false),
+            "command" => {
+                return make_reply(
+                    request_id,
+                    "Project memory is read-only in subagents".into(),
+                    true,
+                )
+            }
+            "tool"
+                if matches!(
+                    object.get("name").and_then(Value::as_str),
+                    Some("memory_remember" | "memory_forget")
+                ) =>
+            {
+                return tool_reply(
+                    request_id,
+                    Err(ToolFailure::new(
+                        "subagent_read_only",
+                        "Subagents can read project memory but cannot modify it",
+                    )),
+                );
+            }
+            _ => {}
+        }
+    }
     match kind {
         "ping" => make_reply(request_id, "pong".to_string(), false),
         "tool" => dispatch_tool(object, request_id),
@@ -215,6 +245,10 @@ fn dispatch(request: &Value, request_id: &Value) -> Value {
         "ui" => dispatch_ui(object, request_id),
         _ => make_reply(request_id, "Unsupported request type".to_string(), true),
     }
+}
+
+fn child_memory_read_only(depth: Option<&str>) -> bool {
+    depth.is_some_and(|value| value.trim().parse::<u32>().map_or(true, |depth| depth > 0))
 }
 
 // ---------------------------------------------------------------------------
@@ -1649,6 +1683,15 @@ fn truncate(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subagent_depth_detection_fails_closed_for_malformed_values() {
+        assert!(!child_memory_read_only(None));
+        assert!(!child_memory_read_only(Some("0")));
+        assert!(child_memory_read_only(Some("1")));
+        assert!(child_memory_read_only(Some("4")));
+        assert!(child_memory_read_only(Some("nonsense")));
+    }
     use std::io::Cursor;
 
     fn run_frames(input: Vec<u8>) -> Vec<Value> {

@@ -2,7 +2,8 @@
 const {WebError, httpUrl, download, assertPublicTarget} = require("./http");
 const {extractPage, plainText, entities} = require("./page");
 const DEFAULTS = Object.freeze({provider: "auto", max_results: 6, max_chars: 12000, timeout_ms: 15000,
-  search_priority: Object.freeze(["parallel", "you", "exa", "tavily"]), search_attempt_timeout_ms: 8000});
+  search_priority: Object.freeze(["parallel", "you", "exa", "tavily"]), search_attempt_timeout_ms: 8000,
+  allow_paid_fallback: false, allow_model_provider_override: false});
 
 // Keyless engines cannot honour every ranking signal, so say what each one is
 // bad at instead of presenting their output as equivalent to a keyed API.
@@ -302,7 +303,13 @@ async function search(query, config = {}, wanted) {
         || error.code === "HTTP_ERROR" && (error.status === 429 || error.status >= 500 && error.status <= 599);
       const freeRecoverable = free && (["SEARCH_BLOCKED", "NO_RESULTS", "INVALID_RESPONSE", "UNSUPPORTED_CONTENT"].includes(error.code)
         || error.code === "HTTP_ERROR" && [403, 408].includes(error.status));
-      if ((!transient && !freeRecoverable) || selected === providers[providers.length - 1]) {
+      // A transient API failure must not silently turn one search into
+      // several billable provider requests. Users may explicitly opt into
+      // multi-provider failover; keyless engines continue freely by default.
+      const blockedPaidFallback = provider === "auto" && !free
+        && selected !== "searxng" && settings.allow_paid_fallback !== true;
+      if ((!transient && !freeRecoverable) || blockedPaidFallback
+        || selected === providers[providers.length - 1]) {
         error.attempts = attempts;
         throw error;
       }
@@ -406,6 +413,10 @@ async function fetchFirecrawl(url, settings, timeout) {
 
 async function dispatch(req) {
   if (!req || req.type !== "tool") throw new WebError("INVALID_REQUEST", "Only tool requests are supported");
+  if (req.arguments?.provider && req.config?.allow_model_provider_override !== true) {
+    throw new WebError("PROVIDER_OVERRIDE_DISABLED",
+      "Select the search or fetch backend in plugin settings; model-selected providers are disabled by default to avoid surprise charges.");
+  }
   if (req.name === "web_search") return search(req.arguments?.query, {...req.config, ...(req.arguments?.provider ? {provider: req.arguments.provider} : {})}, req.arguments?.count);
   if (req.name === "web_fetch") return fetchPage(req.arguments?.url, {...req.config, ...(req.arguments?.provider ? {fetch_provider: req.arguments.provider} : {})}, req.arguments?.max_chars, req.arguments?.start_char);
   throw new WebError("UNKNOWN_TOOL", "Unknown tool " + req.name);

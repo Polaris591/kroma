@@ -15,6 +15,7 @@ use crate::model::*;
 pub(crate) const SCHEMA_VERSION: i64 = 2;
 pub(crate) const MAX_ROWS: i64 = 10_000;
 pub(crate) const MAX_CANDIDATES: i64 = 200;
+pub(crate) const MAX_ACTIVE: i64 = 200;
 const MAX_IMPORT_NOTES: usize = 2_000;
 const BUSY_TIMEOUT_MS: u64 = 1_000;
 
@@ -152,6 +153,7 @@ impl Store {
         // Expire stale pending and review entries on every open. Best effort:
         // a failed cleanup must not make storage unavailable.
         let _ = expire_rows(&self.conn, now_ts());
+        let _ = enforce_active_limit(&self.conn, now_ts());
         Ok(())
     }
 
@@ -193,6 +195,7 @@ impl Store {
             supersedes: None,
         };
         let memory = insert_row(&tx, input, &text, fingerprint, &row)?;
+        enforce_active_limit(&tx, now_ts())?;
         tx.commit()?;
         Ok(memory)
     }
@@ -208,6 +211,7 @@ impl Store {
             STATE_PURGED => bail!("Memory was purged"),
             _ => bail!("Only pending candidates can be accepted"),
         };
+        enforce_active_limit(&tx, now_ts())?;
         tx.commit()?;
         Ok(memory)
     }
@@ -422,6 +426,7 @@ impl Store {
             return Ok(memory);
         }
         let memory = insert_row(&tx, input, &text, fingerprint, &row)?;
+        enforce_active_limit(&tx, now_ts())?;
         tx.commit()?;
         Ok(memory)
     }
@@ -473,6 +478,7 @@ impl Store {
                 }
             }
         }
+        enforce_active_limit(&tx, now)?;
         tx.commit()?;
         Ok(report)
     }
@@ -771,6 +777,32 @@ pub(crate) fn expire_rows(conn: &Connection, now: i64) -> Result<()> {
     Ok(())
 }
 
+/// Keep automatic recall bounded without deleting user information. Prefer to
+/// archive old, unverified review notes before explicit user decisions. The
+/// archived rows remain readable through administrative history and can be
+/// revived with fresh evidence; they no longer enter model recall.
+fn enforce_active_limit(conn: &Connection, now: i64) -> Result<()> {
+    let active: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memories WHERE state=?1 AND (expires_at IS NULL OR expires_at > ?2)",
+        params![STATE_ACCEPTED, now],
+        |row| row.get(0),
+    )?;
+    let excess = (active - MAX_ACTIVE).max(0);
+    if excess == 0 {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE memories SET state=?1, updated_at=?2 WHERE id IN (
+            SELECT id FROM memories WHERE state=?3 AND (expires_at IS NULL OR expires_at > ?2)
+            ORDER BY CASE WHEN kind='review' THEN 0 WHEN kind='reference' THEN 1
+                          WHEN kind='pitfall' THEN 2 ELSE 3 END,
+                     updated_at ASC, id ASC LIMIT ?4
+        )",
+        params![STATE_EXPIRED, now, STATE_ACCEPTED, excess],
+    )?;
+    Ok(())
+}
+
 fn set_flag(conn: &Connection, key: &str, value: bool) -> Result<()> {
     conn.execute(
         "INSERT INTO metadata (key, value) VALUES (?1, ?2)
@@ -955,6 +987,50 @@ mod tests {
         assert!(store
             .import_legacy(&["   ".to_string()], "bad.json")
             .is_err());
+    }
+
+    #[test]
+    fn automatic_maintenance_caps_active_memories_and_prioritizes_old_reviews() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path());
+        let pinned = store
+            .insert(&input("always use pnpm for packages", "manual"), true)
+            .unwrap();
+        for index in 0..MAX_ACTIVE {
+            let mut note = input(&format!("review evidence number {index}"), "manual");
+            note.kind = "review".to_owned();
+            store.insert(&note, true).unwrap();
+        }
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE state=?1",
+                params![STATE_ACCEPTED],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, MAX_ACTIVE);
+        assert_eq!(store.get(&pinned.id).unwrap().state, STATE_ACCEPTED);
+        let archived_reviews: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE state=?1 AND kind='review'",
+                params![STATE_EXPIRED],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived_reviews, 1);
+        drop(store);
+        let reopened = open(dir.path());
+        let after: i64 = reopened
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE state=?1",
+                params![STATE_ACCEPTED],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, MAX_ACTIVE);
     }
 
     #[test]

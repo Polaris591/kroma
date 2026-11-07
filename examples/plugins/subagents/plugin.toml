@@ -1,34 +1,63 @@
 id = "subagents"
 name = "Subagents"
-version = "0.3.0"
+version = "0.4.0"
 description = "Delegate self-contained tasks to isolated Kroma agents"
 command = "node"
 args = ["main.js"]
 prompt = """
-Delegate only when the side work would flood this conversation with search results, logs or file contents, or when independent tasks can genuinely run in parallel. Each subtask runs as its own Kroma process with a separate session and does not inherit this conversation, so make it self-contained: goal, relevant files and facts, allowed changes, constraints, and the evidence to return (file:line, commands run, remaining risks). Use one task per independent job and split dependent work into later calls. Parallel edits need non-overlapping files or separate working directories. A completed result only means the child exited cleanly with a final answer; verify claims, diffs and tests before relying on it. Each result carries a resume token; pass it as tasks[].resume to continue that child's saved conversation, not to retry a failure. Never delegate from inside a subagent: nesting is refused.
+Delegate only when a side task would flood this conversation, or when independent tasks can genuinely run in parallel. Use general for normal coding and explore for codebase research (read-only by instruction, not an operating-system sandbox). Each child starts a separate session, so provide self-contained context and expected evidence. Parallel edits must have non-overlapping files. Verify child claims and diffs; completed only means the child exited cleanly. Continue with a saved session token when needed. Nested subagents are unavailable.
 """
 
 [settings]
 max_parallel = 3
 max_output_chars = 12000
 task_timeout_secs = 300
+explore_provider_profile = ""
+general_provider_profile = ""
 # Model for every child process, exactly as the endpoint names it. Empty or
 # removed means "inherit the parent conversation's model and profile".
 # Change it with `kroma plugins set subagents model <id>`.
-model = "deepseek-v4.1-flash"
+model = ""
 # DeepSeek thinking tier: off, enabled, high or max. Empty inherits the parent.
-thinking = "max"
+thinking = ""
 
 [[tools]]
 name = "subagent"
-description = "Delegate independent tasks to separate Kroma agents. Each task runs in its own session with the given working directory. Results return in input order with status, answer, usage, tool-call count and an evidence directory; each started task also carries a resume token. Tasks do not inherit this conversation; provide context, scope and acceptance criteria. A completed status means only that the child exited cleanly with a final answer — verify the work. Each task is at most 16 KiB, so point at files instead of pasting them. Parallel edits need non-overlapping files or separate working directories."
+description = "Run, inspect, wait for, continue or cancel isolated Kroma sessions. Use action=run with task (or independent tasks); background=true returns a job_id immediately. status/wait/cancel take job_id; continue takes task and resume token. Child results include output, usage and session evidence; completed only means the child exited cleanly. Default concurrency is three."
 streaming = true
 timeout_secs = 600
 
 [tools.parameters]
 type = "object"
 additionalProperties = false
-required = ["tasks"]
+[tools.parameters.properties.action]
+type = "string"
+enum = ["run", "status", "wait", "continue", "cancel"]
+description = "Action; defaults to run for backwards compatibility."
+[tools.parameters.properties.task]
+type = "string"
+description = "Self-contained task for run or continue."
+[tools.parameters.properties.job_id]
+type = "string"
+description = "Background job ID returned by run, for status, wait or cancel."
+[tools.parameters.properties.background]
+type = "boolean"
+description = "Return immediately with a job ID, default false."
+[tools.parameters.properties.resume]
+type = "string"
+description = "Saved child token from a prior run for continue."
+[tools.parameters.properties.cwd]
+type = "string"
+description = "Existing working directory for a single task."
+[tools.parameters.properties.profile]
+type = "string"
+enum = ["general", "explore"]
+description = "Single-task role; explore is read-only guidance, not an OS sandbox."
+[tools.parameters.properties.timeout_ms]
+type = "integer"
+minimum = 1
+maximum = 60000
+description = "Maximum wait time, default 30000ms."
 [tools.parameters.properties.tasks]
 type = "array"
 minItems = 1
@@ -40,6 +69,10 @@ required = ["task"]
 [tools.parameters.properties.tasks.items.properties.task]
 type = "string"
 description = "Self-contained instruction with context, scope, constraints and what to return."
+[tools.parameters.properties.tasks.items.properties.profile]
+type = "string"
+enum = ["general", "explore"]
+description = "general (default) or explore (read-only guidance, not a sandbox)."
 [tools.parameters.properties.tasks.items.properties.cwd]
 type = "string"
 description = "Existing directory for this task. Defaults to the current working directory."

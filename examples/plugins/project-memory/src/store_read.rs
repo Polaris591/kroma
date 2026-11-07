@@ -166,9 +166,9 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Recall for `request_context`: intent matches first, then the most
-    /// recently updated active entries. Bounded, read-only and empty when
-    /// memory use is off.
+    /// Automatic recall includes only entries relevant to the current task.
+    /// Empty matches stay empty: unrelated recent memories must not appear in
+    /// every task or invalidate an otherwise stable model-request prefix.
     pub fn recall(&self, intent: &str, limit: usize) -> Result<Vec<Memory>> {
         if !read_settings(&self.conn)?.use_enabled {
             return Ok(Vec::new());
@@ -178,29 +178,36 @@ impl Store {
         let query: String = intent.chars().take(MAX_QUERY_CHARS).collect();
         let mut memories: Vec<Memory> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
-        for hit in self.search(&query, &[], limit)? {
-            if let Some(memory) = load_memory(&self.conn, &hit.id)? {
-                if is_active(&memory, now) && seen.insert(memory.id.clone()) {
-                    memories.push(memory);
+        let mut hits = self.search(&query, &[], limit)?;
+        // Strict multi-word FTS uses AND. An otherwise relevant memory such as
+        // "use pnpm" must still be recalled for "pnpm dependency". Back off
+        // only to distinctive terms; never to unrelated recency backfilling.
+        if hits.is_empty() {
+            const GENERIC: &[&str] = &[
+                "about", "change", "code", "file", "from", "issue", "make", "need", "project",
+                "task", "test", "that", "this", "using", "with",
+            ];
+            for token in query.split_whitespace().take(12) {
+                let token = token.trim_matches(|ch: char| !ch.is_alphanumeric());
+                if token.chars().count() < 4
+                    || !token.chars().all(char::is_alphanumeric)
+                    || GENERIC.contains(&token.to_ascii_lowercase().as_str())
+                {
+                    continue;
+                }
+                for hit in self.search(token, &[], limit)? {
+                    if !hits.iter().any(|previous| previous.id == hit.id) {
+                        hits.push(hit);
+                    }
+                }
+                if hits.len() >= limit {
+                    break;
                 }
             }
         }
-        if memories.len() < limit {
-            let sql = format!(
-                "SELECT {COLUMNS} FROM memories WHERE state=?1
-                   AND (expires_at IS NULL OR expires_at > ?2)
-                 ORDER BY updated_at DESC, id DESC LIMIT ?3"
-            );
-            let mut statement = self.conn.prepare(&sql)?;
-            let rows = statement.query_map(
-                params![STATE_ACCEPTED, now, (limit * 2) as i64],
-                memory_from_row,
-            )?;
-            for memory in rows.collect::<rusqlite::Result<Vec<_>>>()? {
-                if memories.len() >= limit {
-                    break;
-                }
-                if seen.insert(memory.id.clone()) {
+        for hit in hits.into_iter().take(limit) {
+            if let Some(memory) = load_memory(&self.conn, &hit.id)? {
+                if is_active(&memory, now) && seen.insert(memory.id.clone()) {
                     memories.push(memory);
                 }
             }
@@ -658,6 +665,34 @@ mod tests {
             1
         );
         assert_eq!(store.search("WAL", &hints(&[]), 5).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn automatic_recall_skips_unrelated_memories() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), "s1");
+        add(
+            &mut store,
+            "preference",
+            "use pnpm for dependency management",
+            &[],
+            true,
+        );
+        add(
+            &mut store,
+            "decision",
+            "SQLite journal_mode WAL is required",
+            &[],
+            true,
+        );
+        assert!(store
+            .recall("configure unrelated CSS flex layout", 6)
+            .unwrap()
+            .is_empty());
+        let found = store.recall("pnpm dependency management", 6).unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].text.contains("pnpm"));
+        assert!(store.recall("", 6).unwrap().is_empty());
     }
 
     #[test]

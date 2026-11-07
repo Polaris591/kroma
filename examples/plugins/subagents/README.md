@@ -19,7 +19,36 @@ or file contents, or when independent tasks can run in parallel. Do not use it
 for a single lookup, or for work whose answer depends on this conversation's
 history: a child receives only the task you write.
 
-## The tool
+## The tool: sessions as jobs (0.4)
+
+The **one** `subagent` tool supports `run`, `status`, `wait`, `continue` and
+`cancel`. A job is an existing Kroma child session plus its process, not an
+extra agent-loop framework or daemon:
+
+```json
+{"action":"run","task":"Inspect src/agent.rs for failures; return file:line evidence","profile":"explore","background":true}
+```
+
+This returns a `job_id` immediately. Subsequent calls use
+`{"action":"status","job_id":"..."}` to inspect,
+`{"action":"wait","job_id":"...","timeout_ms":30000}` to await,
+or `{"action":"cancel","job_id":"..."}` to stop a running job. The worker
+keeps only live job handles in memory; once completed, `batch.json` and the
+session WAL can be read even after restarting the plugin. A worker restart
+**cannot** safely cancel or join a previous process; status then reports
+`interrupted` if completion evidence was not written.
+
+Continue a finished child via
+`{"action":"continue","resume":"<run_id>/0","task":"Now inspect the new regression"}`.
+It copies the saved session; it does **not** replay an unfinished tool call.
+
+Two built-in roles exist: `general` (default) and `explore`. Explore carries
+read-only *instructions*, **not** shell/OS permissions. A specific non-builtin
+reviewer role can be expressed in the task prompt, without adding profiles or
+hardcoded policy switches. No shell sandbox, token limit or automatic Git
+worktree is implied.
+
+The existing `tasks` batch form remains supported for compatibility.
 
 One tool, `subagent`, takes up to eight independent tasks:
 
@@ -148,14 +177,17 @@ its saved conversation:
 
 ## Model
 
-- `model` (default `deepseek-v4.1-flash`) sets `KROMA_MODEL` for every child
+- `model` (default empty) sets `KROMA_MODEL` for every child
   process. It must be an id the parent's endpoint serves: children keep the
   parent's endpoint, key and protocol, and only the model id changes.
-- `thinking` (default `max`, one of `off`, `enabled`, `high`, `max`) sets
+- `thinking` (default empty, one of `off`, `enabled`, `high`, `max`) sets
   `KROMA_DEEPSEEK_THINKING`, the DeepSeek reasoning tier. It applies to
   DeepSeek-compatible endpoints; other providers ignore it.
-- Remove either setting or set it empty to let children inherit the parent
-  conversation's model and profile.
+- Remove either setting or set it empty to use the child's standard Kroma
+  connection configuration. **A parent's live in-session model switch is not
+  yet automatically transmitted**, so this is not guaranteed to be exactly
+  the parent's selected TUI model. Configure a named `general_provider_profile`
+  or `explore_provider_profile` when a specific saved endpoint is required.
 - `/plugins set subagents model <id>` (or `kroma plugins set subagents model
   <id>`) changes it for this installation without editing the manifest; the
   manifest value is the default a fresh install starts from.

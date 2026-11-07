@@ -116,6 +116,7 @@ pub(super) fn payload_with_cache_at(
 pub(super) struct Stream {
     items: BTreeMap<usize, Value>,
     text: String,
+    text_by_item: BTreeMap<usize, String>,
     reasoning_summary: String,
     usage: Option<Usage>,
     status: Option<String>,
@@ -167,6 +168,12 @@ impl Stream {
                 if !s.is_empty() {
                     self.received_delta = true;
                     self.text.push_str(s);
+                    if let Some(index) = v["output_index"].as_u64() {
+                        self.text_by_item
+                            .entry(index as usize)
+                            .or_default()
+                            .push_str(s);
+                    }
                     on_text(s);
                 }
             }
@@ -200,9 +207,14 @@ impl Stream {
         }
         let mut calls = Vec::new();
         let mut opaque = Vec::new();
-        let mut content = self.text;
+        // A completed Responses output may contain multiple message items.
+        // The stream deltas are useful for live UI but do not necessarily
+        // cover every final item. Rebuild text from the final ordered output,
+        // using the per-item streamed deltas only for missing final content.
+        // This avoids both dropping a later message and doubling earlier text.
+        let mut content = String::new();
         let mut seen = HashSet::new();
-        for item in self.items.into_values() {
+        for (index, item) in self.items {
             match item["type"].as_str().unwrap_or("") {
                 "function_call" => {
                     let id = item["call_id"]
@@ -228,15 +240,26 @@ impl Stream {
                     });
                 }
                 "reasoning" => opaque.push(item),
-                "message" if content.is_empty() => {
+                "message" => {
+                    let mut final_text = String::new();
                     for part in item["content"].as_array().into_iter().flatten() {
                         if part["type"] == "output_text" {
-                            content.push_str(part["text"].as_str().unwrap_or(""));
+                            final_text.push_str(part["text"].as_str().unwrap_or(""));
                         }
+                    }
+                    if final_text.is_empty() {
+                        content.push_str(self.text_by_item.get(&index).map_or("", String::as_str));
+                    } else {
+                        content.push_str(&final_text);
                     }
                 }
                 _ => {}
             }
+        }
+        if content.is_empty() {
+            // Compatible with gateways that stream deltas without output_index
+            // or omit the final message object while still finishing normally.
+            content = self.text;
         }
         if calls.is_empty() && content.trim().is_empty() {
             bail!("Responses returned neither text nor tools");
@@ -284,6 +307,47 @@ pub(super) fn parse_text(body: &str) -> Result<ApecTextAttempt> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_multi_message_output_preserves_final_items_without_duplicating_deltas() {
+        let mut stream = Stream::default();
+        let mut streamed = String::new();
+        let mut push = |value: Value| {
+            stream
+                .apply(&value.to_string(), &mut |text| streamed.push_str(text))
+                .unwrap();
+        };
+        push(json!({"type":"response.output_item.added","output_index":0,
+            "item":{"type":"message","content":[]}}));
+        push(json!({"type":"response.output_text.delta","output_index":0,"delta":"first "}));
+        push(json!({"type":"response.output_item.done","output_index":0,
+            "item":{"type":"message","content":[{"type":"output_text","text":"first "}]}}));
+        push(json!({"type":"response.output_item.done","output_index":1,
+            "item":{"type":"message","content":[{"type":"output_text","text":"second"}]}}));
+        push(json!({"type":"response.completed","response":{"status":"completed"}}));
+        assert_eq!(streamed, "first ");
+        let (message, _) = stream.finish().unwrap();
+        assert_eq!(message.content.as_deref(), Some("first second"));
+    }
+
+    #[test]
+    fn completed_message_with_only_indexed_deltas_keeps_partial_item_text() {
+        let mut stream = Stream::default();
+        for value in [
+            json!({"type":"response.output_item.added","output_index":0,
+                "item":{"type":"message","content":[]}}),
+            json!({"type":"response.output_text.delta","output_index":0,"delta":"partial"}),
+            json!({"type":"response.output_item.done","output_index":1,
+                "item":{"type":"message","content":[{"type":"output_text","text":" completed"}]}}),
+            json!({"type":"response.completed","response":{"status":"completed"}}),
+        ] {
+            stream.apply(&value.to_string(), &mut |_| {}).unwrap();
+        }
+        assert_eq!(
+            stream.finish().unwrap().0.content.as_deref(),
+            Some("partial completed")
+        );
+    }
 
     #[test]
     fn responses_reject_non_object_tool_arguments() {

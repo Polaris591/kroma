@@ -134,6 +134,162 @@ test("a task gets its own session, working directory and parsed result", async (
   }
 });
 
+test("run status wait and durable status share one child session", async () => {
+  const dir = workspace();
+  const h = harness();
+  const opts = {dataDir: dir, spawn: h.spawn, terminate: child => child.kill()};
+  const base = {type: "tool", name: "subagent", workdir: dir, data_dir: dir, config: {}};
+  try {
+    const started = JSON.parse((await dispatch({...base, arguments: {
+      action: "run", task: "inspect project", profile: "explore", background: true
+    }}, opts)).content);
+    assert.equal(started.status, "running");
+    assert.equal(h.calls.length, 1);
+    assert.match(started.job_id, /^[0-9]{14}-[0-9a-f]{8}$/);
+    const status = JSON.parse((await dispatch({...base, arguments: {
+      action: "status", job_id: started.job_id
+    }}, opts)).content);
+    assert.equal(status.status, "running");
+    h.calls[0].finish({frames: [{type:"task_finished",status:"completed"},
+      {type:"result",text:"file evidence"}]});
+    const waited = JSON.parse((await dispatch({...base, arguments: {
+      action: "wait", job_id: started.job_id
+    }}, opts)).content);
+    assert.equal(waited.status, "completed");
+    assert.equal(waited.results[0].output, "file evidence");
+    assert.equal(waited.results[0].profile, "explore");
+    assert.equal(fs.existsSync(path.join(dir, "runs", started.job_id,"batch.json")), true);
+  } finally { fs.rmSync(dir, {recursive:true,force:true}); }
+});
+
+test("background progress does not leak unsolicited deltas after run acknowledgement", async () => {
+  const dir = workspace();
+  const h = harness();
+  const deltas = [];
+  try {
+    const started = JSON.parse((await dispatch({type:"tool_stream",name:"subagent",
+      workdir:dir,data_dir:dir,arguments:{action:"run",task:"inspect",background:true}},
+      {dataDir:dir,spawn:h.spawn,terminate:child=>child.kill(),onProgress:text=>deltas.push(text)})).content);
+    const before = deltas.length;
+    h.calls[0].child.stdout.emit("data", Buffer.from(JSON.stringify({type:"model_started",request:1})+"\n"));
+    await tick();
+    assert.equal(deltas.length, before,
+      "background worker must not send the previous tool request's output_delta after complete");
+    h.calls[0].finish({frames:[{type:"result",text:"done"}]});
+    const result = JSON.parse((await dispatch({type:"tool",name:"subagent",
+      workdir:dir,data_dir:dir,arguments:{action:"wait",job_id:started.job_id}},
+      {dataDir:dir,spawn:h.spawn})).content);
+    assert.equal(result.status, "completed");
+  } finally { fs.rmSync(dir,{recursive:true,force:true}); }
+});
+
+test("cancel stops the active child without inventing a successful result", async () => {
+  const dir = workspace();
+  const h = harness();
+  const opts = {dataDir: dir, spawn: h.spawn, terminate: child => child.kill()};
+  const base = {type: "tool", name: "subagent", workdir: dir, data_dir: dir, config: {}};
+  try {
+    const started = JSON.parse((await dispatch({...base, arguments: {
+      action:"run",task:"long running",background:true
+    }}, opts)).content);
+    const stop = JSON.parse((await dispatch({...base, arguments:{
+      action:"cancel",job_id:started.job_id
+    }}, opts)).content);
+    assert.equal(stop.cancelled, true);
+    const result = JSON.parse((await dispatch({...base, arguments:{
+      action:"wait",job_id:started.job_id
+    }}, opts)).content);
+    assert.equal(result.status, "failed");
+    assert.notEqual(result.results[0].status, "completed");
+  } finally { fs.rmSync(dir, {recursive:true,force:true}); }
+});
+
+test("action validation never starts a child", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    await assert.rejects(dispatch({type:"tool",name:"subagent",workdir:dir,
+      data_dir:dir,arguments:{action:"delete",task:"oops"}},
+      {spawn:h.spawn,dataDir:dir}), {code:"INVALID_ARGUMENT"});
+    await assert.rejects(dispatch({type:"tool",name:"subagent",workdir:dir,
+      data_dir:dir,arguments:{action:"status",job_id:"../bad"}},
+      {spawn:h.spawn,dataDir:dir}), {code:"INVALID_ARGUMENT"});
+    assert.equal(h.calls.length, 0);
+  } finally { fs.rmSync(dir,{recursive:true,force:true}); }
+});
+
+test("continue resumes a finished child in a fresh session without replaying prior tools", async () => {
+  const dir = workspace();
+  const h = harness();
+  const opts = {dataDir:dir,spawn:h.spawn,terminate:child=>child.kill()};
+  const base = {type:"tool",name:"subagent",workdir:dir,data_dir:dir,config:{}};
+  try {
+    const first = dispatch({...base,arguments:{action:"run",task:"inspect"}},opts);
+    assert.equal(h.calls.length,1);
+    h.calls[0].finish({frames:[{type:"result",text:"inspection"}]});
+    const original = JSON.parse((await first).content).results[0];
+    fs.writeFileSync(path.join(original.artifacts,"session.json"),"saved-session");
+    const second = dispatch({...base,arguments:{action:"continue",task:"now implement",
+      resume:original.resume}},opts);
+    assert.equal(h.calls.length,2);
+    const newSession = h.calls[1].options.env.KROMA_SESSION_FILE;
+    assert.notEqual(newSession,path.join(original.artifacts,"session.json"));
+    assert.equal(fs.readFileSync(newSession,"utf8"),"saved-session");
+    h.calls[1].finish({frames:[{type:"result",text:"implementation"}]});
+    assert.equal(JSON.parse((await second).content).results[0].output,"implementation");
+  } finally { fs.rmSync(dir,{recursive:true,force:true}); }
+});
+
+test("unknown task options are rejected before spawning children", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    for (const option of [{model: "expensive-model"}, {background: true},
+      {permissions: "read-only"}, {profile: "reviewer"}]) {
+      await assert.rejects(runBatch(batch([{task: "valid"}, {task: "invalid", ...option}],
+        {workdir: dir}), {spawn: h.spawn, dataDir: dir}), {code: "INVALID_ARGUMENT"});
+      assert.equal(h.calls.length, 0);
+    }
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
+});
+
+test("role and provider profile are resolved before launch and remain child-owned", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    const run = runBatch(batch([{task: "read sources only", profile: "explore"}],
+      {workdir: dir, config: {model: "legacy-model", thinking: "max",
+        explore_provider_profile: "review-fast"}}),
+      {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir});
+    assert.equal(h.calls.length, 1);
+    const env = h.calls[0].options.env;
+    assert.equal(env.KROMA_SUBAGENT_PROFILE, "explore");
+    assert.match(h.calls[0].stdin.text, /Explore role: inspect and report only/);
+    assert.equal(env.KROMA_PROVIDER_PROFILE, "review-fast");
+    assert.equal(env.KROMA_MODEL, undefined,
+      "a named saved provider profile cannot be overridden by the legacy model option");
+    assert.equal(env.KROMA_DEEPSEEK_THINKING, undefined);
+    h.calls[0].finish({frames: [{type: "result", text: "review evidence"}]});
+    const result = await run;
+    assert.equal(result.results[0].profile, "explore");
+    const state = JSON.parse(fs.readFileSync(path.join(result.results[0].artifacts, "state.json")));
+    assert.equal(state.profile, "explore");
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
+});
+
+test("invalid profile names and saved connection settings fail before spawning", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    await assert.rejects(runBatch(batch([{task: "test", profile: "superuser"}],
+      {workdir: dir}), {spawn: h.spawn, dataDir: dir}), {code: "INVALID_ARGUMENT"});
+    await assert.rejects(runBatch(batch([{task: "test"}], {workdir: dir,
+      config: {general_provider_profile: "../outside"}}),
+      {spawn: h.spawn, dataDir: dir}), {code: "CONFIG_ERROR"});
+    assert.equal(h.calls.length, 0);
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
+});
+
 test("the queue caps concurrency and returns results in input order", async () => {
   const dir = workspace();
   const h = harness();
@@ -598,7 +754,8 @@ test("the advertised limits match the manifest", () => {
   assert.ok(manifest.includes("max_output_chars = " + LIMITS.outputChars), manifest);
   assert.ok(manifest.includes("task_timeout_secs = " + LIMITS.taskTimeoutSecs), manifest);
   assert.match(manifest, /properties.tasks.items.properties.resume/);
-  assert.match(manifest, /nesting is refused/);
+  assert.match(manifest, /Nested subagents are unavailable/);
+  assert.match(manifest, /properties.action/);
 });
 
 test("a JSON line that is not an object is a protocol fault, not a crash", async () => {

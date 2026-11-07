@@ -246,13 +246,26 @@ impl Repo {
         let status = if self.cancel.is_none() {
             command.status()?
         } else {
-            let mut command = tokio::process::Command::from(command);
-            command.kill_on_drop(true);
+            // This function is synchronous and is also called directly from
+            // non-Tokio tests and blocking workers. Tokio's process reaper
+            // panics without an active reactor; plain std::process::Child is
+            // the correct fit for Unix's bounded poll-and-kill transaction.
             #[cfg(unix)]
             {
                 use std::os::unix::process::CommandExt;
-                command.as_std_mut().process_group(0);
+                command.process_group(0);
             }
+            #[cfg(windows)]
+            let mut command = tokio::process::Command::from(command);
+            #[cfg(windows)]
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("starting a checkpoint process reactor")?;
+            #[cfg(windows)]
+            let _entered = runtime.enter();
+            #[cfg(windows)]
+            command.kill_on_drop(true);
             #[cfg(windows)]
             let (mut child, _tree) = crate::winsys::ChildTreeGuard::spawn(&mut command)?;
             #[cfg(not(windows))]
@@ -262,13 +275,16 @@ impl Repo {
                     #[cfg(windows)]
                     _tree.terminate();
                     #[cfg(unix)]
-                    if let Some(pid) = child.id() {
+                    {
                         // The child owns a fresh process group, including Git helpers.
                         unsafe {
-                            libc::kill(-(pid as i32), libc::SIGKILL);
+                            libc::kill(-(child.id() as i32), libc::SIGKILL);
                         }
                     }
+                    #[cfg(windows)]
                     let _ = child.start_kill();
+                    #[cfg(not(windows))]
+                    let _ = child.kill();
                     while child.try_wait()?.is_none() {
                         std::thread::sleep(Duration::from_millis(5));
                     }

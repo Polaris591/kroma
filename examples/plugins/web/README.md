@@ -1,4 +1,4 @@
-# Web Search & Fetch 1.6
+# Web Search & Fetch 1.7
 
 Dependency-free process plugin for Node.js 20+. Two tools: `web_search` finds
 sources; `web_fetch` reads them. The agent decides which queries/pages to use.
@@ -39,8 +39,9 @@ queries are sent to the selected provider and may incur API charges.
 Restart Kroma after changing its environment. Other configuration/code
 changes need a restart or `/plugins reload` while the TUI is idle.
 
-- Explicit provider: use only that backend. An optional tool argument `provider`
-  overrides the configured backend for one call.
+- Explicit provider: use only that backend. The model's tool schema does not
+  expose backend overrides. Direct JSONL overrides require the explicit
+  `allow_model_provider_override = true` setting.
 - Default `auto`: follow `search_priority`, skipping providers without credentials.
   Default order: **Parallel → You.com → Exa → Tavily**. An empty configured chain
   returns `CONFIG_ERROR` before any request. Brave, Firecrawl and SearXNG can be
@@ -48,7 +49,9 @@ changes need a restart or `/plugins reload` while the TUI is idle.
 - `mwmbl`, `bing`, `duckduckgo` and `duckduckgo_lite`: keyless engines. They can be
   selected explicitly, and keyless mode walks them in the order documented below.
   Their endpoints have no availability or relevance guarantee.
-- In auto mode only, switch on `NETWORK_ERROR`, `TIMEOUT`, HTTP 429 or 5xx.
+- By default, a failed paid API call ends the search rather than silently
+  charging additional backends. Set `allow_paid_fallback = true` to opt into
+  multi-provider failover on `NETWORK_ERROR`, `TIMEOUT`, HTTP 429 or 5xx.
   Authentication, configuration, bad requests, empty/filtered results, malformed
   responses and redirects stop the chain. Each provider is called at most once,
   sequentially; there is no fan-out or retry of the same provider.
@@ -192,8 +195,10 @@ Downloads stop at 1.5 MB and warn if the source tail is unavailable;
 ### Optional Firecrawl reading
 
 HTTP is the default and does not send page URLs to a third-party extraction API.
-Use `web_fetch({"url":"https://example.com/","provider":"firecrawl"})` for
-remote Markdown extraction, or set `fetch_provider = firecrawl`. This may incur
+Set `kroma plugins set web fetch_provider firecrawl` explicitly, then use
+`web_fetch({"url":"https://example.com/"})` for remote Markdown extraction.
+Legacy per-call JSONL provider selection is blocked unless
+`allow_model_provider_override = true`. This may incur
 charges and may render pages remotely; no local browser is started. No actions,
 login sessions or browser-control tools are exposed. Firecrawl source-page status
 is checked in addition to API status, and its snapshots are separate from HTTP.
