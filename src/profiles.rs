@@ -46,9 +46,8 @@ pub struct ProviderProfile {
     /// endpoint. Never inferred from a same-named model ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_model: Option<String>,
-    /// Opt-in for the endpoint's server-side `web_search` tool on the
-    /// Responses protocol. Off unless a profile enables it; never inferred
-    /// from a model name or host.
+    /// Opt-in for server-side web search on Responses or Anthropic Messages.
+    /// Off unless a profile enables it; never inferred from a model name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_web_search: Option<bool>,
 }
@@ -673,7 +672,7 @@ pub fn cli(args: &[String]) -> Result<()> {
             let thinking_levels = prompt_levels(original.thinking_levels.as_deref())?;
             let catalog_model = prompt_catalog_model(original.catalog_model.as_deref())?;
             let native_web_search = match prompt_value(
-                "Server-side web search for Responses models (on/off)",
+                "Native web search for Responses / Anthropic (on/off)",
                 if original.native_web_search() {
                     "on"
                 } else {
