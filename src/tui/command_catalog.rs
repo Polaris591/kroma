@@ -52,12 +52,6 @@ commands![
         "切换界面语言并保存"
     ),
     (
-        "/layout",
-        "[comfortable|wide]",
-        "Reading width: comfortable or full",
-        "切换舒适阅读或全宽布局"
-    ),
-    (
         "/new",
         "",
         "Welcome page; start a new conversation",
