@@ -1,7 +1,8 @@
 # Subagent plugin design
 
-Status: implemented in `examples/plugins/subagents` (plugin `0.3.0`) with the
-host-side tool deadline in `src/plugins.rs`.
+Status: **historical design reference**. For implemented defaults and current
+behavior use [subagents README](../examples/plugins/subagents/README.md).
+The early fixed-timeout and foreground-only assumptions below are superseded.
 
 ## Goal
 
@@ -90,22 +91,21 @@ host will grant, and a test keeps the manifest and the module in sync.
 
 ## Time and cancellation
 
-The manifest declares `timeout_secs = 600`; the host enforces it for streaming
-and non-streaming tools alike, capped by `KROMA_PLUGIN_TOOL_TIMEOUT_SECS` when
-smaller (`effective_tool_timeout`). The deadline covers queueing, spawning and
-execution, and progress frames never extend it. On expiry the timeout error
-names the tool and the evidence root, and the worker tree is terminated.
+Current implementation: plugin and task execution have **no fixed default
+deadline**. An explicit positive `task_timeout_secs` or
+`KROMA_PLUGIN_TOOL_TIMEOUT_SECS` bounds execution; no timeout is invented for
+unlimited interactive work. An explicit deadline still covers queueing,
+spawning and execution and results in teardown when exceeded.
 
 Inside the batch, a fatal fault terminates managed children politely first: on
 Unix the child Kroma receives `SIGINT` so its own cancellation path runs (that is
 what stops a Shell, which owns a separate process group), and `SIGKILL` follows
 after a bounded grace period. Windows uses `taskkill /T /F`.
 
-Each task is bounded by `task_timeout_secs` (default 300s) so one stuck child
-fails with `CHILD_TIMEOUT` and frees its slot without spoiling the batch. The
-batch also cuts off remaining stragglers just before the host deadline so
-completed results are returned in a `partial` response instead of being lost
-to a host worker kill. A killed task keeps a bounded tail of the text it had
+An explicitly configured task timeout can fail a stuck child with
+`CHILD_TIMEOUT` and free its slot without spoiling the batch. When a host
+deadline is configured, the batch reserves cleanup time before it. A killed
+task keeps a bounded tail of the text it had
 streamed as `output` with `partial: true`, so the work is not lost with the
 process. Nothing is retried automatically; resuming a finished child is an
 explicit later call with its `resume` token. Side effects that already happened

@@ -187,8 +187,10 @@ snapshot until expiry. `find` cannot be combined with `start_char`.
 `render_fallback` defaults to `off`: static HTTP and main-text extraction remain
 the cheapest path. Owners may set `kroma plugins set web render_fallback firecrawl`
 to enable remote rendering only after static extraction identifies an unreadable
-JavaScript page or bot challenge. The model cannot enable paid rendering itself;
-ordinary network errors do not trigger it. The separate `fetch_provider=firecrawl`
+JavaScript page, bot challenge, or a blocked HTTP 403/429 response. The model
+cannot enable paid rendering itself; ordinary network errors do not trigger it.
+The original HTTP attempt and optional fallback share the configured timeout.
+The separate `fetch_provider=firecrawl`
 setting deliberately skips static extraction.
 
 ```json

@@ -137,31 +137,38 @@ async fn run_legacy(options: kroma::cli::RunOptions) -> Result<()> {
         }
         let mut agent = runtime.agent;
         let prompt = kroma::convenience::file_reference(&prompt, agent.workdir())?;
-        if json_mode {
-            let result = drive_task(&mut agent, &prompt, None, &mut |_| {}).await;
-            match result {
-                Ok(Some(answer)) => {
-                    output.line(&serde_json::json!({"type":"result","text":answer}).to_string())?;
-                }
-                Ok(None) => bail!("task cancelled"),
-                Err(error) => {
-                    output.line(
-                        &serde_json::json!({"type":"error","message":format!("{error:#}")})
-                            .to_string(),
-                    )?;
-                    if output.broken() {
-                        return Ok(());
+        let task_result: Result<()> = async {
+            if json_mode {
+                let result = drive_task(&mut agent, &prompt, None, &mut |_| {}).await;
+                match result {
+                    Ok(Some(answer)) => {
+                        output.line(
+                            &serde_json::json!({"type":"result","text":answer}).to_string(),
+                        )?;
                     }
-                    bail!("task failed");
+                    Ok(None) => bail!("task cancelled"),
+                    Err(error) => {
+                        output.line(
+                            &serde_json::json!({"type":"error","message":format!("{error:#}")})
+                                .to_string(),
+                        )?;
+                        if output.broken() {
+                            return Ok(());
+                        }
+                        bail!("task failed");
+                    }
                 }
+                if output.broken() {
+                    return Ok(());
+                }
+            } else if !run_task(&mut agent, &prompt, None, Some(&output)).await? {
+                bail!("task cancelled");
             }
-            if output.broken() {
-                return Ok(());
-            }
-        } else if !run_task(&mut agent, &prompt, None, Some(&output)).await? {
-            bail!("task cancelled");
+            Ok(())
         }
-        return Ok(());
+        .await;
+        agent.flush_task_notifications().await;
+        return task_result;
     }
     if !force_cli
         && options.prompt.is_empty()
@@ -196,7 +203,9 @@ async fn run_legacy(options: kroma::cli::RunOptions) -> Result<()> {
     let line_output = kroma::output::CliOutput::new();
 
     if !options.prompt.is_empty() {
-        if !run_task(&mut agent, &task, None, Some(&line_output)).await? {
+        let result = run_task(&mut agent, &task, None, Some(&line_output)).await;
+        agent.flush_task_notifications().await;
+        if !result? {
             bail!("task cancelled");
         }
         return Ok(());
@@ -356,6 +365,7 @@ async fn run_legacy(options: kroma::cli::RunOptions) -> Result<()> {
             }
         }
     }
+    agent.flush_task_notifications().await;
     Ok(())
 }
 

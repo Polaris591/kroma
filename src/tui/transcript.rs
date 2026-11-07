@@ -254,6 +254,7 @@ impl UiState {
         lines.extend(card.lines);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn append_reasoning(
         &self,
         entry: &Entry,

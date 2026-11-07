@@ -11,7 +11,8 @@ Delegate only when the side work would flood this conversation with search resul
 [settings]
 max_parallel = 3
 max_output_chars = 12000
-task_timeout_secs = 300
+# Zero disables the child deadline. Long-running work is cancelled explicitly.
+task_timeout_secs = 0
 # Model for every child process, exactly as the endpoint names it. Empty or
 # removed means "inherit the parent conversation's model and profile".
 # Change it with `kroma plugins set subagents model <id>`.
@@ -23,7 +24,7 @@ thinking = ""
 name = "subagent"
 description = "Delegate independent tasks to separate Kroma agents. Each task runs in its own session with the given working directory. Results return in input order with status, answer, usage, tool-call count and an evidence directory; each started task also carries a resume token. Tasks do not inherit this conversation; provide context, scope and acceptance criteria. A completed status means only that the child exited cleanly with a final answer — verify the work. Each task is at most 16 KiB, so point at files instead of pasting them. Parallel edits need non-overlapping files or separate working directories."
 streaming = true
-timeout_secs = 600
+# No implicit host deadline; KROMA_PLUGIN_TOOL_TIMEOUT_SECS can still cap it.
 
 [tools.parameters]
 type = "object"

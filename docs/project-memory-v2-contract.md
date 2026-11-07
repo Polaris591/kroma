@@ -91,7 +91,10 @@ allowed; the plugin must be idempotent.
 ## Plugin write semantics
 
 - `memory_remember(kind, text, quote?, paths?, evidence?, supersedes?)`
-  - `preference` / `decision`: require `quote` 8..500 chars. Store as `pending`, not searchable.
+  - `preference` / `decision`: require `quote` 8..500 chars. Host-verified
+    current-user quotes become active immediately (up to five distinct rules
+    per user turn). Legacy hosts without trusted turn context store `pending`
+    entries, not searchable until later promotion.
   - `review`: require >=1 path and >=1 evidence reference. Store active with a 30-day expiry;
     always labeled unverified in output.
   - Secret scan, size limits, path validation; no raw tool output.

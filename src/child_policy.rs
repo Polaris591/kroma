@@ -47,8 +47,7 @@ impl ChildPolicy {
         if policy.profile.trim().is_empty()
             || policy.prompt.trim().is_empty()
             || policy.prompt.len() > 32 * 1024
-            || !(1..=100).contains(&policy.max_turns)
-            || policy.max_tokens > 1_000_000
+            || policy.max_turns > 1_000_000_000
             || !matches!(policy.shell.as_str(), "allow" | "deny")
         {
             bail!("invalid subagent profile, prompt or budget");

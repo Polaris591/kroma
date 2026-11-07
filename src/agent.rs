@@ -12,7 +12,7 @@ use crate::{
     model::ModelBackend,
     model_catalog::ModelReport,
     prompt::PromptComposer,
-    protocol::Message,
+    protocol::{Message, ToolCall},
     provider::{Completion, ModelClient},
     session::{recover_pending_calls_with, InterruptedCall, SessionStore},
     sessions::SessionCatalog,
@@ -79,6 +79,7 @@ pub struct Agent {
     checkpoints: bool,
     checkpoint_turn: u64,
     execution_limits: Option<ExecutionLimits>,
+    pending_task_notifications: Vec<tokio::task::JoinHandle<()>>,
 }
 
 /// The tool call Kroma dispatched but has not yet recorded a result for.
@@ -361,6 +362,7 @@ impl Agent {
             checkpoints: false,
             checkpoint_turn: 0,
             execution_limits: None,
+            pending_task_notifications: Vec::new(),
         };
         agent.sync_session_context();
         if new_session && !defer_initial_save {
@@ -1128,7 +1130,7 @@ impl Agent {
         result
     }
 
-    fn notify_task_plugins(&self, status: &str) {
+    fn notify_task_plugins(&mut self, status: &str) {
         if !self.model.has_task_finished_hook() {
             return;
         }
@@ -1153,14 +1155,85 @@ impl Agent {
             .collect();
         users.reverse();
         let status = status.to_owned();
-        handle.spawn(async move {
-            if let Err(error) = model
-                .task_finished(&session_id, &archive, &users, &status)
-                .await
-            {
-                crate::runtime_log!("[plugin] task lifecycle notification skipped: {error:#}");
+        // Reap completed notifications as later tasks finish. Long-lived TUI
+        // sessions should not retain a handle for every historical turn.
+        self.pending_task_notifications
+            .retain(|task| !task.is_finished());
+        self.pending_task_notifications
+            .push(handle.spawn(async move {
+                if let Err(error) = model
+                    .task_finished(&session_id, &archive, &users, &status)
+                    .await
+                {
+                    crate::runtime_log!("[plugin] task lifecycle notification skipped: {error:#}");
+                }
+            }));
+    }
+
+    /// Called by short-lived CLI hosts before the runtime is destroyed.
+    /// Foreground turns stay non-blocking; only process exit gives pending
+    /// post-WAL lifecycle hooks a bounded chance to commit their state.
+    pub async fn flush_task_notifications(&mut self) {
+        let pending = std::mem::take(&mut self.pending_task_notifications);
+        if pending.is_empty() {
+            return;
+        }
+        let drain = async {
+            for task in pending {
+                if let Err(error) = task.await {
+                    crate::runtime_log!("[plugin] task lifecycle notification failed: {error}");
+                }
             }
-        });
+        };
+        if tokio::time::timeout(Duration::from_secs(10), drain)
+            .await
+            .is_err()
+        {
+            crate::runtime_log!(
+                "[plugin] pending task lifecycle notification did not finish before CLI shutdown"
+            );
+        }
+    }
+
+    /// Keep all tool-result slots in the durable transcript, even when a
+    /// batch must be reconsidered after discovering new project instructions.
+    /// None of the deferred tool calls is dispatched or charged as executed.
+    fn defer_tool_for_instructions(&mut self, call: &ToolCall) -> Result<()> {
+        let result = serde_json::json!({
+            "status": "not_executed",
+            "reason": "New nested AGENTS.md instructions were discovered. Review the updated instructions and issue a fresh tool call. This call did not run."
+        })
+        .to_string();
+        self.messages
+            .push(Message::tool_with_status(call.id.clone(), result, true));
+        self.session
+            .append(&self.messages, &self.compression.state())?;
+        if let Some(events) = &self.events {
+            events.on_event(RuntimeEvent::ToolFinished {
+                name: &call.function.name,
+                id: &call.id,
+                is_error: true,
+                result: self
+                    .messages
+                    .last()
+                    .and_then(|m| m.content.as_deref())
+                    .unwrap_or(""),
+            });
+        }
+        Ok(())
+    }
+
+    fn refresh_instruction_projection(&mut self, tool_schema_bytes: usize, extra: &mut usize) {
+        let mut projected_system = vec![self.messages[0].clone()];
+        self.prompt.apply(&mut projected_system);
+        self.compression
+            .set_prompt_context(projected_system.first());
+        if !self.compression.composes_prompt_context() {
+            *extra = self
+                .prompt
+                .extra_estimated_tokens(&self.messages[0])
+                .saturating_add(bytes_to_tokens(tool_schema_bytes));
+        }
     }
 
     async fn snapshot_before_first_tool(&mut self, stats: &mut TaskStats) {
@@ -1250,7 +1323,8 @@ impl Agent {
         } else {
             self.prompt.extra_estimated_tokens(&self.messages[0])
         };
-        let base_extra_tokens = prompt_tokens.saturating_add(bytes_to_tokens(tool_schema_bytes));
+        let mut base_extra_tokens =
+            prompt_tokens.saturating_add(bytes_to_tokens(tool_schema_bytes));
 
         let mut overflow_retries = 0;
         let mut truncation_retries = 0;
@@ -1266,7 +1340,7 @@ impl Agent {
                 self.append_pending_steering()?;
             }
             if let Some(limits) = self.execution_limits {
-                if stats.calls >= limits.max_turns {
+                if limits.max_turns > 0 && stats.calls >= limits.max_turns {
                     bail!(
                         "EXECUTION_TURN_LIMIT: completed {} model requests; child session can be resumed",
                         stats.calls
@@ -1650,6 +1724,33 @@ impl Agent {
                 return Ok(text.unwrap_or_default());
             }
 
+            // Preflight the entire batch before running any tool. Updating a
+            // prompt *after* an edit is too late: if a call exposes a new
+            // nested AGENTS.md, the model must replan with that instruction
+            // before we allow the original command to have side effects.
+            let mut new_instructions = false;
+            for call in &calls {
+                // Shell JSON contains syntax around the command; inspect the
+                // decoded command instead of only its JSON-escaped envelope.
+                let decoded =
+                    serde_json::from_str::<serde_json::Value>(&call.function.arguments).ok();
+                let instruction_text = decoded
+                    .as_ref()
+                    .and_then(|v| v.get("command"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(&call.function.arguments);
+                new_instructions |= self
+                    .prompt
+                    .include_discovered_paths(&self.workdir, instruction_text)?;
+            }
+            if new_instructions {
+                self.refresh_instruction_projection(tool_schema_bytes, &mut base_extra_tokens);
+                for call in &calls {
+                    self.defer_tool_for_instructions(call)?;
+                }
+                continue;
+            }
+
             // Multiple tool calls share one model response (fewer model
             // round-trips), but run strictly in the returned order. Each
             // result retains its own tool_call_id and is saved before the
@@ -1660,7 +1761,15 @@ impl Agent {
                     self.snapshot_before_first_tool(stats).await;
                 }
             }
+            let mut defer_remaining = false;
             for call in calls {
+                // A preceding read may have discovered nested instructions
+                // not present when this batch was generated. Never run later
+                // edits from that stale batch.
+                if defer_remaining {
+                    self.defer_tool_for_instructions(&call)?;
+                    continue;
+                }
                 if let Some(events) = &self.events {
                     events.on_event(RuntimeEvent::ToolStarted {
                         name: &call.function.name,
@@ -1696,6 +1805,24 @@ impl Agent {
                 let current_user = self.messages.iter().rev().find(|m| m.role == "user");
                 let current_user_text = current_user.and_then(|m| m.content.as_deref());
                 let current_user_turn = self.messages.iter().filter(|m| m.role == "user").count();
+                let (user_images, previous_user_images) =
+                    if self.tools.requires_user_attachments(&call.function.name) {
+                        let mut image_turns = self.messages.iter().rev().filter(|message| {
+                            message.role == "user"
+                                && !message
+                                    .provider_items
+                                    .as_deref()
+                                    .unwrap_or(&[])
+                                    .iter()
+                                    .any(|part| part["type"] == "kroma_steering")
+                        });
+                        (
+                            image_turns.next().and_then(|m| m.provider_items.as_deref()),
+                            image_turns.next().and_then(|m| m.provider_items.as_deref()),
+                        )
+                    } else {
+                        (None, None)
+                    };
                 if let Some(model) = &mut active_model {
                     model.provider_profile = self
                         .catalog
@@ -1712,6 +1839,8 @@ impl Agent {
                             model_connection: active_model.as_ref(),
                             user_message: current_user_text,
                             user_turn: Some(current_user_turn),
+                            user_images,
+                            previous_user_images,
                             workdir: &self.workdir,
                             archive: self.session.archive_path(),
                             on_output: self
@@ -1721,6 +1850,28 @@ impl Agent {
                         },
                     )
                     .await;
+                // A tool can discover a nested component absent from the
+                // original task. Apply its AGENTS.md to the *next* model
+                // request without rewriting the durable transcript.
+                let instructions_changed =
+                    [call.function.arguments.as_str(), result.content.as_str()]
+                        .into_iter()
+                        .filter_map(|text| {
+                            match self.prompt.include_discovered_paths(&self.workdir, text) {
+                                Ok(changed) => Some(changed),
+                                Err(error) => {
+                                    crate::runtime_log!(
+                                        "[instructions] tool path discovery skipped: {error:#}"
+                                    );
+                                    None
+                                }
+                            }
+                        })
+                        .fold(false, |changed, found| changed | found);
+                if instructions_changed {
+                    self.refresh_instruction_projection(tool_schema_bytes, &mut base_extra_tokens);
+                    defer_remaining = true;
+                }
                 // Any tool that declares ephemeral context mutation refreshes
                 // model-side packs. No plugin name is hardcoded into the core.
                 if !result.is_error && self.tools.invalidates_model_context(&call.function.name) {

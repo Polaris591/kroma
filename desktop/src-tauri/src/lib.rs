@@ -293,6 +293,7 @@ fn merge_profile_input(old: ProviderProfile, profile: ProfileInput) -> ProviderP
         // them across saves, including the explicit catalog alias.
         thinking_levels: old.thinking_levels,
         catalog_model: old.catalog_model,
+        native_web_search: old.native_web_search,
     }
 }
 

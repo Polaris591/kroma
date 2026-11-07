@@ -50,6 +50,18 @@ test("Brave uses header token and structured web results",async()=>{
   const result=JSON.parse(await search("test",{provider:"brave",brave_api_key:"test-key"}));
   assert.equal(result.results[0].title,"Brave");
 });
+
+test("default auto priority includes the configured Brave key", async () => {
+  const manifest = require("node:fs").readFileSync(require("node:path").join(__dirname, "plugin.toml"), "utf8");
+  const priority = JSON.parse(manifest.match(/^search_priority\s*=\s*(\[[^\n]+\])/m)[1]);
+  assert.ok(priority.includes("brave"));
+  global.fetch=async url=>{
+    assert.match(String(url), /api.search.brave.com/);
+    return mock(JSON.stringify({web:{results:[{title:"Brave default",url:"https://example.org",description:"ok"}]}}),"application/json");
+  };
+  const result = JSON.parse(await search("docs", {provider:"auto",search_priority:priority,brave_api_key:"brave-only"}));
+  assert.equal(result.provider,"brave");
+});
 test("SearXNG uses JSON search API",async()=>{
   global.fetch=async url=>{
     assert.match(String(url),/format=json/);
@@ -97,6 +109,22 @@ test("static-first render retries only an unreadable page and only with owner op
   }));
   assert.equal(page.provider,"firecrawl");
   assert.match(page.text,/Useful content/);
+  assert.deepEqual(calls,["example.org","example.org","api.firecrawl.dev"]);
+});
+test("explicit Firecrawl fallback handles blocked HTTP responses without retrying transport errors", async () => {
+  const calls=[];
+  global.fetch=async url=>{
+    calls.push(new URL(url).hostname);
+    if (new URL(url).hostname === "api.firecrawl.dev") {
+      return mock(JSON.stringify({success:true,data:{markdown:"# Unblocked",metadata:{title:"Unblocked"}}}),"application/json");
+    }
+    return new Response("Forbidden",{status:403,headers:{"content-type":"text/html"}});
+  };
+  const url="https://example.org/http-403-fallback";
+  await assert.rejects(fetchPage(url,{render_fallback:"off"}),{status:403});
+  const result=JSON.parse(await fetchPage(url,{render_fallback:"firecrawl",firecrawl_api_key:"test-key"}));
+  assert.equal(result.provider,"firecrawl");
+  assert.match(result.text,/Unblocked/);
   assert.deepEqual(calls,["example.org","example.org","api.firecrawl.dev"]);
 });
 test("rejects unsupported URL and missing key",async()=>{

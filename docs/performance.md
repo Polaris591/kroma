@@ -53,10 +53,12 @@ end-to-end task speedup claim.
 
 ## Decisions deliberately deferred
 
-The data does not by itself justify delaying snapshots until the first tool,
-changing compression retries/thresholds, disabling title generation or executing
-tools concurrently. Keep those policies unless a separate representative,
-correctness-preserving experiment supports a change.
+Snapshots are currently delayed until the first tool call (but not until the
+first write). This avoids snapshots for text-only answers, not for read-only
+tool tasks. The data does not by itself justify delaying them further,
+changing compression retries/thresholds, disabling title generation or
+executing tools concurrently. Keep those policies unless a separate
+representative, correctness-preserving experiment supports a change.
 
 For a real task, `KROMA_PROFILE=1` records phase timing including `snapshot_ms` and
 request/tool counts. Profiling JSON byte counts adds serialization work, so leave

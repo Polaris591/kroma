@@ -538,11 +538,12 @@ test("progress is best-effort and never changes the outcome", async () => {
   }
 });
 
-test("limits stay small and documented", () => {
+test("task duration and model budgets are unlimited by default", () => {
   assert.equal(LIMITS.tasks, 8);
   assert.equal(LIMITS.maxParallel, 3);
   assert.equal(LIMITS.outputChars, 12000);
-  assert.equal(LIMITS.taskTimeoutSecs, 300);
+  assert.equal(LIMITS.taskTimeoutSecs, 0);
+  assert.equal(LIMITS.timeoutSecs, 0);
   assert.equal(LIMITS.frameBytes, 2 * 1024 * 1024);
   // The child CLI inlines piped stdin only up to 16 KiB.
   assert.equal(LIMITS.taskBytes, 16 * 1024);
@@ -771,7 +772,7 @@ test("progress shows per-task state, elapsed, the limit and rolling tokens", asy
     assert.equal(response.status, "completed");
     const beat = seen.find(line => line.startsWith("1▶"));
     assert.ok(beat, JSON.stringify(seen));
-    assert.ok(beat.endsWith("s/600s · in 0 / out 0"), beat);
+    assert.ok(beat.endsWith("s · in 0 / out 0"), beat);
     const done = seen.filter(line => line.startsWith("✓ [1/1] ")).at(-1);
     assert.ok(done.includes("s · in 5.2k / out 300"), done);
     assert.ok(done.endsWith('· "ok"'), done);
@@ -786,7 +787,7 @@ test("progress shows per-task state, elapsed, the limit and rolling tokens", asy
 
 test("the advertised limits match the manifest", () => {
   const manifest = fs.readFileSync(path.join(__dirname, "plugin.toml"), "utf8");
-  assert.ok(manifest.includes("timeout_secs = " + LIMITS.timeoutSecs), manifest);
+  assert.doesNotMatch(manifest, /^timeout_secs\s*=/m);
   assert.ok(manifest.includes("max_parallel = " + LIMITS.maxParallel), manifest);
   assert.ok(manifest.includes("max_output_chars = " + LIMITS.outputChars), manifest);
   assert.ok(manifest.includes("task_timeout_secs = " + LIMITS.taskTimeoutSecs), manifest);
@@ -1150,7 +1151,7 @@ test("a malformed task_timeout_secs is refused before any child starts", async (
   const h = harness();
   try {
     await assert.rejects(
-      runBatch(batch([{task: "a"}], {workdir: dir, config: {task_timeout_secs: 601}}),
+      runBatch(batch([{task: "a"}], {workdir: dir, config: {task_timeout_secs: -1}}),
         {spawn: h.spawn, terminate: child => child.kill(), dataDir: dir}),
       {code: "CONFIG_ERROR", message: /task_timeout_secs must be an integer/},
     );
@@ -1442,6 +1443,45 @@ test("an interrupted run resumes after its host exited", async () => {
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }
+});
+
+test("an interrupted session permits only one concurrent recovery claim", async () => {
+  const dir = workspace();
+  const h = harness();
+  try {
+    const interrupted = path.join(dir, "runs", "orphan", "0");
+    fs.mkdirSync(interrupted, {recursive:true});
+    fs.writeFileSync(path.join(interrupted, "state.json"),
+      JSON.stringify({status:"running",cwd:dir,profile:"general"}));
+    fs.writeFileSync(path.join(interrupted, "session.json"), '{"messages":[]}');
+    const request = () => batch([{task:"recover",resume:"orphan/0"}],{workdir:dir});
+    const first = runBatch(request(),{spawn:h.spawn,terminate:child=>child.kill(),dataDir:dir});
+    assert.equal(h.calls.length,1);
+    assert.ok(fs.existsSync(path.join(interrupted,"resume.lock")));
+    const duplicate = await runBatch(request(),{spawn:h.spawn,terminate:child=>child.kill(),dataDir:dir});
+    assert.equal(duplicate.results[0].error.code,"RESUME_ACTIVE");
+    assert.equal(h.calls.length,1);
+    h.calls[0].finish({frames:[{type:"result",text:"recovered"}]});
+    assert.equal((await first).status,"completed");
+    assert.ok(!fs.existsSync(path.join(interrupted,"resume.lock")));
+  } finally { fs.rmSync(dir,{recursive:true,force:true}); }
+});
+
+test("cancelling an unresponsive child still settles when pipes never close", async () => {
+  const dir = workspace();
+  const h = harness();
+  const opts = {spawn:h.spawn,terminate:()=>{},dataDir:dir,killGraceMs:10};
+  const call = async args => JSON.parse((await dispatch({
+    type:"tool",name:"subagent",workdir:dir,arguments:args
+  },opts)).content);
+  try {
+    const started = await call({action:"run",task:"long operation"});
+    assert.equal(h.calls.length,1);
+    assert.equal((await call({action:"cancel",job_id:started.job_id})).status,"cancelling");
+    const settled = await call({action:"wait",job_id:started.job_id,wait_ms:250});
+    assert.equal(settled.status,"failed");
+    assert.equal(settled.results[0].error.code,"BATCH_ABORTED");
+  } finally { fs.rmSync(dir,{recursive:true,force:true}); }
 });
 
 test("a task this worker is still running refuses a resume", async () => {

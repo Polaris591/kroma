@@ -23,9 +23,11 @@ const LIMITS = Object.freeze({
   evidenceChars: 2000,
   // In-memory tail of streamed assistant text; never written to events.ndjson.
   draftChars: 64 * 1024,
-  taskTimeoutSecs: 300,
-  timeoutSecs: 600,
+  taskTimeoutSecs: 0,
+  timeoutSecs: 0,
 });
+// Node timers require signed 32-bit millisecond delays.
+const MAX_CUSTOM_TIMEOUT_SECS = 2_147_000;
 
 // Time a cancelled child Kroma gets to run its own cancellation path before
 // the plugin escalates to SIGKILL.
@@ -51,6 +53,38 @@ const globalSlots = {active:0,waiting:[]};
 
 function isActiveRun(runId) {
   return activeRuns.has(runId);
+}
+
+function processAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error?.code === "EPERM"; }
+}
+
+// Only interrupted sessions need exclusive recovery. Finished sessions may
+// intentionally be forked repeatedly. Keep the claim through the resumed
+// child's lifetime so a second host cannot resume that same interrupted run.
+function claimInterruptedResume(resume) {
+  if (!resume || resume.status !== "running") return null;
+  const lock = path.join(resume.source, "resume.lock");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = fs.openSync(lock, "wx");
+      try { fs.writeFileSync(fd, JSON.stringify({pid: process.pid})); }
+      finally { fs.closeSync(fd); }
+      return () => { try { fs.unlinkSync(lock); } catch {} };
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      let pid;
+      try { pid = JSON.parse(fs.readFileSync(lock, "utf8")).pid; }
+      catch { throw new SubagentError("RESUME_ACTIVE", "resume claim is unreadable; inspect before retrying"); }
+      if (processAlive(pid)) {
+        throw new SubagentError("RESUME_ACTIVE", "another Kroma host is already resuming this task");
+      }
+      try { fs.unlinkSync(lock); } catch {}
+    }
+  }
+  throw new SubagentError("RESUME_ACTIVE", "task is being resumed; retry later");
 }
 
 function childSlotRelease() {
@@ -251,10 +285,18 @@ function resumeSource(value, dataDir, workdir, isActive) {
   if (!state || typeof state !== "object" || Array.isArray(state)) {
     throw new SubagentError("RESUME_MISSING", `resumed task '${token}' has an invalid state record`);
   }
+  // An unresponsive child can outlive the cancellation grace period even
+  // after its run is marked failed. Never fork that session while its child
+  // PID is still alive; a new host could otherwise race the old process.
+  if (processAlive(state.child_pid)) {
+    throw new SubagentError("RESUME_ACTIVE",
+      `task '${token}' has a child process that has not exited`);
+  }
   if (state.status === "running") {
-    if (isActive(match[1])) {
+    if (isActive(match[1]) ||
+        (state.owner_pid !== process.pid && processAlive(state.owner_pid))) {
       throw new SubagentError("RESUME_ACTIVE",
-        `task '${token}' is still running in this host; inspect its evidence instead of resuming it`);
+        `task '${token}' is still running; inspect its evidence instead of resuming it`);
     }
   } else if (!["completed", "failed", "paused"].includes(state.status)) {
     throw new SubagentError("RESUME_MISSING", `resumed task '${token}' never finished`);
@@ -276,7 +318,7 @@ function resumeSource(value, dataDir, workdir, isActive) {
   if (!info.isFile()) {
     throw new SubagentError("RESUME_MISSING", `resumed task '${token}' has no saved session`);
   }
-  return {token, source: real, session, cwd, profile: state.profile ?? "general"};
+  return {token, source: real, session, cwd, profile: state.profile ?? "general", status: state.status};
 }
 
 // Validate the whole batch before spawning anything: a bad task later in the
@@ -558,8 +600,7 @@ function lastStderrLine(buffer) {
 // administrator cap, so the progress line must not promise the larger one.
 function hostDeadlineSecs() {
   const admin = Number(process.env.KROMA_PLUGIN_TOOL_TIMEOUT_SECS);
-  return Number.isInteger(admin) && admin > 0
-    ? Math.min(admin, LIMITS.timeoutSecs) : LIMITS.timeoutSecs;
+  return Number.isInteger(admin) && admin > 0 ? admin : 0;
 }
 
 function progress(context, text) {
@@ -642,21 +683,24 @@ async function runTask(entry, context) {
   let finished = false;
   let pending = "";
   const decoder = new StringDecoder("utf8");
+  let releaseClaim = null;
   try {
+    releaseClaim = claimInterruptedResume(entry.resume);
     fs.mkdirSync(dir, {recursive: true});
     // Locatable before it starts: a host kill cannot skip this record.
     writeFile(path.join(dir, "state.json"), JSON.stringify({
       index: entry.index, status: "running", session, cwd: entry.cwd,
       profile: entry.profile.name, label: entry.label,
-      resumed_from: entry.resume?.token ?? null,
+      resumed_from: entry.resume?.token ?? null, owner_pid: process.pid,
       started_at: new Date().toISOString(),
     }));
   } catch (error) {
-    const failure = new SubagentError("ARCHIVE_ERROR",
+    releaseClaim?.();
+    const failure = error instanceof SubagentError ? error : new SubagentError("ARCHIVE_ERROR",
       `cannot write evidence: ${error.message}`, true);
-    context.run.abort(failure);
+    if (failure.fatal) context.run.abort(failure);
     return {index: entry.index, status: "failed", exit_code: null,
-      error: {code: "ARCHIVE_ERROR", message: failure.message},
+      error: {code: failure.code, message: failure.message},
       duration_ms: Date.now() - started, tool_calls: 0, usage: usageReport(trace.usage)};
   }
   context.run.status[entry.index] = "running";
@@ -697,6 +741,11 @@ async function runTask(entry, context) {
       context.run.terminate(child);
       armCloseFallback(timedOut);
     };
+    const stopByCancellation = message => {
+      if (finished) return;
+      armCloseFallback({status: "failed", code: "BATCH_ABORTED", exit_code: null, message});
+    };
+    context.run.stops.add(stopByCancellation);
 
     const fault = error => {
       if (trace.fault) return;
@@ -817,8 +866,13 @@ async function runTask(entry, context) {
       return;
     }
     context.run.children.add(child);
+    try {
+      const statePath = path.join(dir, "state.json");
+      const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+      writeFile(statePath, JSON.stringify({...state, child_pid: child.pid ?? null}));
+    } catch {}
 
-    taskTimer = setTimeout(
+    if (context.taskTimeoutMs > 0) taskTimer = setTimeout(
       () => failByTimeout(`child timed out after ${formatTimeout(context.taskTimeoutMs)}`),
       context.taskTimeoutMs,
     );
@@ -881,9 +935,11 @@ async function runTask(entry, context) {
     function finish(outcome) {
       if (finished) return;
       finished = true;
+      releaseClaim?.();
       clearTimeout(taskTimer);
       clearTimeout(closeTimer);
       context.run.timeouts.delete(failByTimeout);
+      context.run.stops.delete(stopByCancellation);
       context.run.children.delete(child);
       const answer = trace.answer ?? "";
       const clipped = clip(answer, context.maxOutput);
@@ -1028,14 +1084,15 @@ async function runBatch(request, options = {}) {
   const killGraceMs = integer(options.killGraceMs, "killGraceMs", 1, 60_000,
     DEFAULT_KILL_GRACE_MS);
   const deadlineSecs = hostDeadlineSecs();
-  const taskTimeoutSecs = integer(config.task_timeout_secs, "task_timeout_secs", 1,
-    LIMITS.timeoutSecs, LIMITS.taskTimeoutSecs);
-  const taskTimeoutMs = integer(options.taskTimeoutMs, "taskTimeoutMs", 1,
-    LIMITS.timeoutSecs * 1000, taskTimeoutSecs * 1000);
+  const taskTimeoutSecs = integer(config.task_timeout_secs, "task_timeout_secs", 0,
+    MAX_CUSTOM_TIMEOUT_SECS, LIMITS.taskTimeoutSecs);
+  const taskTimeoutMs = integer(options.taskTimeoutMs, "taskTimeoutMs", 0,
+    MAX_CUSTOM_TIMEOUT_SECS * 1000, taskTimeoutSecs * 1000);
   const deadlineMs = deadlineSecs * 1000;
   const reserveMs = Math.min(Math.max(killGraceMs + 3000, 5000), Math.floor(deadlineMs / 2));
-  const batchTimeoutMs = integer(options.batchTimeoutMs, "batchTimeoutMs", 1,
-    deadlineMs, Math.max(1, deadlineMs - reserveMs));
+  const batchTimeoutMs = integer(options.batchTimeoutMs, "batchTimeoutMs", 0,
+    MAX_CUSTOM_TIMEOUT_SECS * 1000,
+    deadlineMs ? Math.max(1, deadlineMs - reserveMs) : 0);
   const executable = String(config.kroma_bin || process.env.KROMA_BIN || "kroma");
   const model = optionalModel(config.model) ?? optionalModel(connection?.model);
   const thinking = optionalThinking(config.thinking) ?? optionalThinking(connection?.deepseek_thinking);
@@ -1075,7 +1132,7 @@ async function runBatch(request, options = {}) {
   const terminateChild = options.terminate ?? terminate;
   const run = {aborted: false, timedOut: false, reason: null, children: new Set(),
     waitingSlots: new Set(),
-    timeouts: new Set(), usage: emptyUsage(),
+    timeouts: new Set(), stops: new Set(), usage: emptyUsage(),
     status: entries.map(() => "queued"), live: entries.map(() => null),
     spawn: options.spawn ?? spawn, terminate: child => terminateChild(child, killGraceMs)};
   run.abort = error => {
@@ -1084,6 +1141,7 @@ async function runBatch(request, options = {}) {
     run.reason = error;
     cancelWaitingSlots(run);
     for (const child of run.children) run.terminate(child);
+    for (const stop of [...run.stops]) stop(error.message);
   };
   run.timeout = message => {
     if (run.aborted) return;
@@ -1124,17 +1182,17 @@ async function runBatch(request, options = {}) {
   const beat = () => {
     const elapsed = Math.round((Date.now() - startedAt) / 1000);
     const strip = run.status.map((state, index) => `${index + 1}${STATE[state] ?? "?"}`).join(" ");
-    progress(context, `${strip} · ${elapsed}s/${deadlineSecs}s · ${usageLine(run.usage)}`);
+    progress(context, `${strip} · ${elapsed}s${deadlineSecs ? `/${deadlineSecs}s` : ""} · ${usageLine(run.usage)}`);
     const running = run.live.map((live, index) => ({live, index})).filter(item => item.live);
     for (const {live, index} of running.slice(0, 3)) progress(context, liveRow(index, live));
     if (running.length > 3) progress(context, `+${running.length - 3} running`);
   };
   const heartbeat = options.onProgress ? setInterval(beat, options.heartbeatMs ?? 5000) : null;
   heartbeat?.unref?.();
-  const batchTimer = setTimeout(
+  const batchTimer = batchTimeoutMs > 0 ? setTimeout(
     () => run.timeout(`batch timed out after ${formatTimeout(batchTimeoutMs)}`),
     batchTimeoutMs,
-  );
+  ) : null;
 
   async function worker() {
     while (!run.aborted && next < entries.length) {
@@ -1215,15 +1273,22 @@ async function dispatch(request, options = {}) {
       }
       const job = jobs.get(id);
       if (action === "cancel") {
+        if (job?.status === "cancelling") {
+          return {content: JSON.stringify({job_id:id,status:"cancelling"}),is_error:false};
+        }
         if (!job || job.status !== "running") {
           throw new SubagentError("NOT_RUNNING", "job is not running in this host; cannot cancel a completed or orphaned task");
         }
+        job.status = "cancelling";
         job.run?.abort(new SubagentError("JOB_CANCELLED", "job cancelled by parent", false));
         return {content: JSON.stringify({job_id:id,status:"cancelling"}),is_error:false};
       }
-      if (action === "wait" && job?.status === "running") {
+      if (action === "wait" && (job?.status === "running" || job?.status === "cancelling")) {
         const ms = integer(args.wait_ms,"wait_ms",0,750,500);
-        await Promise.race([job.promise, new Promise(resolve => setTimeout(resolve,ms))]);
+        let timer;
+        try {
+          await Promise.race([job.promise, new Promise(resolve => {timer=setTimeout(resolve,ms);})]);
+        } finally { clearTimeout(timer); }
       }
       if (job) {
         const view = job.response ? {job_id:id,...job.response} :

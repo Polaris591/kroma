@@ -14,7 +14,7 @@ render_fallback = "off"
 timeout_ms = 15000
 fetch_provider = "http"
 paid_fallback = false
-search_priority = ["parallel", "you", "exa", "tavily"]
+search_priority = ["parallel", "brave", "you", "exa", "tavily"]
 search_attempt_timeout_ms = 8000
 
 [[tools]]

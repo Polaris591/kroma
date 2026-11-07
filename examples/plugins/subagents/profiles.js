@@ -76,8 +76,8 @@ function parseProfile(source, file) {
     tools: fields.tools === undefined ? null : parseList(fields.tools, file, "tools"),
     disallowedTools: fields.disallowedTools === undefined ? [] :
       parseList(fields.disallowedTools, file, "disallowedTools"),
-    maxTurns: number("maxTurns", 40, 1, 100),
-    maxTokens: number("maxTokens", 0, 0, 1_000_000), prompt,
+    maxTurns: number("maxTurns", 0, 0, 1_000_000_000),
+    maxTokens: number("maxTokens", 0, 0, Number.MAX_SAFE_INTEGER), prompt,
   };
 }
 

@@ -367,6 +367,8 @@ async function fetchPage(address, config = {}, requestedChars, startChar = 0, fi
   const settings = {...DEFAULTS, ...config};
   const maxChars = bounded(requestedChars ?? settings.max_chars, 12000, 1000, 30000);
   const timeout = bounded(settings.timeout_ms, 15000, 2000, 60000);
+  const deadline = Date.now() + timeout;
+  const remaining = () => Math.max(1, deadline - Date.now());
   if (!Number.isSafeInteger(startChar) || startChar < 0) {
     throw new WebError("INVALID_OFFSET", "start_char must be a nonnegative integer");
   }
@@ -383,42 +385,50 @@ async function fetchPage(address, config = {}, requestedChars, startChar = 0, fi
     throw new WebError("CACHE_MISS", "Continuation snapshot expired or is unavailable; read the same URL from start_char = 0 and use its new next_start.");
   }
   if (!page && provider === "firecrawl") {
-    page = await fetchFirecrawl(url, settings, timeout);
+    page = await fetchFirecrawl(url, settings, remaining());
     cachePage(key, page);
   }
   if (!page) {
     let response;
     try {
-      response = await download(url.href, {timeout, bytes: 1500000,
+      response = await download(url.href, {timeout: remaining(), bytes: 1500000,
       types: ["text/html", "text/plain", "text/markdown", "application/json", "application/xhtml+xml", "application/xml", "text/xml"]});
     } catch (error) {
       const fallback = String(settings.render_fallback ?? "off");
       if (fallback !== "off" && fallback !== "firecrawl") throw new WebError("CONFIG_ERROR", "render_fallback must be off or firecrawl");
-      // Only a readable-page failure is evidence that rendering is useful.
-      // Transport failures should remain errors, never trigger an extra paid call.
-      throw error;
-    }
-    const isHTML = response.contentType.includes("html") || !response.contentType && /^\s*(?:<!doctype html|<html\b|<head\b|<title\b|<main\b|<article\b)/i.test(response.text);
-    const extracted = isHTML ? extractPage(response.text, response.url) : {title: response.url, text: response.text};
-    if (!response.contentType && /^(%PDF-|PK\x03\x04|\x89PNG)/.test(response.text)) {
-      throw new WebError("UNSUPPORTED_CONTENT", "PDF and binary documents are not supported; use an HTML or text URL");
-    }
-    if (!extracted.text.trim() || (isHTML && (/^(just a moment|attention required|access denied|verify you are human)/i.test(extracted.title)
-      || (extracted.text.length < 800 && /enable javascript|checking your browser|verify (?:that )?you are (?:a )?human/i.test(extracted.text))))) {
-      const fallback = String(settings.render_fallback ?? "off");
-      if (!['off', 'firecrawl'].includes(fallback)) throw new WebError("CONFIG_ERROR", "render_fallback must be off or firecrawl");
-      if (fallback === "firecrawl") {
-        // A paid render occurs only after static extraction fails and only
-        // after the owner explicitly chooses it in plugin configuration.
-        page = await fetchFirecrawl(url, settings, timeout);
+      // A blocked source can still be rendered by an explicitly selected
+      // fallback. Network, timeout, auth and unrelated failures must not
+      // silently spend money on a second request.
+      if (fallback === "firecrawl" && error.code === "HTTP_ERROR" &&
+          [403, 429].includes(error.status)) {
+        page = await fetchFirecrawl(url, settings, remaining());
         page.provider = "firecrawl";
+        cachePage(key, page);
       } else {
-        throw new WebError("UNREADABLE_PAGE", "No readable static page content; configure render_fallback=firecrawl to opt in to a paid remote render");
+        throw error;
       }
-    } else {
-      page = {...extracted, title: extracted.title.slice(0, 1000), url: response.url, source_truncated: response.truncated, provider: "http"};
     }
-    cachePage(key, page);
+    if (response) {
+      const isHTML = response.contentType.includes("html") || !response.contentType && /^\s*(?:<!doctype html|<html\b|<head\b|<title\b|<main\b|<article\b)/i.test(response.text);
+      const extracted = isHTML ? extractPage(response.text, response.url) : {title: response.url, text: response.text};
+      if (!response.contentType && /^(%PDF-|PK\x03\x04|\x89PNG)/.test(response.text)) {
+        throw new WebError("UNSUPPORTED_CONTENT", "PDF and binary documents are not supported; use an HTML or text URL");
+      }
+      if (!extracted.text.trim() || (isHTML && (/^(just a moment|attention required|access denied|verify you are human)/i.test(extracted.title)
+        || (extracted.text.length < 800 && /enable javascript|checking your browser|verify (?:that )?you are (?:a )?human/i.test(extracted.text))))) {
+        const fallback = String(settings.render_fallback ?? "off");
+        if (!["off", "firecrawl"].includes(fallback)) throw new WebError("CONFIG_ERROR", "render_fallback must be off or firecrawl");
+        if (fallback === "firecrawl") {
+          page = await fetchFirecrawl(url, settings, remaining());
+          page.provider = "firecrawl";
+        } else {
+          throw new WebError("UNREADABLE_PAGE", "No readable static page content; configure render_fallback=firecrawl to opt in to a paid remote render");
+        }
+      } else {
+        page = {...extracted, title: extracted.title.slice(0, 1000), url: response.url, source_truncated: response.truncated, provider: "http"};
+      }
+      cachePage(key, page);
+    }
   }
   if (startChar > page.text.length) {
     throw new WebError("INVALID_OFFSET", `start_char exceeds document length (${page.text.length}); read from 0`);

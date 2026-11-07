@@ -4,7 +4,11 @@
 //! IMMEDIATE transaction so writers serialise on an early reserved lock.
 
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
@@ -29,11 +33,12 @@ pub(crate) const STATE_DROPPED: &str = "dropped";
 pub(crate) const STATE_EXPIRED: &str = "expired";
 pub(crate) const STATE_ARCHIVED: &str = "archived";
 
-/// A rule quote verified against the current user turn. The turn only enforces
-/// "one durable rule per user message"; it is not evidence for a conflict.
+/// A rule quote verified against the current user turn. The turn bounds how
+/// many distinct durable rules a single message can authorize.
 pub struct VerifiedClaim<'a> {
     pub turn: Option<&'a str>,
 }
+const MAX_RULES_PER_TURN: i64 = 5;
 
 /// A remembered rule stays pending for one week waiting for the user to
 /// restate its quote; a review note is active but expires after 30 days.
@@ -91,6 +96,9 @@ CREATE TABLE IF NOT EXISTS memory_stale (
     root      TEXT NOT NULL,
     PRIMARY KEY (memory_id, root)
 );
+CREATE TABLE IF NOT EXISTS core_memories (
+    memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE
+);
 "#;
 
 const INDEXES: &str = r#"
@@ -112,6 +120,35 @@ pub struct Store {
 }
 
 impl Store {
+    /// Core project-wide rules are a deliberately small, explicitly selected
+    /// subset. The regular memory store stays searchable and intent-scoped.
+    pub fn mark_core(&mut self, id: &str) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let memory = require_memory(&tx, id)?;
+        if memory.state != STATE_ACCEPTED
+            || !matches!(memory.kind.as_str(), "preference" | "decision")
+        {
+            bail!("Only an accepted user preference or decision can be a core rule");
+        }
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM core_memories c JOIN memories m ON m.id=c.memory_id
+             WHERE m.state=?1 AND m.id<>?2",
+            params![STATE_ACCEPTED, id],
+            |row| row.get(0),
+        )?;
+        if count >= 4 {
+            bail!("Core project rules are full (4); forget an obsolete rule first");
+        }
+        tx.execute(
+            "INSERT INTO core_memories(memory_id) VALUES (?1)
+                    ON CONFLICT(memory_id) DO NOTHING",
+            params![id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
     /// Open (or create) the workspace database and bind it to `scope_identity`
     /// and one worktree `root`.
     pub fn open(path: &Path, scope_identity: &str, root: &str) -> Result<Store> {
@@ -438,16 +475,32 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(turn) = verified_turn {
-            let previous: Option<String> = tx
-                .query_row(
-                    "SELECT value FROM metadata WHERE key='last_verified_user_turn'",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if previous.as_deref() == Some(turn) {
-                bail!("Only one durable memory may be accepted per user message");
+        let previous_turn: Option<String> = tx
+            .query_row(
+                "SELECT value FROM metadata WHERE key='last_verified_user_turn'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let current_count = if verified_turn.is_some() && previous_turn.as_deref() == verified_turn
+        {
+            tx.query_row(
+                "SELECT value FROM metadata WHERE key='last_verified_user_turn_count'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(1)
+        } else {
+            0
+        };
+        // Idempotent exact replays do not consume an additional slot.
+        let already_active =
+            load_by_fingerprint(&tx, &fingerprint)?.is_some_and(|old| old.state == STATE_ACCEPTED);
+        if let Some(_turn) = verified_turn {
+            if current_count >= MAX_RULES_PER_TURN && !already_active {
+                bail!("At most five distinct durable memories may be accepted per user message");
             }
         }
         if is_tombstoned(&tx, &fingerprint)? {
@@ -479,8 +532,22 @@ impl Store {
                 if old.state != STATE_ACCEPTED {
                     bail!("Superseded memory is not an active rule");
                 }
+                let was_core: Option<i64> = tx
+                    .query_row(
+                        "SELECT 1 FROM core_memories WHERE memory_id=?1",
+                        params![old_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
                 record_version_tombstones(&tx, &old)?;
                 set_state(&tx, &old, STATE_FORGOTTEN)?;
+                if was_core.is_some() {
+                    tx.execute(
+                        "INSERT INTO core_memories(memory_id) VALUES (?1)
+                         ON CONFLICT(memory_id) DO NOTHING",
+                        params![memory.id],
+                    )?;
+                }
             }
         }
         if let Some(turn) = verified_turn {
@@ -488,6 +555,11 @@ impl Store {
                 "INSERT INTO metadata (key,value) VALUES ('last_verified_user_turn',?1)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 params![turn],
+            )?;
+            tx.execute(
+                "INSERT INTO metadata (key,value) VALUES ('last_verified_user_turn_count',?1)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![(current_count + i64::from(!already_active)).to_string()],
             )?;
         }
         if state == STATE_ACCEPTED {
@@ -497,7 +569,7 @@ impl Store {
         Ok(memory)
     }
 
-    /// Promote at most one pending rule anchored to the current user message
+    /// Promote a bounded set of pending rules anchored to the current user message
     /// (whitespace- and case-normalized); drop the rest. Applies
     /// `supersedes` on promotion. Idempotent: a replayed summary finds no
     /// pending rows and changes nothing.
@@ -525,7 +597,7 @@ impl Store {
                 .source_quote
                 .as_deref()
                 .is_some_and(|quote| quote_matches(quote, recent_users));
-            if !matched || report.promoted > 0 {
+            if !matched || report.promoted >= MAX_RULES_PER_TURN as u64 {
                 set_state(&tx, &memory, STATE_DROPPED)?;
                 report.dropped += 1;
                 continue;
@@ -763,6 +835,7 @@ fn enforce_active_limit(conn: &Connection) -> Result<()> {
     }
     let mut stmt = conn.prepare(
         "SELECT id FROM memories WHERE state=?1
+          AND id NOT IN (SELECT memory_id FROM core_memories)
         ORDER BY CASE WHEN kind='review' THEN 0 ELSE 1 END, updated_at ASC, id ASC
         LIMIT ?2",
     )?;
@@ -789,6 +862,40 @@ enum PathState {
     Unavailable,
 }
 
+// Repeated context hooks should not rehash large, unchanged review files.
+// File identity + change times are checked before reusing a digest. Bound
+// this ephemeral cache so a large repository never grows a permanent index.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    size: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanos: i64,
+}
+
+fn file_stamp(meta: &std::fs::Metadata) -> FileStamp {
+    FileStamp {
+        size: meta.len(),
+        modified: meta.modified().ok(),
+        #[cfg(unix)]
+        device: meta.dev(),
+        #[cfg(unix)]
+        inode: meta.ino(),
+        #[cfg(unix)]
+        changed_seconds: meta.ctime(),
+        #[cfg(unix)]
+        changed_nanos: meta.ctime_nsec(),
+    }
+}
+
+static FILE_HASH_CACHE: OnceLock<Mutex<Vec<(PathBuf, FileStamp, String)>>> = OnceLock::new();
+
 /// Stable per-worktree key stored with a fingerprint.
 fn worktree_key(root: &Path) -> String {
     std::fs::canonicalize(root)
@@ -801,20 +908,30 @@ fn worktree_key(root: &Path) -> String {
 /// 30-day expiry instead: a hint that is only a directory, or a record written
 /// before per-worktree baselines existed, has no content to re-verify.
 fn review_is_stale(conn: &Connection, root: &Path, id: &str) -> Result<bool> {
-    let mut statement =
-        conn.prepare("SELECT relative_path, digest FROM memory_files WHERE memory_id=?1")?;
-    let rows = statement.query_map(params![id], |row| {
+    let root_key = worktree_key(root);
+    let mut statement = conn
+        .prepare("SELECT relative_path, digest FROM memory_files WHERE memory_id=?1 AND root=?2")?;
+    let rows = statement.query_map(params![id, root_key], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
     let mut anchored = false;
     for row in rows {
         let (path, digest) = row?;
         anchored = true;
-        if fingerprint_path(root, &path) == PathState::File(digest) {
-            return Ok(false);
+        if fingerprint_path(root, &path) != PathState::File(digest) {
+            return Ok(true);
         }
     }
-    Ok(anchored)
+    if anchored {
+        return Ok(false);
+    }
+    // A review anchored only in another worktree has no verified baseline here.
+    let other: i64 = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM memory_files WHERE memory_id=?1)",
+        params![id],
+        |row| row.get(0),
+    )?;
+    Ok(other != 0)
 }
 
 /// Hide review evidence from this worktree only; other checkouts keep their own
@@ -851,15 +968,24 @@ fn fingerprint_path(root: &Path, relative: &str) -> PathState {
     if !target.is_file() {
         return PathState::Unavailable;
     }
-    let Ok(file) = std::fs::File::open(target) else {
+    let Ok(file) = std::fs::File::open(&target) else {
         return PathState::Unavailable;
     };
-    if file
-        .metadata()
-        .ok()
-        .is_none_or(|data| data.len() > 16 * 1024 * 1024)
-    {
+    let Ok(meta) = file.metadata() else {
         return PathState::Unavailable;
+    };
+    if meta.len() > 16 * 1024 * 1024 {
+        return PathState::Unavailable;
+    }
+    let stamp = file_stamp(&meta);
+    let cache = FILE_HASH_CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    if let Ok(entries) = cache.lock() {
+        if let Some((_, _, digest)) = entries
+            .iter()
+            .find(|(path, old, _)| path == &target && old == &stamp)
+        {
+            return PathState::File(digest.clone());
+        }
     }
     let mut bytes = Vec::new();
     if file
@@ -875,6 +1001,13 @@ fn fingerprint_path(root: &Path, relative: &str) -> PathState {
     use std::fmt::Write as _;
     for byte in digest {
         let _ = write!(&mut out, "{byte:02x}");
+    }
+    if let Ok(mut entries) = cache.lock() {
+        entries.retain(|(path, _, _)| path != &target);
+        if entries.len() >= 128 {
+            entries.remove(0);
+        }
+        entries.push((target, stamp, out.clone()));
     }
     PathState::File(out)
 }
@@ -1171,6 +1304,20 @@ fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fingerprint_cache_reuses_unchanged_files_but_detects_equal_length_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("mod.rs");
+        std::fs::write(&file, "first").unwrap();
+        let first = fingerprint_path(dir.path(), "mod.rs");
+        assert_eq!(fingerprint_path(dir.path(), "mod.rs"), first);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(&file, "later").unwrap();
+        let later = fingerprint_path(dir.path(), "mod.rs");
+        assert_ne!(later, first);
+        assert_eq!(fingerprint_path(dir.path(), "mod.rs"), later);
+    }
 
     fn input(text: &str, origin: &str) -> NewMemory {
         NewMemory {
@@ -1498,5 +1645,12 @@ mod tests {
         assert!(!from_side.is_stale(&memory.id).unwrap());
         assert_eq!(from_side.search("parser EOF", &[], 5).unwrap().len(), 1);
         assert!(!from_main.is_stale(&memory.id).unwrap());
+
+        // An old digest from the sibling must not make changed evidence
+        // in this worktree appear current again.
+        std::fs::write(main.join("src/lib.rs"), "fn main() { work(); }\n").unwrap();
+        from_main.refresh_file_states(&main).unwrap();
+        assert!(from_main.is_stale(&memory.id).unwrap());
+        assert!(!from_side.is_stale(&memory.id).unwrap());
     }
 }

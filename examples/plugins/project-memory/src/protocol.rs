@@ -592,6 +592,7 @@ fn tool_remember(object: &Map<String, Value>) -> Result<Value, ToolFailure> {
             "kind",
             "text",
             "quote",
+            "core",
             "paths",
             "evidence",
             "evidence_refs",
@@ -621,8 +622,18 @@ fn tool_remember(object: &Map<String, Value>) -> Result<Value, ToolFailure> {
     let paths = optional_paths(arguments)?;
     let evidence = optional_evidence_refs(arguments)?;
     let quote = optional_quote(arguments)?;
+    let core = match arguments.get("core") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) => true,
+        _ => return Err(ToolFailure::invalid("core must be a boolean")),
+    };
     let supersedes = optional_supersedes(arguments)?;
     let is_review = kind == "review";
+    if core && is_review {
+        return Err(ToolFailure::invalid(
+            "Review findings cannot be core project rules",
+        ));
+    }
     if is_review {
         if paths.is_empty() {
             return Err(ToolFailure::invalid(
@@ -713,6 +724,12 @@ fn tool_remember(object: &Map<String, Value>) -> Result<Value, ToolFailure> {
             },
         )
         .map_err(|error| ToolFailure::new("storage_error", store_message(&error)))?;
+    if core {
+        storage
+            .store
+            .mark_core(&memory.id)
+            .map_err(|error| ToolFailure::new("storage_error", store_message(&error)))?;
+    }
     // Only review evidence is anchored to file content. A rule keeps its paths
     // as navigation, so editing the mentioned file cannot make it inert.
     if is_review && !memory.paths.is_empty() {
@@ -861,16 +878,35 @@ fn build_context(object: &Map<String, Value>) -> Result<Value, String> {
     if !settings.use_enabled {
         return Ok(empty);
     }
-    let memories = storage
+    let mut memories = storage
+        .store
+        .core_memories()
+        .map_err(|_| "Core memory lookup failed".to_string())?;
+    let relevant = storage
         .store
         .recall(&intent, MAX_BLOCKS)
         .map_err(|_| "Memory storage failed".to_string())?;
+    for memory in relevant {
+        if memories.len() >= MAX_BLOCKS {
+            break;
+        }
+        if !memories.iter().any(|item| item.id == memory.id) {
+            memories.push(memory);
+        }
+    }
 
     let mut blocks: Vec<Value> = Vec::new();
     let mut tokens = 0usize;
     let mut bytes = 0usize;
     for memory in memories {
-        let text = bounded_text(&memory.text, MAX_BLOCK_TEXT_CHARS);
+        let is_core = storage
+            .store
+            .is_core(&memory.id)
+            .map_err(|_| "Core memory lookup failed".to_string())?;
+        let text = bounded_text(
+            &memory.text,
+            if is_core { 300 } else { MAX_BLOCK_TEXT_CHARS },
+        );
         let cost = text.chars().count() / 4 + 12;
         let size = text.len();
         if tokens.saturating_add(cost) > max_tokens || bytes.saturating_add(size) > max_bytes {
@@ -883,6 +919,7 @@ fn build_context(object: &Map<String, Value>) -> Result<Value, String> {
             "kind": memory.kind,
             "text": text,
             "paths": memory.paths,
+            "core": is_core,
         }));
     }
     if [
@@ -1928,7 +1965,7 @@ mod tests {
     }
 
     #[test]
-    fn trusted_current_user_quote_is_accepted_immediately_and_only_once_per_turn() {
+    fn trusted_current_user_quote_is_accepted_and_idempotent_per_turn() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("project")).unwrap();
         let quote = "This repository will use pnpm for dependencies";
@@ -1941,7 +1978,7 @@ mod tests {
         assert_eq!(accepted["is_error"], false, "{accepted}");
         assert_eq!(reply_content(&accepted)["state"], "accepted");
         let duplicate = handle(first.clone());
-        assert_eq!(duplicate["is_error"], true);
+        assert_eq!(duplicate["is_error"], false);
         let context = handle(storage_request(
             tmp.path(),
             "request_context",
@@ -1957,6 +1994,108 @@ mod tests {
         assert_eq!(handle(first.clone())["is_error"], true);
         first["trusted_user_context"] = json!({"message":quote,"turn":6});
         assert_eq!(handle(first)["is_error"], false);
+    }
+
+    #[test]
+    fn a_single_user_message_can_establish_five_distinct_rules_but_not_six() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("project")).unwrap();
+        let quote = "Always use the existing code style and prioritize dependable regression tests";
+        for index in 0..6 {
+            let mut request = storage_request(
+                tmp.path(),
+                "tool",
+                "memory_remember",
+                json!({"kind":"decision","text":format!("Project guideline number {index}"),
+                    "quote":quote}),
+            );
+            request["archive"] = json!("same-archive");
+            request["trusted_user_context"] = json!({"message":quote,"turn":10});
+            let reply = handle(request);
+            assert_eq!(reply["is_error"], json!(index == 5), "{reply}");
+        }
+    }
+
+    #[test]
+    fn explicit_core_rule_is_recalled_even_when_task_has_no_matching_keywords() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("project")).unwrap();
+        let quote = "Never introduce approval flows anywhere in this project";
+        let mut request = storage_request(
+            tmp.path(),
+            "tool",
+            "memory_remember",
+            json!({"kind":"preference","text":"Do not introduce approval flows into Kroma",
+                "quote":quote,"core":true}),
+        );
+        request["archive"] = json!("core-archive");
+        request["trusted_user_context"] = json!({"message":quote,"turn":8});
+        let reply = handle(request);
+        assert_eq!(reply["is_error"], false, "{reply}");
+        let context = handle(storage_request(
+            tmp.path(),
+            "request_context",
+            "request_context",
+            json!({"intent":"Implement the new model adapter"}),
+        ));
+        assert_eq!(context["is_error"], false, "{context}");
+        let blocks = reply_content(&context)["blocks"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(blocks.iter().any(|block| block["core"] == true
+            && block["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("approval flows")));
+    }
+
+    #[test]
+    fn superseding_a_core_rule_preserves_its_project_wide_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("project")).unwrap();
+        let remember = |quote: &str, text: &str, turn: u64, core: bool, old: Option<&str>| {
+            let mut request = storage_request(
+                tmp.path(),
+                "tool",
+                "memory_remember",
+                json!({"kind":"preference","text":text,"quote":quote,
+                    "core":core,"supersedes":old}),
+            );
+            request["archive"] = json!("core-replacement");
+            request["trusted_user_context"] = json!({"message":quote,"turn":turn});
+            handle(request)
+        };
+        let first = remember(
+            "Always use the previous build tool for this project",
+            "Use the previous build tool",
+            1,
+            true,
+            None,
+        );
+        assert_eq!(first["is_error"], false, "{first}");
+        let first_id = reply_content(&first)["id"].as_str().unwrap().to_owned();
+        let second = remember(
+            "From now on always use cargo to build this project",
+            "Use cargo for project builds",
+            2,
+            false,
+            Some(&first_id),
+        );
+        assert_eq!(second["is_error"], false, "{second}");
+        let response = handle(storage_request(
+            tmp.path(),
+            "request_context",
+            "request_context",
+            json!({"intent":"Update the readme badges"}),
+        ));
+        let blocks = reply_content(&response)["blocks"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["core"], true);
+        assert!(blocks[0]["text"].as_str().unwrap().contains("cargo"));
     }
 
     #[test]
@@ -2418,7 +2557,7 @@ mod tests {
     }
 
     #[test]
-    fn only_current_user_quote_can_promote_one_pending_rule() {
+    fn only_current_user_quote_can_promote_bounded_pending_rules() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join("project")).unwrap();
         let earlier = "以后这个项目始终使用旧版 yarn 包管理器";
@@ -2463,7 +2602,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            1
+            2
         );
         let old_hits = handle(storage_request(
             temp.path(),

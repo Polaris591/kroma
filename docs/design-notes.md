@@ -143,11 +143,10 @@ Failed/cancelled external context work preserves WAL history, while
 context-overflow errors can request a single recovery retry and report usage.
 Event subscribers have separate bounded queues.
 
-Project plugins under `.kroma/plugins` stay disabled until `kroma plugins enable <id>`
-binds an approval to the manifest and to every tracked code file by content, so
-editing a script — including a non-JavaScript entry such as a Python file —
-requires approval again. A listing shows the requested state, the actual state
-and the reason a requested plugin did not load.
+Project plugins under `.kroma/plugins` stay disabled until explicitly enabled
+with `kroma plugins enable <id>`. Later source edits take effect at idle reload
+without a renewed approval step. Bounded code scans determine worker reuse;
+incomplete scans produce diagnostics, not a new approval queue.
 
 The host deliberately does not expose raw terminal widgets, unrestricted
 process sandboxing, or an alternate Agent Loop. Official subagents, tournament
@@ -155,9 +154,12 @@ judging and memory implementations are separate optional-plugin work, not part
 of the V1 host acceptance. Windows verification and cross-platform CI scope
 are tracked in [plugin acceptance](../PLUGIN_ROADMAP.md).
 
-Global/project `AGENTS.md` are loaded as before. When the task explicitly
-references a nested project file, the applicable ancestor `AGENTS.md` files
-are also loaded, without scanning and injecting unrelated directories.
+Global/project `AGENTS.md` are loaded as before. Nested ancestor files are
+loaded when a task references a project path or a tool reveals one. If a model
+tool batch newly exposes applicable instructions before execution, that batch
+is deferred and returned as not executed so the model can replan. This is
+best-effort path discovery, not a shell-command parser; indirect targets still
+require the agent to inspect their instructions deliberately.
 
 ### Plain visual design
 

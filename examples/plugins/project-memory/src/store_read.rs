@@ -70,6 +70,39 @@ END;
 "#;
 
 impl Store {
+    pub fn is_core(&self, id: &str) -> Result<bool> {
+        let present: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM core_memories WHERE memory_id=?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(present.is_some())
+    }
+    /// Only explicit, user-anchored core rules bypass task-keyword matching.
+    /// Review notes and general memories never enter this always-on pack.
+    pub fn core_memories(&self) -> Result<Vec<Memory>> {
+        if !read_settings(&self.conn)?.use_enabled {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id FROM memories m JOIN core_memories c ON m.id=c.memory_id
+             WHERE m.state=?1 AND (m.expires_at IS NULL OR m.expires_at>?2)
+             ORDER BY m.created_at ASC LIMIT 4",
+        )?;
+        let ids = stmt
+            .query_map(params![STATE_ACCEPTED, now_ts()], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut result = Vec::new();
+        for id in ids {
+            if let Some(memory) = load_memory(&self.conn, &id)? {
+                result.push(memory);
+            }
+        }
+        Ok(result)
+    }
     /// Admin lookup: accepted and pending candidates are visible, tombstones
     /// are not. This is the only read that may return a candidate body.
     pub fn get(&self, id: &str) -> Result<Memory> {

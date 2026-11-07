@@ -21,12 +21,16 @@ goal is an autonomous agent that stays inspectable and recoverable.
 
 ## Automatic file snapshots
 
-Before each task, Kroma creates a snapshot in a private bare Git repository under
+Before the first tool call of a task, Kroma attempts a snapshot in a private bare Git repository under
 `~/.kroma/checkpoints/<project-key>.git`. It uses its own `GIT_DIR`, work tree and
 index, so it never reads or writes the project's `.git`, HEAD, index, hooks or
 remotes. Common build/cache directories (`target`, `node_modules`, `dist`, `build`,
 `.next`, `.venv`, `vendor`, `.kroma`) are excluded, as are paths ignored by the
 project's `.gitignore`.
+
+Tasks answered without tools do not create a snapshot. Even a read-only tool
+causes an initial snapshot, so it can add latency; a snapshot is not a claim
+that remote or excluded side effects can be rolled back.
 
 Snapshots are available only inside a real Git worktree. Outside Git, the feature is
 a silent no-op and `/checkpoints` explains that. The snapshot contains file contents,

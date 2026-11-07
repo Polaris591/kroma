@@ -434,3 +434,75 @@ async fn cancellation_is_durable_before_task_finished_and_drops_steering() -> Re
     fs::remove_dir_all(dir)?;
     Ok(())
 }
+
+struct DelayedTaskFinished(AtomicUsize);
+
+impl ModelBackend for DelayedTaskFinished {
+    fn has_task_finished_hook(&self) -> bool {
+        true
+    }
+
+    fn complete<'a>(
+        &'a self,
+        _: &'a [Message],
+        _: &'a [Value],
+        _: &'a mut (dyn FnMut(&str) + Send),
+    ) -> StreamFuture<'a, Completion> {
+        Box::pin(async {
+            Ok(Completion {
+                message: Message::new("assistant", "ok"),
+                usage: None,
+                elapsed: Duration::ZERO,
+                first_token: None,
+            })
+        })
+    }
+
+    fn generate_text<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: usize,
+    ) -> ModelFuture<'a, TextResult> {
+        Box::pin(async { anyhow::bail!("not used") })
+    }
+
+    fn task_finished<'a>(
+        &'a self,
+        _: &'a str,
+        archive: &'a Path,
+        _: &'a [Message],
+        status: &'a str,
+    ) -> ModelFuture<'a, ()> {
+        Box::pin(async move {
+            // The WAL boundary must exist before the plugin gets called.
+            assert!(wal(archive).contains("ok"));
+            assert_eq!(status, "completed");
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn short_lived_host_can_flush_post_wal_notifications_before_shutdown() -> Result<()> {
+    let dir = isolated_dir("flush-notifications")?;
+    let model = Arc::new(DelayedTaskFinished(AtomicUsize::new(0)));
+    let mut agent = Agent::with_backends(model.clone(), ToolRegistry::builtin(), dir.clone())?;
+    assert_eq!(agent.run("run once", &mut |_| {}).await?, "ok");
+    assert_eq!(
+        model.0.load(Ordering::SeqCst),
+        0,
+        "foreground completion should not synchronously wait for plugin maintenance"
+    );
+    agent.flush_task_notifications().await;
+    assert_eq!(
+        model.0.load(Ordering::SeqCst),
+        1,
+        "one-shot CLI shutdown must not discard a pending task_finished hook"
+    );
+    drop(agent);
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
