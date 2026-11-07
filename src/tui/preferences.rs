@@ -35,7 +35,6 @@ impl Language {
 #[serde(default, deny_unknown_fields)]
 pub(super) struct Preferences {
     pub language: Language,
-    pub full_width: bool,
 }
 
 impl Preferences {
@@ -55,6 +54,7 @@ impl Preferences {
                         toml::from_str(&text).context("invalid ui.toml")?;
                     if let Some(table) = value.as_table_mut() {
                         table.remove("display");
+                        table.remove("full_width");
                     }
                     value.try_into().context("invalid ui.toml")
                 }
@@ -100,7 +100,6 @@ mod tests {
         assert_eq!(Preferences::load_at(Some(&path))?, Preferences::default());
         let prefs = Preferences {
             language: Language::Zh,
-            full_width: true,
         };
         prefs.save_at(Some(&path))?;
         assert_eq!(Preferences::load_at(Some(&path))?, prefs);
@@ -108,12 +107,6 @@ mod tests {
         assert!(Preferences::load_at(Some(&path)).is_err());
         assert!(toml::from_str::<Preferences>("typo = true").is_err());
         assert!(Language::parse("fr").is_err());
-        let old: Preferences = toml::from_str(
-            "language = 'zh'
-full_width = true",
-        )
-        .unwrap();
-        assert!(old.full_width);
         fs::write(
             &path,
             "language = 'zh'\ndisplay = 'simple'\nfull_width = true",
@@ -121,6 +114,7 @@ full_width = true",
         assert_eq!(Preferences::load_at(Some(&path))?, prefs);
         Preferences::load_at(Some(&path))?.save_at(Some(&path))?;
         assert!(!fs::read_to_string(&path)?.contains("display"));
+        assert!(!fs::read_to_string(&path)?.contains("full_width"));
         fs::remove_dir_all(root)?;
         Ok(())
     }
