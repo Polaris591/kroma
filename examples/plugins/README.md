@@ -280,8 +280,9 @@ The basic fields:
   labels without changing execution. `[ui.colors]` supplies optional `#RRGGBB`
   overrides for `accent`, `text`, `muted`, `background`, `border`, `user`, `tool`
   and `code`; the active user theme remains the base. `[ui.layout]` optionally
-  sets `header_rows = 1..4`, `composer_max_rows = 3..14`, and
-  `full_width_prose = true/false`. The host still owns Ratatui, scroll,
+  sets `composer_max_rows = 3..14`. Legacy `header_rows` and
+  `full_width_prose` values are ignored because the default Plain layout
+  determines header and reading width itself. The host still owns Ratatui, scroll,
   terminal input and history geometry. Conflicting animation/layout slots,
   overlapping color keys and tool labels are rejected during idle reload.
   A dynamic panel asks the plugin process for its
