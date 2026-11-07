@@ -776,7 +776,7 @@ impl CompletionStream {
                 stream.apply_with_reasoning(data, on_text, on_reasoning, on_activity)
             }
             Self::Anthropic(stream) => {
-                stream.apply_with_reasoning(data, on_text, on_reasoning, on_activity)
+                stream.apply_with_activity(data, on_text, on_reasoning, on_activity)
             }
         }
     }
