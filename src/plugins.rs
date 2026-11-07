@@ -3291,9 +3291,8 @@ mod tests {
             "id='old'\nname='Old'\n[ui.layout]\nheader_rows=3\nfull_width_prose=true\ncomposer_max_rows=6\n",
         )?;
         assert_eq!(old.ui.unwrap().layout.unwrap().composer_max_rows, Some(6));
-        let old_state: PluginState = toml::from_str(
-            "[project_fingerprints]\n'old-project'='prior-approval'\n",
-        )?;
+        let old_state: PluginState =
+            toml::from_str("[project_fingerprints]\n'old-project'='prior-approval'\n")?;
         assert!(!toml::to_string(&old_state)?.contains("project_fingerprints"));
         Ok(())
     }
