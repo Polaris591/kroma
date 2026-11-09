@@ -1,5 +1,7 @@
 <script lang="ts">
   import type { PluginSummary } from '../lib/api';
+  import { api } from '../lib/api';
+  import { pluginColors, pluginPanels, slotColor } from '../lib/plugin-ui';
   import { Puzzle, Plus, RotateCw, Trash2, SlidersHorizontal, ChevronRight } from '@lucide/svelte';
   export let plugins: PluginSummary[];
   export let onAction: (action: string, id?: string, path?: string, key?: string, value?: unknown) => Promise<void>;
@@ -28,6 +30,25 @@
   function secretIsSet(key: string) {
     return current?.set_secrets?.includes(key) ?? false;
   }
+  // A panel body is produced by the plugin itself (`title\n\nbody`), so the
+  // interface never guesses what a plugin wants to show.
+  let panel: {title: string; body: string} | null = null;
+  $: panels = current ? $pluginPanels.filter(entry => entry.id === current!.id) : [];
+  // A declared theme paints the plugin's own surface, not the whole window.
+  $: panelColors = [
+    slotColor("background", $pluginColors) && ("background:" + slotColor("background", $pluginColors)),
+    slotColor("text", $pluginColors) && ("color:" + slotColor("text", $pluginColors)),
+    slotColor("border", $pluginColors) && ("border-color:" + slotColor("border", $pluginColors)),
+  ].filter(Boolean).join(";");
+  async function openPanel(id: string) {
+    try {
+      const content = await api.pluginPanel(id);
+      const [title, ...rest] = content.split('\n\n');
+      panel = {title: title.trim() || current?.name || '插件面板', body: rest.join('\n\n') || title};
+    } catch (failure) {
+      panel = {title: current?.name || '插件面板', body: String(failure)};
+    }
+  }
 </script>
 
 <section class="plugins-page">
@@ -49,7 +70,7 @@
             <div class="plugin-summary">
               <strong>{plugin.name}</strong><span>{plugin.description || plugin.id}</span>
             </div>
-            <span class:enabled={plugin.enabled} class="plugin-dot"></span>
+            <span class="plugin-state" class:enabled={plugin.enabled}>{plugin.enabled ? '已启用' : '未启用'}</span>
             <ChevronRight size={14}/>
           </button>
         {/each}
@@ -93,6 +114,16 @@
           {:else}
             <p class="muted">此插件没有声明设置字段。</p>
           {/if}
+          {#if panels.length}
+            <div class="plugin-config-head"><Puzzle size={15}/> 插件面板</div>
+            <div class="panel-buttons">
+              {#each panels as entry (entry.id)}
+                <button class="secondary small" onclick={() => void openPanel(entry.id)}>
+                  {entry.title || entry.id}
+                </button>
+              {/each}
+            </div>
+          {/if}
           {#if current.has_model || current.has_context}
             <p class="subtle-note">修改模型或上下文插件后需要重新连接模型才能生效。</p>
           {/if}
@@ -104,6 +135,18 @@
         {:else}
           <div class="empty-inspector"><SlidersHorizontal size={25}/><p>选择插件以查看状态和设置</p></div>
         {/if}
+      </div>
+    </div>
+  {/if}
+  {#if panel}
+    <div class="panel-overlay">
+      <button class="panel-scrim" aria-label="关闭面板" onclick={() => panel = null}></button>
+      <div class="panel-card" role="dialog" aria-modal="true" aria-label={panel.title} style={panelColors}>
+        <div class="panel-head">
+          <h3>{panel.title}</h3>
+          <button class="icon-button" aria-label="关闭面板" onclick={() => panel = null}>×</button>
+        </div>
+        <pre class="panel-body">{panel.body}</pre>
       </div>
     </div>
   {/if}

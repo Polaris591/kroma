@@ -1,4 +1,6 @@
+import type { GoalState } from './goal';
 import { invoke, Channel } from '@tauri-apps/api/core';
+import type { SteerOutcome } from './steering';
 
 export interface Message {
   role: string;
@@ -14,11 +16,18 @@ export interface Usage {
 export interface SessionUsage {
   coding: Usage; title: Usage; apec: Usage; context_input: number | null; context_estimated: boolean;
 }
+export interface ContextSegment { key: string; tokens: number }
+export interface ContextReport {
+  window: number; available_input: number; output_reserve: number; segments: ContextSegment[];
+}
 export interface SessionSnapshot {
+  control?: GoalState | null;
   session_id: string; messages: Message[]; usage: SessionUsage;
   total_messages?: number; history_truncated?: boolean;
   next_before?: number | null;
   context_window: number; available_input: number; tool_names: string[];
+  context?: ContextReport | null;
+  skills?: Array<{name: string; description?: string}> | null;
 }
 export interface PluginSummary {
   id: string; name: string; version: string; description: string;
@@ -28,20 +37,58 @@ export interface PluginSummary {
   set_secrets?: string[];
   has_model: boolean; has_context: boolean; has_ui: boolean;
 }
+export interface PluginPresentation {
+  tool_labels: Record<string, string>;
+  activity_frames: string[];
+  statuses: string[];
+  shortcuts: {key: string; command: string}[];
+  panels: {id: string; title: string; dynamic: boolean}[];
+  /// Slot colours a plugin declared, as `#rgb`/`#rrggbb`.
+  colors: Record<string, string>;
+  /// Height cap a plugin asked for its composer, in rows.
+  composer_max_rows: number | null;
+}
 export interface ProfileSummary {
   name: string; base_url: string; model: string; has_key: boolean;
   protocol: string; reasoning: string; deepseek_thinking: string;
   context_window: number | null; max_output_tokens: number | null;
   native_web_search: boolean;
+  thinking_levels?: string[] | null;
 }
 export interface Profiles {
   active: string | null; profiles: ProfileSummary[];
 }
-export interface SessionEntry { id: string; name: string | null; recent: boolean; }
+export interface WorkspaceChange {
+  path: string;
+  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'conflict' | 'untracked';
+  staged: boolean;
+  untracked: boolean;
+}
+export interface WorkspaceReview {
+  is_repo: boolean;
+  root: string | null;
+  entries: WorkspaceChange[];
+  truncated: boolean;
+  message: string | null;
+}
+export interface WorkspaceFileDiff {
+  path: string;
+  diff: string;
+  truncated: boolean;
+  message: string | null;
+}
+export interface SessionEntry { id: string; name: string | null; recent: boolean; updated_at?: number | null; }
+export interface SessionGroup { project: string; is_default: boolean; sessions: SessionEntry[]; }
+export interface SessionSearchHit {project: string; id: string; snippet: string;}
 export interface McpProjectStatus { configured: boolean; trusted: boolean; }
 export interface Bootstrap {
-  project: string; ready: boolean; running: boolean;
+  project: string; recent_projects?: string[]; default_project?: string | null;
+  user_home?: string | null;
+  session_groups?: SessionGroup[]; ready: boolean; running: boolean;
   connected_model: string | null;
+  connected_profile?: string | null;
+  reasoning_level?: string | null;
+  thinking_levels?: string[] | null;
   snapshot: SessionSnapshot | null; sessions: SessionEntry[];
   profiles: Profiles; plugins: PluginSummary[]; plugin_warnings: string[];
   mcp_project: McpProjectStatus;
@@ -53,7 +100,7 @@ export interface DesktopEvent {
 }
 export type StreamEnvelope =
   | {kind: 'batch'; events: DesktopEvent[]}
-  | {kind: 'snapshot'; snapshot: SessionSnapshot}
+  | {kind: 'snapshot'; snapshot: SessionSnapshot; sessions?: SessionEntry[]; session_groups?: SessionGroup[]}
   | {kind: 'done'; result: {status: string; error?: string}};
 
 export type ProfileInput = {
@@ -63,25 +110,54 @@ export type ProfileInput = {
   max_output_tokens?: number | null; native_web_search?: boolean;
 };
 
+export interface CheckpointTurn { turn: number; anchor: number | null }
+export interface TurnDiffSummary { turn: number; added: number; removed: number; files: number; truncated: boolean }
+export interface CheckpointTurns { turns: CheckpointTurn[]; diffs: TurnDiffSummary[] }
+export interface FileDiff { diff: string; truncated: boolean }
+
 export const api = {
   bootstrap: () => invoke<Bootstrap>('bootstrap'),
+  searchSessions: (query: string) => invoke<{hits: SessionSearchHit[]}>('search_sessions', {query}),
+  checkpointTurns: () => invoke<CheckpointTurns>('checkpoint_turns'),
+  storageReport: () => invoke<Array<{project: string; sessions: number; empty: number; bytes: number; empty_ids: string[]}>>('storage_report'),
+  savePastedImage: (bytes: number[], extension: string) => invoke<string>('save_pasted_image', {bytes, extension}),
+  projectFiles: (query: string) => invoke<string[]>('project_files', {query}),
+  compactContext: (instructions: string) =>
+    invoke<{compacted: boolean; before: number; after: number; view: Bootstrap}>('compact_context', {instructions}),
+  rewindTurn: (messageIndex: number, snapshotTurn: number | null, restoreFiles: boolean) =>
+    invoke<{saved: string; view: Bootstrap}>('rewind_turn', {messageIndex, snapshotTurn, restoreFiles}),
+  forkTurn: (messageIndex: number) =>
+    invoke<{session_id: string; view: Bootstrap}>('fork_turn', {messageIndex}),
+  turnFiles: (turn: number) => invoke<Array<{path: string; status: string; added: number; removed: number}>>('turn_files', {turn}),
+  turnFileDiff: (turn: number, path: string) => invoke<FileDiff>('turn_file_diff', {turn, path}),
+  workspaceChanges: () => invoke<WorkspaceReview>('workspace_changes'),
+  workspaceFileDiff: (path: string) => invoke<WorkspaceFileDiff>('workspace_file_diff', {path}),
   openProject: (path: string) => invoke<Bootstrap>('open_project', {path}),
   connect: (profile?: string) => invoke<Bootstrap>('connect', {profile: profile || null}),
+  setReasoning: (level: string) => invoke<Bootstrap>('set_reasoning', {level}),
   saveProfile: (profile: ProfileInput) => invoke<Profiles>('save_profile', {profile}),
+  setDefaultProfile: (name: string) => invoke<Profiles>('set_default_profile', {name}),
   historyPage: (before: number, limit = 200) => invoke<SessionSnapshot>("history_page", {before, limit}),
-  switchSession: (id: string) => invoke<Bootstrap>('switch_session', {id}),
+  switchSession: (id: string) => invoke<{snapshot: SessionSnapshot; title?: string | null; connected_model: string | null; reasoning_level: string | null; thinking_levels: string[] | null}>('switch_session', {id}),
   newSession: () => invoke<Bootstrap>('new_session'),
-  renameSession: (title: string) => invoke<Bootstrap>('rename_session', {title}),
+  deleteSession: (project: string, id: string) => invoke<Bootstrap>('delete_session', {project, id}),
+  restoreDeletedSession: (project: string, id: string, title: string) => invoke<Bootstrap>('restore_deleted_session', {project, id, title}),
+  renameSession: (id: string, title: string) => invoke<Bootstrap>('rename_session', {id, title}),
+  exportSession: (id: string, path: string) => invoke<void>('export_session', {id, path}),
   cancel: () => invoke<void>('cancel_task'),
-  steer: (text: string) => invoke<void>('steer_task', {text}),
+  // The host reports what the text actually did (steer/status/pause/cancel).
+  steer: (text: string) => invoke<SteerOutcome>('steer_task', {text}),
   trustProjectMcp: () => invoke<{path: string; trusted: boolean}>('trust_project_mcp'),
   pluginAction: (action: string, id?: string, path?: string, key?: string, value?: unknown) =>
     invoke<{message: string; warning?: string; restart_required: boolean; plugins: PluginSummary[]}>(
       'plugin_action', {action, id: id || null, path: path || null, key: key || null, value: value ?? null}),
+  // Plugin-declared presentation. Nothing here names a specific plugin.
+  pluginPresentation: () => invoke<PluginPresentation>('plugin_presentation'),
+  pluginPanel: (id: string) => invoke<string>('plugin_panel', {id}),
   send: async (text: string, paths: string[], onEvent: (event: StreamEnvelope) => void) => {
     const channel = new Channel<StreamEnvelope>();
     channel.onmessage = onEvent;
-    return invoke<{result: {status: string; error?: string}; snapshot: SessionSnapshot}>(
+    return invoke<{result: {status: string; error?: string; text?: string}; snapshot: SessionSnapshot; sessions?: SessionEntry[]; session_groups?: SessionGroup[]}>(
       'send_message', {text, paths, channel});
   }
 };

@@ -58,7 +58,9 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: desktop/package-lock.json
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
       - run: npm ci --no-audit --no-fund
         working-directory: desktop
       - run: npm run build
@@ -67,13 +69,14 @@ jobs:
         run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --all-targets
       - name: Native desktop unit tests
         run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib
-      - name: Build Windows desktop preview
+      - name: Build unsigned Windows installer
         if: matrix.os == 'windows-latest'
-        run: cargo build --manifest-path desktop/src-tauri/Cargo.toml --release --features tauri/custom-protocol
-      - name: Upload Windows preview
+        working-directory: desktop
+        run: npm run tauri -- build --ci --no-sign --bundles nsis --config src-tauri/tauri.bundle.conf.json
+      - name: Upload Windows installer
         if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: kroma-desktop-windows-preview
-          path: desktop/src-tauri/target/release/kroma-desktop.exe
+          name: kroma-desktop-windows-installer
+          path: desktop/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
