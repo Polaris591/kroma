@@ -927,6 +927,11 @@ async fn execute_internal(
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
         .kill_on_drop(true);
+    // A parent agent's session is not the session of arbitrary child
+    // commands. Inheriting it breaks nested Kroma tests and can cause
+    // unrelated child processes to reopen the active session archive.
+    // A user who intentionally needs this variable can set it in the command.
+    cmd.env_remove("KROMA_SESSION_FILE");
 
     #[cfg(unix)]
     {
