@@ -541,23 +541,15 @@ fn is_read_only(error: &anyhow::Error) -> bool {
     )
 }
 
-thread_local! {
-    /// Paths whose private permissions this process already applied. Squeezing
-    /// an ACL or a mode again on every recall was pure syscall overhead.
-    static SECURED: std::cell::RefCell<std::collections::BTreeSet<PathBuf>> =
-        std::cell::RefCell::new(std::collections::BTreeSet::new());
-}
-
+/// Apply private permissions every time. Another process, an archive extraction
+/// or a restore can widen a mode behind this process, so a per-process "already
+/// done" cache would trust a mode that is no longer set.
 fn secure(path: &Path, directory: bool) -> Result<()> {
-    if SECURED.with(|done| done.borrow().contains(path)) {
-        return Ok(());
-    }
     if directory {
         restrict_directory(path)?;
     } else {
         restrict_file(path)?;
     }
-    SECURED.with(|done| done.borrow_mut().insert(path.to_path_buf()));
     Ok(())
 }
 

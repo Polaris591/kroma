@@ -121,7 +121,7 @@ thread_local! {
     /// repaired. The worker serves one request at a time, so a plain per-process
     /// set is enough and keeps the open path cheap.
     static INITIALIZED: std::cell::RefCell<std::collections::BTreeSet<(String, String)>> =
-        std::cell::RefCell::new(std::collections::BTreeSet::new());
+        const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
 }
 
 impl Store {
