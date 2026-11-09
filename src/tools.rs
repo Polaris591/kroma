@@ -107,6 +107,16 @@ pub trait Tool: Send + Sync {
     fn waits_for_user(&self) -> bool {
         false
     }
+    /// Assume an external tool can edit project files unless it explicitly
+    /// declares itself read-only. This also covers MCP and plugin tools.
+    fn may_mutate_worktree(&self) -> bool {
+        true
+    }
+    /// Tools with a complete call deadline should not be cancelled earlier by
+    /// the Agent's generic no-output watchdog.
+    fn manages_timeout(&self) -> bool {
+        false
+    }
     fn execute<'a>(&'a self, call: &'a ToolCall, ctx: ToolContext<'a>) -> ToolFuture<'a>;
 }
 
@@ -235,6 +245,21 @@ impl ToolRegistry {
             .any(|tool| tool.name() == name && tool.waits_for_user())
     }
 
+    pub(crate) fn may_mutate_worktree(&self, name: &str) -> bool {
+        // Even a read-only tool can be preceded by a side-effectful hook.
+        !self.interceptors.is_empty()
+            || self
+                .tools
+                .iter()
+                .any(|tool| tool.name() == name && tool.may_mutate_worktree())
+    }
+
+    pub(crate) fn manages_timeout(&self, name: &str) -> bool {
+        self.tools
+            .iter()
+            .any(|tool| tool.name() == name && tool.manages_timeout())
+    }
+
     pub fn is_builtin_only(&self) -> bool {
         self.tools.len() == 1
             && self.tools[0].name() == "shell"
@@ -321,6 +346,27 @@ impl ToolRegistry {
                 };
             }
         }
+        // The Agent checks a model-declared edit_file path for nested
+        // AGENTS.md before executing a batch. A before hook may rewrite
+        // other arguments, but changing the path afterward would bypass that
+        // check. Reject only this explicit path change, not general Shell
+        // command rewrites, which cannot be safely parsed as file paths.
+        if effective.function.name == "edit_file" {
+            let path_of = |arguments: &str| {
+                serde_json::from_str::<Value>(arguments)
+                    .ok()
+                    .and_then(|json| json.get("path").and_then(Value::as_str).map(str::to_owned))
+            };
+            if path_of(&call.function.arguments) != path_of(&effective.function.arguments) {
+                return ToolExecution {
+                    result: ToolResult::error(
+                        "before_tool_call changed edit_file path after project instruction preflight; ask the model to replan with the new file path",
+                    ),
+                    warnings: Vec::new(),
+                    raw: RawExecution::default(),
+                };
+            }
+        }
         let mut result = match self
             .tools
             .iter()
@@ -387,17 +433,18 @@ pub(crate) struct ToolExecution {
 /// The built-in shell reports its own decoded command and exit status in its
 /// structured envelope. Unknown or absent values stay `None`, never 0.
 /// A tool that produced nothing for a whole idle window is indistinguishable
-/// from a stuck one. Stop waiting and hand the model a failure it can act on;
-/// the child process is killed when the dropped future releases it.
+/// from a stuck one. Dropping its future stops waiting, but only some tools
+/// (notably the shell) can guarantee process cancellation; side effects remain.
 pub(crate) fn idle_timeout(
     name: &str,
     limit: std::time::Duration,
     arguments: &str,
 ) -> ToolExecution {
     let content = format!(
-        "[no output] tool '{name}' produced no output for {}s and was stopped. \
-The command may be waiting for interactive input, looping forever, or a test may never finish. \
-Inspect the command and the test before retrying; set KROMA_TOOL_IDLE_SECS=0 to disable this guard.",
+        "[no output] tool '{name}' produced no output for {}s; Kroma stopped waiting for the result. \
+The operation may have partially completed, or a remote/plugin task may still be running. \
+Its outcome is unknown: inspect the state before retrying. \
+Set KROMA_TOOL_IDLE_SECS=0 to disable this guard.",
         limit.as_secs()
     );
     let result = ToolResult::error(content);
@@ -605,6 +652,10 @@ impl Tool for AskTool {
         true
     }
 
+    fn may_mutate_worktree(&self) -> bool {
+        false
+    }
+
     fn execute<'a>(&'a self, call: &'a ToolCall, ctx: ToolContext<'a>) -> ToolFuture<'a> {
         Box::pin(async move {
             let request = match parse_ask(&call.function.arguments) {
@@ -691,6 +742,7 @@ mod tests {
     use crate::provider::FunctionCall;
 
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     struct NoopHook;
     impl ToolInterceptor for NoopHook {}
@@ -785,6 +837,58 @@ mod tests {
             on_output: None,
             ask: None,
         }
+    }
+
+    #[test]
+    fn checkpoint_policy_covers_mutating_tools_and_hooks_only() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(crate::history_tools::HistorySearch))
+            .unwrap();
+        registry
+            .register(Arc::new(crate::file_edit::FileEdit))
+            .unwrap();
+        registry
+            .register(Arc::new(AskTool::new("ask", "Ask a question")))
+            .unwrap();
+        assert!(!registry.may_mutate_worktree("history_search"));
+        assert!(!registry.may_mutate_worktree("ask"));
+        assert!(registry.may_mutate_worktree("edit_file"));
+        assert!(!registry.may_mutate_worktree("unknown"));
+        registry.register_interceptor(Arc::new(LegacyHook));
+        assert!(registry.may_mutate_worktree("history_search"));
+    }
+
+    #[test]
+    fn idle_timeout_never_claims_remote_operation_stopped() {
+        let outcome = idle_timeout("plugin_tool", Duration::from_secs(1), "{}");
+        assert!(outcome.result.is_error);
+        assert!(outcome.result.content.contains("outcome is unknown"));
+        assert!(!outcome.result.content.contains("was stopped"));
+    }
+
+    #[tokio::test]
+    async fn edit_file_hook_cannot_bypass_nested_instruction_preflight() {
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(TestTool {
+                name: "edit_file",
+                result: ToolResult::ok("edited"),
+                executions: executions.clone(),
+            }))
+            .unwrap();
+        registry.register_interceptor(Arc::new(RewriteBefore(
+            r#"{"path":"src/deep/file.rs","old_text":"old","new_text":"new"}"#,
+        )));
+        let call = test_call(
+            "edit_file",
+            r#"{"path":"src/other/file.rs","old_text":"old","new_text":"new"}"#,
+        );
+        let result = registry.execute(&call, test_context()).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("project instruction preflight"));
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
     }
 
     struct TestTool {

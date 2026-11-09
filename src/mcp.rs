@@ -642,6 +642,40 @@ fn archive_mcp_media(value: &mut Value, archive: &Path) -> Result<()> {
     Ok(())
 }
 
+/// An MCP result has already come back from the remote server. Failure to
+/// archive a returned image must not turn a completed side effect into a
+/// failed execution (which could cause an unsafe retry).
+fn mcp_tool_result(mut value: Value, archive: &Path) -> ToolResult {
+    let remote_error = value
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if let Err(error) = archive_mcp_media(&mut value, archive) {
+        let warning = format!(
+            "Kroma could not archive an MCP image: {error:#}. The remote tool outcome is unchanged; inspect side effects before retrying."
+        );
+        crate::runtime_log!("[mcp] {warning}");
+        // Never return raw image/base64 data to the model after a failed
+        // archive, including when earlier images were saved successfully.
+        if let Some(items) = value.get_mut("content").and_then(Value::as_array_mut) {
+            for item in items.iter_mut() {
+                if item["type"] == "image" {
+                    *item =
+                        json!({"type":"text","text":"[MCP image omitted: local archive failed]"});
+                }
+            }
+            items.push(json!({"type":"text","text":warning}));
+        } else if let Some(object) = value.as_object_mut() {
+            object.insert("_kroma_warning".into(), json!(warning));
+        }
+    }
+    if remote_error {
+        ToolResult::error(value.to_string())
+    } else {
+        ToolResult::ok(value.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerConfig {
@@ -1061,7 +1095,8 @@ impl Connection {
         let response = match timeout {
             Some(timeout) => {
                 match tokio::time::timeout(timeout, self.send(message, Some(id))).await {
-                    Ok(result) => result?
+                    Ok(result) => result
+                        .with_context(|| mcp_transport_error_context(method))?
                         .with_context(|| format!("MCP {method} did not return a response"))?,
                     Err(_) => {
                         if stdio {
@@ -1070,13 +1105,20 @@ impl Connection {
                                 timeout.as_secs()
                             ));
                         }
+                        if method == "tools/call" {
+                            bail!(
+                                "MCP tools/call timed out after {}s; execution outcome is unknown: inspect state before retrying",
+                                timeout.as_secs()
+                            );
+                        }
                         bail!("MCP {method} timed out after {}s", timeout.as_secs());
                     }
                 }
             }
             None => self
                 .send(message, Some(id))
-                .await?
+                .await
+                .with_context(|| mcp_transport_error_context(method))?
                 .with_context(|| format!("MCP {method} did not return a response"))?,
         };
         if let Some(error) = response.get("error") {
@@ -1232,6 +1274,14 @@ fn mcp_call_timeout() -> Option<Duration> {
             }
         },
         Err(_) => Some(MCP_CALL_TIMEOUT),
+    }
+}
+
+fn mcp_transport_error_context(method: &str) -> &'static str {
+    if method == "tools/call" {
+        "MCP tool response unavailable: execution outcome is unknown; inspect state before retrying"
+    } else {
+        "MCP request transport failed"
     }
 }
 
@@ -1430,6 +1480,10 @@ impl Tool for McpTool {
     fn name(&self) -> &str {
         &self.local_name
     }
+
+    fn manages_timeout(&self) -> bool {
+        true
+    }
     fn definition(&self) -> Value {
         json!({"type":"function","function":{
             "name":self.local_name,
@@ -1480,20 +1534,7 @@ impl Tool for McpTool {
             }
             .await;
             match outcome {
-                Ok(mut value) => {
-                    if let Err(error) = archive_mcp_media(&mut value, ctx.archive) {
-                        return ToolResult::error(json!({"error": error.to_string()}).to_string());
-                    }
-                    let is_error = value
-                        .get("isError")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    if is_error {
-                        ToolResult::error(value.to_string())
-                    } else {
-                        ToolResult::ok(value.to_string())
-                    }
-                }
+                Ok(value) => mcp_tool_result(value, ctx.archive),
                 Err(error) => ToolResult::error(json!({"error":error.to_string()}).to_string()),
             }
         })
@@ -1672,6 +1713,52 @@ mod tests {
         assert_eq!(fs::read(image)?, b"hello");
         fs::remove_file(image)?;
         fs::remove_dir(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn media_postprocessing_failure_does_not_invert_remote_outcome() -> Result<()> {
+        let value = json!({
+            "content": [
+                {"type":"text","text":"side effect completed"},
+                {"type":"image","mimeType":"image/png","data":"!invalid-base64!"}
+            ],
+            "isError": false
+        });
+        let outcome = mcp_tool_result(value.clone(), Path::new("session.json"));
+        assert!(!outcome.is_error);
+        let payload: Value = serde_json::from_str(&outcome.content)?;
+        assert_eq!(payload["content"][0]["text"], "side effect completed");
+        assert!(payload["content"][1].get("data").is_none());
+        assert!(payload["content"][2]["text"]
+            .as_str()
+            .unwrap()
+            .contains("outcome is unchanged"));
+        assert!(!outcome.content.contains("!invalid-base64!"));
+
+        let mut remote_failure = value;
+        remote_failure["isError"] = json!(true);
+        assert!(mcp_tool_result(remote_failure, Path::new("session.json")).is_error);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn timed_out_tool_rpc_reports_unknown_outcome() -> Result<()> {
+        let dir = scratch("call-timeout");
+        let mut connection = with_test_timeout(connect_mock(&dir, MockMode::Timeout)).await?;
+        let error = with_test_timeout(connection.rpc_with_timeout(
+            "tools/call",
+            json!({"name":"slow","arguments":{}}),
+            Some(Duration::from_millis(150)),
+        ))
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("outcome is unknown"),
+            "{error:#}"
+        );
+        drop(connection);
+        let _ = fs::remove_dir_all(dir);
         Ok(())
     }
 
@@ -2665,6 +2752,10 @@ impl Tool for McpSearch {
         "mcp_search"
     }
 
+    fn may_mutate_worktree(&self) -> bool {
+        false
+    }
+
     fn definition(&self) -> Value {
         json!({"type":"function","function":{
             "name":"mcp_search",
@@ -2809,6 +2900,10 @@ impl Tool for McpCall {
         "mcp_call"
     }
 
+    fn manages_timeout(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> Value {
         json!({"type":"function","function":{
             "name":"mcp_call",
@@ -2878,20 +2973,7 @@ impl Tool for McpCall {
             }
             .await;
             match outcome {
-                Ok(mut value) => {
-                    if let Err(error) = archive_mcp_media(&mut value, ctx.archive) {
-                        return ToolResult::error(json!({"error":error.to_string()}).to_string());
-                    }
-                    let is_error = value
-                        .get("isError")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    if is_error {
-                        ToolResult::error(value.to_string())
-                    } else {
-                        ToolResult::ok(value.to_string())
-                    }
-                }
+                Ok(value) => mcp_tool_result(value, ctx.archive),
                 Err(error) => {
                     self.manager.forget(server).await;
                     ToolResult::error(json!({"error":format!("{error:#}")}).to_string())

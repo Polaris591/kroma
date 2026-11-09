@@ -3,6 +3,58 @@ use crate::{events::RuntimeEvent, tui::runtime_events::UiSink};
 use ratatui::{backend::TestBackend, Terminal};
 
 #[test]
+fn plain_animation_uses_builtin_frames_with_a_single_plugin_frame() {
+    let mut ui = UiState::new_default(
+        "mock".into(),
+        "session".into(),
+        ThemeStore::load_at(None).unwrap(),
+        &[],
+    );
+    ui.set_plugin_presentation(vec!["ONE".into()], BTreeMap::new(), None, BTreeMap::new());
+    ui.event(UiEvent::TaskStarted);
+    ui.last_activity_frame = Instant::now() - Duration::from_millis(600);
+    assert!(ui.tick_activity());
+    assert_eq!(
+        ui.activity_frame, 1,
+        "Plain must not freeze on one plugin frame"
+    );
+    ui.last_activity_frame = Instant::now() - Duration::from_millis(600);
+    assert!(ui.tick_activity());
+    assert_eq!(ui.activity_frame, 2);
+}
+
+/// Opt-in local benchmark; measures complete transcript reconciliation,
+/// separately from the existing cached viewport rendering benchmark.
+#[test]
+#[ignore = "local 3k/30k session reload performance, no provider calls"]
+fn perf_full_history_reload_three_thousand_and_thirty_thousand_messages() {
+    for count in [3_000, 30_000] {
+        let messages = (0..count)
+            .map(|i| {
+                Message::new(
+                    if i % 2 == 0 { "user" } else { "assistant" },
+                    format!("Line {i}: {}", "long history ".repeat(8)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut ui = UiState::new_default(
+            "mock".into(),
+            "history-perf".into(),
+            ThemeStore::load_at(None).unwrap(),
+            &[],
+        );
+        let started = Instant::now();
+        ui.load_history(&messages);
+        let elapsed = started.elapsed();
+        assert_eq!(ui.entries.len(), count);
+        eprintln!(
+            "PERF full_history_reload messages={count} ms={:.3}",
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
+}
+
+#[test]
 fn plugin_presentation_slots_render_without_changing_model_history() {
     let mut ui = UiState::new(
         "mock".into(),

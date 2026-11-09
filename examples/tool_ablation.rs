@@ -127,6 +127,141 @@ impl Tool for Write {
     }
 }
 
+/// Benchmark-only unified-diff tool. Production ToolRegistry remains unchanged.
+/// The parser confines every patch target to the benchmark workdir before git
+/// checks and applies the patch. No shell evaluates model-supplied text.
+struct ApplyPatch;
+
+fn apply_patch_text(workdir: &Path, patch: &str) -> Result<Value> {
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+    };
+    if patch.trim().is_empty() || patch.len() > 128 * 1024 {
+        bail!("patch must contain a bounded unified diff");
+    }
+    let root = workdir.canonicalize()?;
+    let mut headers = 0;
+    for line in patch.lines() {
+        let raw = line
+            .strip_prefix("--- ")
+            .or_else(|| line.strip_prefix("+++ "));
+        let Some(raw) = raw else {
+            continue;
+        };
+        if raw == "/dev/null" {
+            continue;
+        }
+        let rel = raw
+            .strip_prefix("a/")
+            .or_else(|| raw.strip_prefix("b/"))
+            .context("patch paths must start with a/ or b/")?;
+        let target = Path::new(rel);
+        if !target
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+        {
+            bail!("patch path escapes project directory");
+        }
+        let mut parent = root.join(target);
+        while !parent.exists() {
+            parent = parent
+                .parent()
+                .context("invalid patch target")?
+                .to_path_buf();
+        }
+        if !parent.canonicalize()?.starts_with(&root) {
+            bail!("patch target resolves outside project directory");
+        }
+        headers += 1;
+    }
+    if headers == 0 || !patch.lines().any(|line| line.starts_with("@@ ")) {
+        bail!("expected a unified diff containing file headers and hunks");
+    }
+    for check in [true, false] {
+        let mut cmd = Command::new("git");
+        cmd.arg("apply").arg("--whitespace=nowarn");
+        if check {
+            cmd.arg("--check");
+        }
+        let mut child = cmd
+            .arg("-")
+            .current_dir(&root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("start git apply")?;
+        child
+            .stdin
+            .take()
+            .context("git apply stdin")?
+            .write_all(patch.as_bytes())?;
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            let message = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "git apply {} failed: {}",
+                if check { "--check" } else { "apply" },
+                message.trim()
+            );
+        }
+    }
+    Ok(json!({"applied":true,"checked":true}))
+}
+
+impl Tool for ApplyPatch {
+    fn name(&self) -> &str {
+        "apply_patch"
+    }
+    fn definition(&self) -> Value {
+        json!({"type":"function","function":{
+            "name":"apply_patch",
+            "description":"Apply a unified Git diff to project files. Use headers --- a/path and +++ b/path, followed by @@ -start,count +start,count @@ and lines prefixed space, minus or plus. Use /dev/null for file creation or deletion. Paths must stay inside this project. Prefer this tool for related multi-line edits; do not use shell heredocs or sed to edit code.",
+            "parameters":{"type":"object","properties":{
+                "patch":{"type":"string","description":"Complete unified diff, with --- and +++ file headers and @@ hunks"}
+            },"required":["patch"],"additionalProperties":false}
+        }})
+    }
+    fn execute<'a>(&'a self, call: &'a ToolCall, ctx: ToolContext<'a>) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let result: Result<Value> = (|| {
+                let args: Value = serde_json::from_str(&call.function.arguments)?;
+                let patch = args["patch"].as_str().context("missing patch string")?;
+                apply_patch_text(ctx.workdir, patch)
+            })();
+            match result {
+                Ok(value) => ToolResult::ok(value.to_string()),
+                Err(error) => ToolResult::error(json!({"error":format!("{error:#}")}).to_string()),
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod native_patch_tests {
+    use super::*;
+    #[test]
+    fn patch_changes_only_a_project_file() {
+        let root =
+            std::env::temp_dir().join(format!("kroma-patch-ablation-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("sample.txt"), "before\n").unwrap();
+        let patch = "--- a/sample.txt\n+++ b/sample.txt\n@@ -1 +1 @@\n-before\n+after\n";
+        apply_patch_text(&root, patch).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("sample.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "after\n"
+        );
+        assert!(
+            apply_patch_text(&root, "--- a/../bad\n+++ b/../bad\n@@ -0,0 +1 @@\n+wrong\n").is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -140,6 +275,8 @@ async fn main() -> Result<()> {
         "scoped",
         "batch",
         "cache_prefix",
+        "native_edit",
+        "native_patch",
     ]
     .contains(&arm.as_str())
     {
@@ -155,7 +292,7 @@ async fn main() -> Result<()> {
     // The stock Shell arm retains its original Kroma payload for comparison.
     if matches!(
         arm.as_str(),
-        "aligned" | "scoped" | "batch" | "cache_prefix"
+        "aligned" | "scoped" | "batch" | "cache_prefix" | "native_edit" | "native_patch"
     ) {
         config.reasoning_effort = "high".into();
         config.deepseek_thinking = None;
@@ -165,6 +302,10 @@ async fn main() -> Result<()> {
         if arm == "editwrite" {
             components.tools.register(Arc::new(Edit))?;
             components.tools.register(Arc::new(Write))?;
+        }
+        if arm == "native_patch" {
+            components.tools.disable("edit_file")?;
+            components.tools.register(Arc::new(ApplyPatch))?;
         }
         if arm == "scoped" {
             components.prompt = std::mem::take(&mut components.prompt).with_extra(SCOPED_SEARCH)?;

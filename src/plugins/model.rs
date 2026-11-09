@@ -806,8 +806,10 @@ impl PluginModelHooks {
 
     /// Ask each `request_context` plugin once per (archive, boundary digest).
     /// Timeouts, errors and malformed answers mean "no memory", never a failed
-    /// model request. A degraded answer is never cached as an empty success, so
-    /// a transient failure cannot silence memory for the rest of the task.
+    /// model request. Cache degraded responses for this task boundary to avoid
+    /// paying for the same failing memory plugin on every model/tool round.
+    /// The next user task gets a different cache key, and explicit invalidation
+    /// clears the cache if the source changes.
     async fn request_packs(&self, messages: &[Message]) -> Recalled {
         let (session_id, archive) = self.session_fields();
         let Some(archive) = archive else {
@@ -919,10 +921,13 @@ impl PluginModelHooks {
                     .join(",")
             );
         }
-        if !degraded {
-            if let Ok(mut cache) = self.packs.lock() {
-                cache.remember(key, recalled.clone());
-            }
+        if degraded {
+            crate::runtime_log!(
+                "[plugin] memory recall degraded; skipping repeated attempts for this user task"
+            );
+        }
+        if let Ok(mut cache) = self.packs.lock() {
+            cache.remember(key, recalled.clone());
         }
         recalled
     }
@@ -1020,9 +1025,13 @@ impl PluginModelHooks {
                 &render_packs_with_omitted(&recalled.packs, &recalled.omitted),
             )
         };
+        let mut injected_memory = false;
         match packed {
             Some(packed) => match self.validate_view(&packed, schemas.as_ref()) {
-                Ok(_) => view = Cow::Owned(packed),
+                Ok(_) => {
+                    injected_memory = true;
+                    view = Cow::Owned(packed);
+                }
                 // A pack that no longer fits must not fail the task: drop it
                 // and retry the final validation exactly once.
                 Err(_) => {
@@ -1035,8 +1044,10 @@ impl PluginModelHooks {
             }
             None => {}
         }
+        // Memory packs also change the actual request beyond the Agent's
+        // precomputed budget view, even without a V1 rewrite hook.
         self.usage_matches_projection
-            .store(!rewritten, Ordering::Relaxed);
+            .store(!rewritten && !injected_memory, Ordering::Relaxed);
         Ok((view, schemas))
     }
 }
@@ -1196,6 +1207,27 @@ impl ModelBackend for PluginModelHooks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_recall_cache_is_bounded_to_one_task_and_can_be_invalidated() {
+        let mut cache = PackCache::default();
+        let first = (PathBuf::from("session.json"), "1:digest1".to_owned());
+        let second = (PathBuf::from("session.json"), "2:digest2".to_owned());
+        cache.remember(first.clone(), Recalled::default());
+        assert!(
+            cache.get(&first).is_some(),
+            "a failed recall must not repeat each model round"
+        );
+        assert!(
+            cache.get(&second).is_none(),
+            "next user task must retry memory"
+        );
+        cache.clear();
+        assert!(
+            cache.get(&first).is_none(),
+            "explicit invalidation permits a retry"
+        );
+    }
 
     #[test]
     fn generic_context_accepts_bounded_ephemeral_notices_without_markup_injection() {

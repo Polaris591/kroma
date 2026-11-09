@@ -760,10 +760,13 @@ impl Agent {
     /// boundary. Context state and the durable transcript remain untouched.
     pub fn reload_extensions(
         &mut self,
-        tools: ToolRegistry,
+        mut tools: ToolRegistry,
         prompt: PromptComposer,
         events: Option<Arc<dyn EventSink>>,
     ) {
+        // Task control may be staged before an idle reload. Preserve raw
+        // execution receipts when swapping the prepared tool registry.
+        tools.capture_execution_facts(self.task_control.is_some());
         self.prompt = prompt.for_registered_tools(tools.is_builtin_only());
         self.tools = tools;
         self.events = events;
@@ -777,9 +780,14 @@ impl Agent {
         &mut self,
         host: Arc<crate::plugins::TaskControlHost>,
     ) -> Result<()> {
+        let previous = self.task_control.replace(host);
         self.tools.capture_execution_facts(true);
-        self.task_control = Some(host);
-        self.settle_control_recovery()?;
+        if let Err(error) = self.settle_control_recovery() {
+            self.task_control = previous;
+            self.tools
+                .capture_execution_facts(self.task_control.is_some());
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -1992,7 +2000,10 @@ impl Agent {
                 )
                 .await;
             self.model_in_flight = false;
-            stats.model_started = None;
+            let request_wall = stats
+                .model_started
+                .take()
+                .map_or(Duration::ZERO, |at| at.elapsed());
             if let Some(events) = &self.events {
                 for (id, name) in open_native.drain(..) {
                     events.on_event(RuntimeEvent::ToolFinished {
@@ -2023,7 +2034,7 @@ impl Agent {
                 Err(error) => {
                     let usage = crate::provider::reported_error_usage(&error);
                     self.usage.record(usage);
-                    stats.record_failed(usage);
+                    stats.record_failed(usage, request_wall);
                     if let Some(events) = &self.events {
                         events.on_event(RuntimeEvent::FailedRequestUsage {
                             input_tokens: usage.and_then(|u| u.input),
@@ -2384,12 +2395,11 @@ impl Agent {
             // result retains its own tool_call_id and is saved before the
             // next call; no concurrency or command-safety classifier.
             for call in calls {
-                // Snapshot right before the first tool that can change the
-                // working tree. A checkpoint taken before a read only scanned
-                // the whole repository for nothing.
+                // Snapshot before the first potentially mutating call,
+                // including MCP/plugin tools and side-effectful interceptors.
                 if !checkpoint_ready
                     && self.checkpoints
-                    && matches!(call.function.name.as_str(), "shell" | "edit_file")
+                    && self.tools.may_mutate_worktree(&call.function.name)
                 {
                     checkpoint_ready = true;
                     self.snapshot_before_first_tool(stats).await;
@@ -2480,7 +2490,9 @@ impl Agent {
                 }
                 // A tool that waits for a person reports no output by design,
                 // so the silent-tool watchdog does not apply to it.
-                let idle_limit = if self.tools.waits_for_user(&call.function.name) {
+                let idle_limit = if self.tools.waits_for_user(&call.function.name)
+                    || self.tools.manages_timeout(&call.function.name)
+                {
                     None
                 } else {
                     tool_idle_limit()
@@ -2497,10 +2509,9 @@ impl Agent {
                         previous_user_images,
                         workdir: &self.workdir,
                         archive: self.session.archive_path(),
-                        on_output: self
-                            .events
-                            .as_ref()
-                            .map(|_| &output_event as &crate::shell::OutputCallback<'_>),
+                        // Heartbeats are required even for --print without a UI
+                        // event sink; the callback itself checks observer.
+                        on_output: Some(&output_event as &crate::shell::OutputCallback<'_>),
                         ask: self.asker.as_deref(),
                     },
                 );
@@ -2521,7 +2532,11 @@ impl Agent {
                     self.model.invalidate_ephemeral_context();
                 }
                 self.active_tool = None;
-                stats.tool_time += tool_started.elapsed();
+                let tool_elapsed = tool_started.elapsed();
+                stats.tool_time += tool_elapsed;
+                if call.function.name == "shell" {
+                    stats.shell_time += tool_elapsed;
+                }
                 stats.tools += 1;
                 if stats.profile {
                     crate::runtime_log!(
@@ -2751,6 +2766,8 @@ struct TaskStats {
     context_time: Duration,
     snapshot_time: Duration,
     tool_time: Duration,
+    shell_time: Duration,
+    failed_model_time: Duration,
     journal_time: Duration,
     apec_finalize_time: Duration,
     tools: usize,
@@ -2772,7 +2789,9 @@ impl TaskStats {
         self.compaction = usage;
     }
 
-    fn record_failed(&mut self, usage: Option<&crate::model::Usage>) {
+    fn record_failed(&mut self, usage: Option<&crate::model::Usage>, elapsed: Duration) {
+        self.elapsed += elapsed;
+        self.failed_model_time += elapsed;
         let first = self.calls == 0;
         let input = usage.and_then(|u| u.input);
         let output = usage.and_then(|u| u.output);
@@ -2917,12 +2936,14 @@ impl TaskStats {
             let ms = |time: Duration| format!("{:.2}", time.as_secs_f64() * 1_000.0);
             let wall = self.started.map_or(Duration::ZERO, |start| start.elapsed());
             crate::runtime_log!(
-                "[profile] wall_ms={} | context_ms={} | snapshot_ms={} | model_ms={} | shell_ms={} | journal_ms={} | apec_finish_ms={} | model_requests={} | tool_calls={} | peak_context_json_bytes={} | sent_messages_json_bytes={} | raw_history_json_bytes={}",
+                "[profile] wall_ms={} | context_ms={} | snapshot_ms={} | model_ms={} | failed_model_ms={} | tool_ms={} | shell_ms={} | journal_ms={} | apec_finish_ms={} | model_requests={} | tool_calls={} | peak_context_json_bytes={} | sent_messages_json_bytes={} | raw_history_json_bytes={}",
                 ms(wall),
                 ms(self.context_time),
                 ms(self.snapshot_time),
                 ms(self.elapsed),
+                ms(self.failed_model_time),
                 ms(self.tool_time),
+                ms(self.shell_time),
                 ms(self.journal_time),
                 ms(self.apec_finalize_time),
                 self.calls,
@@ -2966,6 +2987,38 @@ fn add_reported(total: Option<u64>, next: Option<u64>, first: bool) -> Option<u6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tool_output_heartbeat_works_without_an_event_sink() {
+        let started = Instant::now();
+        let last_output = Arc::new(AtomicU64::new(0));
+        let writer = Arc::clone(&last_output);
+        let observer: Option<Arc<dyn EventSink>> = None;
+        let output = |stream: &str, chunk: &str| {
+            writer.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+            if let Some(events) = &observer {
+                events.on_event(RuntimeEvent::ToolOutput {
+                    id: "test",
+                    stream,
+                    chunk,
+                });
+            }
+        };
+        let command = async {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            output("stdout", "still working");
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            "finished"
+        };
+        let result = await_with_idle(
+            command,
+            Some(Duration::from_millis(100)),
+            last_output,
+            started,
+        )
+        .await;
+        assert_eq!(result, Ok("finished"));
+    }
 
     #[test]
     fn transient_tui_startup_does_not_create_an_empty_conversation() -> Result<()> {
@@ -3358,13 +3411,15 @@ mod tests {
     fn unmeasured_requests_never_read_as_zero_tokens() {
         let mut stats = TaskStats::default();
         // An endpoint that reports no usage must not make the request free.
-        stats.record_failed(None);
-        stats.record_failed(None);
+        stats.record_failed(None, Duration::from_millis(20));
+        stats.record_failed(None, Duration::from_millis(30));
+        assert_eq!(stats.failed_model_time, Duration::from_millis(50));
+        assert_eq!(stats.elapsed, Duration::from_millis(50));
         assert_eq!(stats.input, None, "the display total stays n/a");
         assert_eq!(stats.spent_or_estimate(1_000), 2_000);
 
         let mut stats = TaskStats::default();
-        stats.record_failed(None);
+        stats.record_failed(None, Duration::from_millis(1));
         stats.input = Some(700);
         stats.output = Some(300);
         assert_eq!(

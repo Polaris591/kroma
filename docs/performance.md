@@ -85,9 +85,11 @@ end-to-end task speedup claim.
 
 ## Decisions deliberately deferred
 
-Snapshots are currently delayed until the first tool call (but not until the
-first write). This avoids snapshots for text-only answers, not for read-only
-tool tasks. The data does not by itself justify delaying them further,
+Snapshots are delayed until the first potentially worktree-mutating tool.
+Read-only history and MCP discovery calls do not trigger one; MCP execution,
+unknown plugin tools and side-effectful hooks do. This avoids snapshots for
+text-only and read-only tasks without skipping possible file changes. The data
+does not by itself justify delaying them further,
 changing compression retries/thresholds, disabling title generation or
 executing tools concurrently. Keep those policies unless a separate
 representative, correctness-preserving experiment supports a change.

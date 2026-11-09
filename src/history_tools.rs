@@ -89,6 +89,10 @@ impl Tool for HistorySearch {
         "history_search"
     }
 
+    fn may_mutate_worktree(&self) -> bool {
+        false
+    }
+
     fn definition(&self) -> Value {
         json!({"type":"function","function":{
             "name":"history_search",
@@ -180,6 +184,10 @@ pub struct HistoryRead;
 impl Tool for HistoryRead {
     fn name(&self) -> &str {
         "history_read"
+    }
+
+    fn may_mutate_worktree(&self) -> bool {
+        false
     }
 
     fn definition(&self) -> Value {

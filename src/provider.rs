@@ -237,7 +237,7 @@ pub(crate) fn is_output_truncation(error: &anyhow::Error) -> bool {
         let detail = cause.to_string();
         detail.starts_with("model response was truncated (finish_reason=length)")
             || detail.starts_with("Anthropic response truncated at max_tokens")
-            || detail.starts_with("Responses stream was not completed: Some(\"incomplete\")")
+            || detail.starts_with("Responses output truncated (reason=max_output_tokens)")
     })
 }
 
