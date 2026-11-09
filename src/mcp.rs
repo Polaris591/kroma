@@ -660,7 +660,8 @@ fn mcp_tool_result(mut value: Value, archive: &Path) -> ToolResult {
         if let Some(items) = value.get_mut("content").and_then(Value::as_array_mut) {
             for item in items.iter_mut() {
                 if item["type"] == "image" {
-                    *item = json!({"type":"text","text":"[MCP image omitted: local archive failed]"});
+                    *item =
+                        json!({"type":"text","text":"[MCP image omitted: local archive failed]"});
                 }
             }
             items.push(json!({"type":"text","text":warning}));
@@ -1752,7 +1753,10 @@ mod tests {
         ))
         .await
         .unwrap_err();
-        assert!(format!("{error:#}").contains("outcome is unknown"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("outcome is unknown"),
+            "{error:#}"
+        );
         drop(connection);
         let _ = fs::remove_dir_all(dir);
         Ok(())

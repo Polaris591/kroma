@@ -319,7 +319,7 @@ impl UiState {
             return false;
         }
         self.last_activity_frame = Instant::now();
-        let frame_count = if self.plugin_activity_frames.is_empty() {
+        let frame_count = if self.plain_style || self.plugin_activity_frames.is_empty() {
             ACTIVITY_FRAMES.len()
         } else {
             self.plugin_activity_frames.len()

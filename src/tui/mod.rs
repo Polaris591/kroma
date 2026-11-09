@@ -132,8 +132,7 @@ impl TerminalScreen {
         let editor = std::env::var("VISUAL")
             .or_else(|_| std::env::var("EDITOR"))
             .context("set VISUAL or EDITOR to use /editor")?;
-        let mut args = editor.split_whitespace();
-        let program = args.next().context("empty VISUAL/EDITOR")?;
+        let (program, args) = parse_editor_command(&editor)?;
         // Drafts may contain pasted secrets. Use owner-only storage instead
         // of a world-readable temp file.
         let path = crate::private_file::save(
@@ -149,7 +148,7 @@ impl TerminalScreen {
             DisableBracketedPaste,
             LeaveAlternateScreen
         )?;
-        let outcome = Command::new(program).args(args).arg(&path).status();
+        let outcome = Command::new(&program).args(&args).arg(&path).status();
         let restored = execute!(
             io::stdout(),
             EnterAlternateScreen,
@@ -677,6 +676,44 @@ fn key_action(
     }
 }
 
+/// Split VISUAL/EDITOR without invoking a shell. Quotes group paths and args;
+/// Windows backslashes remain literal, so `"C:\\Program Files\\Code.exe" --wait` works.
+fn parse_editor_command(command: &str) -> Result<(String, Vec<String>)> {
+    let mut parts = Vec::new();
+    let mut token = String::new();
+    let mut quoted = None;
+    let mut started = false;
+    for ch in command.chars() {
+        match (quoted, ch) {
+            (Some(quote), c) if c == quote => quoted = None,
+            (None, '\"' | '\'') => {
+                quoted = Some(ch);
+                started = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if started {
+                    parts.push(std::mem::take(&mut token));
+                    started = false;
+                }
+            }
+            _ => {
+                token.push(ch);
+                started = true;
+            }
+        }
+    }
+    anyhow::ensure!(quoted.is_none(), "unclosed quote in VISUAL/EDITOR");
+    if started {
+        parts.push(token);
+    }
+    let mut args = parts.into_iter();
+    let program = args
+        .next()
+        .filter(|s| !s.is_empty())
+        .context("empty VISUAL/EDITOR")?;
+    Ok((program, args.collect()))
+}
+
 fn text_paste_shortcut(key: &KeyEvent) -> bool {
     key.kind != KeyEventKind::Release
         && !key.modifiers.contains(KeyModifiers::ALT)
@@ -744,6 +781,18 @@ fn input_event(
             | MouseEventKind::Down(_)))
     {
         state.dismiss_notification();
+    }
+    // Cancelling a running task always wins over copy and modal navigation.
+    if running
+        && matches!(&event, Event::Key(key)
+        if key.kind != KeyEventKind::Release
+        && key.code == KeyCode::Char('c')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::SHIFT))
+    {
+        state.close_plugin_panel();
+        state.picker = None;
+        return InputAction::Cancel;
     }
     // The on-demand plugin panel owns navigation until Esc closes it.
     // No key may leak through to the draft editor while this overlay is up.
@@ -2097,30 +2146,38 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                             layout,
                             colors,
                         )) => {
-                            agent.reload_extensions(tools, prompt, events);
-                            runtime.plugins = next;
-                            // A reload replaces the owner worker, so the
-                            // agent must never keep answering through the old
-                            // one. No active goal is adopted by a new owner.
-                            match runtime.plugins.task_control() {
-                                Some(control) => {
-                                    if let Err(error) = agent.attach_task_control(control) {
-                                        state.note(format!("Task control: {error:#}"));
-                                    }
+                            // Validate the fallible controller transition before
+                            // installing any of the staged tools or UI state.
+                            // attach_task_control restores the previous owner
+                            // if recovery fails.
+                            let next_control = next.task_control();
+                            let control_result = next_control.as_ref().map_or(Ok(()), |control| {
+                                agent.attach_task_control(control.clone())
+                            });
+                            if let Err(error) = control_result {
+                                state.note_with_level(
+                                    view::NoticeLevel::Error,
+                                    format!("Plugin reload task control: {error:#}"),
+                                );
+                            } else {
+                                agent.reload_extensions(tools, prompt, events);
+                                runtime.plugins = next;
+                                if next_control.is_none() {
+                                    agent.detach_task_control();
                                 }
-                                None => agent.detach_task_control(),
+                                commands = next_commands;
+                                plugin_shortcuts = shortcuts;
+                                state.plugin_commands = runtime.plugins.command_descriptions();
+                                state.plugin_statuses = runtime.plugins.ui_statuses();
+                                state.set_plugin_presentation(
+                                    activity_frames,
+                                    tool_labels,
+                                    layout,
+                                    colors,
+                                );
+                                state
+                                    .note("Plugins reloaded (tools, Prompt, commands, events, UI)");
                             }
-                            commands = next_commands;
-                            plugin_shortcuts = shortcuts;
-                            state.plugin_commands = runtime.plugins.command_descriptions();
-                            state.plugin_statuses = runtime.plugins.ui_statuses();
-                            state.set_plugin_presentation(
-                                activity_frames,
-                                tool_labels,
-                                layout,
-                                colors,
-                            );
-                            state.note("Plugins reloaded (tools, Prompt, commands, events, UI)");
                         }
                         Err(error) => state.note_with_level(
                             view::NoticeLevel::Error,
@@ -2640,6 +2697,18 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn external_editor_command_preserves_windows_paths_and_quoted_arguments() {
+        let (program, args) = super::parse_editor_command(
+            "\"C:\\Program Files\\Microsoft VS Code\\Code.exe\" --wait \"two words\"",
+        )
+        .unwrap();
+        assert_eq!(program, "C:\\Program Files\\Microsoft VS Code\\Code.exe");
+        assert_eq!(args, ["--wait", "two words"]);
+        assert!(super::parse_editor_command("\"unterminated").is_err());
+        assert!(super::parse_editor_command("   ").is_err());
+    }
+
     #[test]
     fn named_tui_targets_can_be_new_or_an_existing_default_title() {
         let root = std::env::temp_dir().join(format!(
@@ -3422,8 +3491,7 @@ mod tests {
         assert_eq!(ui.editor.text(), "unsent draft");
         assert!(ui.editor_selected_text().is_some());
 
-        // During a model call, an active selection also takes precedence
-        // over task cancellation; ordinary Ctrl+C still cancels.
+        // Running Ctrl+C must cancel even if the user selected text.
         assert!(matches!(
             input_event(
                 &mut ui,
@@ -3432,7 +3500,7 @@ mod tests {
                 &model,
                 std::env::temp_dir().as_path()
             ),
-            InputAction::None
+            InputAction::Cancel
         ));
         ui.clear_editor_selection();
         assert!(matches!(

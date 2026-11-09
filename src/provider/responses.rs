@@ -157,6 +157,7 @@ pub(super) struct Stream {
     reasoning_summary: String,
     usage: Option<Usage>,
     status: Option<String>,
+    incomplete_reason: Option<String>,
     native: BTreeMap<usize, NativeCall>,
     /// Real sources the endpoint cited, kept in the assistant turn.
     citations: Vec<Value>,
@@ -254,6 +255,10 @@ impl Stream {
             }
             "response.completed" | "response.incomplete" | "response.failed" => {
                 self.status = v["response"]["status"].as_str().map(str::to_owned);
+                self.incomplete_reason = v["response"]
+                    .pointer("/incomplete_details/reason")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
                 self.usage = Usage::from_value(&v["response"]["usage"]);
                 // Server-side search counts are a provider measurement, never
                 // derived from the number of observed calls.
@@ -398,7 +403,16 @@ impl Stream {
 
     pub fn finish(self) -> Result<(Message, Option<Usage>)> {
         if !self.done || self.status.as_deref() != Some("completed") {
-            bail!("Responses stream was not completed: {:?}", self.status);
+            if self.status.as_deref() == Some("incomplete")
+                && self.incomplete_reason.as_deref() == Some("max_output_tokens")
+            {
+                bail!("Responses output truncated (reason=max_output_tokens)");
+            }
+            bail!(
+                "Responses stream was not completed: {:?}; reason={:?}",
+                self.status,
+                self.incomplete_reason
+            );
         }
         let mut calls = Vec::new();
         let mut opaque = Vec::new();
@@ -536,7 +550,17 @@ pub(super) fn parse_text(body: &str) -> Result<ApecTextAttempt> {
     let v: Value = serde_json::from_str(body).context("invalid Responses text response")?;
     let usage = Usage::from_value(&v["usage"]);
     if v["status"] == "incomplete" {
-        return Ok(ApecTextAttempt::Truncated(usage));
+        if v.pointer("/incomplete_details/reason")
+            .and_then(Value::as_str)
+            == Some("max_output_tokens")
+        {
+            return Ok(ApecTextAttempt::Truncated(usage));
+        }
+        bail!(
+            "Responses summary incomplete for a non-output-limit reason: {:?}",
+            v.pointer("/incomplete_details/reason")
+                .and_then(Value::as_str)
+        );
     }
     if v["status"] != "completed" {
         bail!("Responses summary was not completed");
@@ -560,6 +584,44 @@ pub(super) fn parse_text(body: &str) -> Result<ApecTextAttempt> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incomplete_only_retries_when_provider_confirms_output_limit() {
+        for (reason, retryable) in [
+            (Some("max_output_tokens"), true),
+            (Some("content_filter"), false),
+            (None, false),
+        ] {
+            let mut stream = Stream::default();
+            let details = reason.map(|reason| json!({"reason":reason}));
+            stream
+                .apply(
+                    &json!({"type":"response.incomplete","response": {
+                        "status":"incomplete", "incomplete_details": details,
+                        "usage":{"input_tokens":10,"output_tokens":8}
+                    }})
+                    .to_string(),
+                    &mut |_| {},
+                )
+                .unwrap();
+            let error = stream.finish().unwrap_err();
+            assert_eq!(crate::provider::is_output_truncation(&error), retryable);
+        }
+    }
+
+    #[test]
+    fn incomplete_summary_only_counts_output_ceiling_as_truncation() {
+        for (reason, truncated) in [("max_output_tokens", true), ("content_filter", false)] {
+            let body = json!({"status":"incomplete", "incomplete_details":{"reason":reason},
+                "usage":{"input_tokens":10,"output_tokens":5}})
+            .to_string();
+            let result = parse_text(&body);
+            assert_eq!(
+                matches!(result, Ok(ApecTextAttempt::Truncated(_))),
+                truncated
+            );
+        }
+    }
 
     #[test]
     fn multiple_message_items_keep_text_even_when_only_first_streamed() {

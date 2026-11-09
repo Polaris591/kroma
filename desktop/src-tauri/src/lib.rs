@@ -1678,13 +1678,16 @@ fn reload_plugins(host: &mut Host) -> Result<()> {
     )?;
     let sink: Arc<dyn EventSink> = host.events.clone();
     let events = next.wrap_events(Some(sink))?;
+    // The only fallible task-control transition happens before swapping
+    // the active plugin catalog, tools and events.
+    let next_control = next.task_control();
+    if let Some(control) = next_control.clone() {
+        runtime.agent.attach_task_control(control)?;
+    }
     runtime.agent.reload_extensions(tools, prompt, events);
     runtime.plugins = next;
-    // A reload replaces the owner worker, so the agent must never keep
-    // answering through the old one.
-    match runtime.plugins.task_control() {
-        Some(control) => runtime.agent.attach_task_control(control)?,
-        None => runtime.agent.detach_task_control(),
+    if next_control.is_none() {
+        runtime.agent.detach_task_control();
     }
     host.control_command = runtime.agent.task_control_command_name();
     host.control_host = runtime.plugins.task_control();

@@ -3764,7 +3764,10 @@ createInterface({input:process.stdin}).on("line",line=>{
     assert!(injected.contains("<plugin-context trust=\"unverified-reference\">"));
     assert!(injected.contains("Use pnpm, not npm"));
     assert_eq!(serde_json::to_value(&history)?, before);
-    assert!(model.usage_matches_projection());
+    assert!(
+        !model.usage_matches_projection(),
+        "injected memory changes the request after Core's budget projection"
+    );
     let log = fs::read_to_string(directory.join("requests.log"))?;
     assert!(log.contains("\"type\":\"request_context\""));
     assert!(
@@ -4117,10 +4120,10 @@ require("node:readline").createInterface({input:process.stdin}).on("line",line=>
     Ok(())
 }
 
-/// A transient recall failure is a skipped optional call, never a cached empty
-/// answer: the next model round asks again instead of silencing memory.
+/// One failed recall is skipped for this user task so slow plugins cannot
+/// delay each model/tool round; the next user turn can recover memory.
 #[tokio::test]
-async fn a_failed_recall_is_retried_instead_of_cached_as_empty() -> Result<()> {
+async fn a_failed_recall_is_cached_within_a_task_and_retried_on_next_turn() -> Result<()> {
     if Command::new("node").arg("--version").output().is_err() {
         return Ok(());
     }
@@ -4167,21 +4170,26 @@ require("node:readline").createInterface({input:process.stdin}).on("line",line=>
         "a broken optional reply must not fail or rewrite the request"
     );
     model.complete(&history, &[], &mut |_| {}).await?;
-    let sent = captured.0.lock().unwrap().clone();
-    assert!(
-        sent[1]
-            .content
-            .as_deref()
-            .unwrap_or("")
-            .contains("Use pnpm, not npm"),
-        "the retry must be able to recover the pack"
-    );
     let calls = fs::read_to_string(directory.join("calls.log"))?;
     assert_eq!(
         calls.lines().filter(|line| !line.is_empty()).count(),
-        2,
-        "a degraded answer must not be cached as an empty success"
+        1,
+        "the same task must not repeat an optional failing memory request"
     );
+    let mut next_turn = history.clone();
+    next_turn.push(Message::new("assistant", "continuing"));
+    next_turn.push(Message::new("user", "new task: use pnpm"));
+    model.complete(&next_turn, &[], &mut |_| {}).await?;
+    let sent = captured.0.lock().unwrap().clone();
+    assert!(
+        sent.last()
+            .and_then(|message| message.content.as_deref())
+            .unwrap_or("")
+            .contains("Use pnpm, not npm"),
+        "a new user task must be able to recover the pack"
+    );
+    let calls = fs::read_to_string(directory.join("calls.log"))?;
+    assert_eq!(calls.lines().filter(|line| !line.is_empty()).count(), 2);
     Ok(())
 }
 

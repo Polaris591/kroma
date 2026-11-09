@@ -346,6 +346,27 @@ impl ToolRegistry {
                 };
             }
         }
+        // The Agent checks a model-declared edit_file path for nested
+        // AGENTS.md before executing a batch. A before hook may rewrite
+        // other arguments, but changing the path afterward would bypass that
+        // check. Reject only this explicit path change, not general Shell
+        // command rewrites, which cannot be safely parsed as file paths.
+        if effective.function.name == "edit_file" {
+            let path_of = |arguments: &str| {
+                serde_json::from_str::<Value>(arguments)
+                    .ok()
+                    .and_then(|json| json.get("path").and_then(Value::as_str).map(str::to_owned))
+            };
+            if path_of(&call.function.arguments) != path_of(&effective.function.arguments) {
+                return ToolExecution {
+                    result: ToolResult::error(
+                        "before_tool_call changed edit_file path after project instruction preflight; ask the model to replan with the new file path",
+                    ),
+                    warnings: Vec::new(),
+                    raw: RawExecution::default(),
+                };
+            }
+        }
         let mut result = match self
             .tools
             .iter()
@@ -721,6 +742,7 @@ mod tests {
     use crate::provider::FunctionCall;
 
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     struct NoopHook;
     impl ToolInterceptor for NoopHook {}
@@ -820,9 +842,15 @@ mod tests {
     #[test]
     fn checkpoint_policy_covers_mutating_tools_and_hooks_only() {
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(crate::history_tools::HistorySearch)).unwrap();
-        registry.register(Arc::new(crate::file_edit::FileEdit)).unwrap();
-        registry.register(Arc::new(AskTool::new("ask", "Ask a question"))).unwrap();
+        registry
+            .register(Arc::new(crate::history_tools::HistorySearch))
+            .unwrap();
+        registry
+            .register(Arc::new(crate::file_edit::FileEdit))
+            .unwrap();
+        registry
+            .register(Arc::new(AskTool::new("ask", "Ask a question")))
+            .unwrap();
         assert!(!registry.may_mutate_worktree("history_search"));
         assert!(!registry.may_mutate_worktree("ask"));
         assert!(registry.may_mutate_worktree("edit_file"));
@@ -837,6 +865,30 @@ mod tests {
         assert!(outcome.result.is_error);
         assert!(outcome.result.content.contains("outcome is unknown"));
         assert!(!outcome.result.content.contains("was stopped"));
+    }
+
+    #[tokio::test]
+    async fn edit_file_hook_cannot_bypass_nested_instruction_preflight() {
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(TestTool {
+                name: "edit_file",
+                result: ToolResult::ok("edited"),
+                executions: executions.clone(),
+            }))
+            .unwrap();
+        registry.register_interceptor(Arc::new(RewriteBefore(
+            r#"{"path":"src/deep/file.rs","old_text":"old","new_text":"new"}"#,
+        )));
+        let call = test_call(
+            "edit_file",
+            r#"{"path":"src/other/file.rs","old_text":"old","new_text":"new"}"#,
+        );
+        let result = registry.execute(&call, test_context()).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("project instruction preflight"));
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
     }
 
     struct TestTool {

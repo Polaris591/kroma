@@ -434,9 +434,13 @@ impl SessionCatalog {
     pub fn restore_session(&self, id: &str) -> Result<()> {
         let path = self.path_for(id)?;
         let journal = crate::session::journal_path(&path);
-        if path.exists() || journal.exists() {
+        if path.exists() {
             bail!("cannot restore: a session with this ID already exists");
         }
+        // A crash between moving the snapshot and WAL during deletion may
+        // leave only the WAL at its original path. Restore the archived
+        // snapshot and pair it with that journal rather than strand history.
+        let interrupted_trash = journal.exists();
         let filename = path
             .file_name()
             .context("missing session filename")?
@@ -462,6 +466,9 @@ impl SessionCatalog {
             .map(|(_, path)| path)
             .context("no recoverable archive for this session")?;
         let archived_journal = crate::session::journal_path(&archived);
+        if interrupted_trash && archived_journal.exists() {
+            bail!("cannot restore: both the live and archived session journals exist");
+        }
         let metadata_path = archived.with_extension("meta.json");
         let metadata = fs::read(&metadata_path)
             .ok()
@@ -735,6 +742,46 @@ mod tests {
             catalog.restore_session(&id).is_err(),
             "never overwrite a live session"
         );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn restore_recovers_snapshot_moved_before_its_wal_on_crash() -> Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "kroma-interrupted-trash-{}-{}",
+            std::process::id(),
+            NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root)?;
+        let catalog = SessionCatalog::from_default(root.join("main.json"))?;
+        let (id, path) = catalog.new_path()?;
+        let store = SessionStore::open_at(path.clone(), &root)?;
+        let context = crate::context_state::CompactionState::default();
+        let mut messages = vec![crate::protocol::Message::new("system", "instructions")];
+        store.save(&messages, &context)?;
+        messages.push(crate::protocol::Message::new("user", "persisted in WAL"));
+        store.append(&messages, &context)?;
+        drop(store);
+        let journal = crate::session::journal_path(&path);
+        assert!(journal.exists());
+        let trash = root.join(".deleted");
+        fs::create_dir_all(&trash)?;
+        let destination = trash.join(format!("1-{}", path.file_name().unwrap().to_string_lossy()));
+        fs::rename(&path, &destination)?;
+        assert!(!path.exists());
+        assert!(journal.exists());
+        catalog.restore_session(&id)?;
+        assert!(path.exists());
+        assert!(journal.exists());
+        let reopened = SessionStore::open_at(path.clone(), &root)?;
+        let recovered = reopened.load()?.expect("snapshot and WAL paired");
+        assert_eq!(recovered.messages.len(), 2);
+        assert_eq!(
+            recovered.messages[1].content.as_deref(),
+            Some("persisted in WAL")
+        );
+        drop(reopened);
         fs::remove_dir_all(root)?;
         Ok(())
     }
