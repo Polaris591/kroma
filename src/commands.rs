@@ -3,7 +3,16 @@
 //! is intentionally handled separately; no nested agent task is started.
 use crate::{agent::Agent, skills::Skill, steering::TaskInput};
 use anyhow::{bail, Result};
-use std::{collections::BTreeMap, future::Future, path::PathBuf, pin::Pin};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    path::PathBuf,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandAction {
@@ -52,6 +61,66 @@ enum Handler {
     External(ExternalHandler),
 }
 
+/// Run one checkpoint git transaction off the UI thread. Dropping the returned
+/// future (Esc/Ctrl-C) flags the blocking worker so it stops at its next git
+/// boundary instead of finishing work nobody is waiting for anymore.
+async fn blocking_checkpoint<T, F>(work: F) -> Result<T>
+where
+    F: FnOnce(Arc<AtomicBool>) -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    struct CancelOnDrop(Arc<AtomicBool>);
+    impl Drop for CancelOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _guard = CancelOnDrop(cancel.clone());
+    tokio::task::spawn_blocking(move || work(cancel))
+        .await
+        .map_err(|error| anyhow::anyhow!("checkpoint worker failed: {error}"))?
+}
+
+/// Commands that only the full-screen UI implements. The line CLI keeps one
+/// registry, so anything it does not own must never become a model request.
+pub const FULL_SCREEN_ONLY: &[&str] = &[
+    "/commands",
+    "/echo",
+    "/editor",
+    "/help",
+    "/hotkeys",
+    "/inspect",
+    "/language",
+    "/model",
+    "/reasoning",
+    "/theme",
+    "/think",
+    "/thinking",
+    "/transcript",
+];
+
+pub fn is_full_screen_only(name: &str) -> bool {
+    FULL_SCREEN_ONLY.contains(&name)
+}
+
+/// Slash text is only a command when it reads like one: a short word of ASCII
+/// letters after `/`. A pasted path such as `/var/log/app.log is empty` is a
+/// message, so it must reach the model instead of being swallowed.
+pub fn looks_like_command(line: &str) -> bool {
+    let Some(body) = line
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .strip_prefix('/')
+    else {
+        return false;
+    };
+    !body.is_empty()
+        && body.len() <= 24
+        && body.chars().all(|c| c.is_ascii_alphabetic() || c == '-')
+}
+
 #[derive(Default)]
 pub struct CommandRegistry {
     commands: BTreeMap<String, Handler>,
@@ -60,6 +129,43 @@ pub struct CommandRegistry {
 impl CommandRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether this registry dispatches `name` without running anything.
+    pub fn knows(&self, name: &str) -> bool {
+        self.commands.contains_key(name)
+    }
+
+    /// Plain-text command index for the line CLI, built from the registry
+    /// itself so it can never drift from what is actually dispatchable.
+    pub fn help_text(&self) -> String {
+        let names: Vec<&str> = self.commands.keys().map(String::as_str).collect();
+        format!(
+            "Commands: {}\n\nDescriptions and subcommands: docs/reference/cli.md, or the full-screen UI (`kroma`).",
+            names.join(" ")
+        )
+    }
+
+    /// Actionable hint for slash text this registry does not own. Returning a
+    /// hint is what keeps `/model` or `/help` in the line CLI from being sent
+    /// to the model as a prompt.
+    pub fn unregistered_slash_hint(&self, line: &str) -> Option<String> {
+        if !looks_like_command(line) {
+            return None;
+        }
+        let name = line.split_whitespace().next().unwrap_or("");
+        if self.knows(name) {
+            return None;
+        }
+        Some(if is_full_screen_only(name) {
+            format!(
+                "'{name}' is a full-screen UI command; nothing was sent to the model. Start `kroma` without arguments to use it."
+            )
+        } else {
+            format!(
+                "'{name}' is not a known command; nothing was sent to the model. Type /help in the full-screen UI (`kroma`) to list commands."
+            )
+        })
     }
 
     pub fn register(
@@ -270,7 +376,17 @@ impl CommandRegistry {
         })?;
         registry.register("/usage", |agent, _, args| {
             require_no_args(args, "/usage")?;
-            Ok(CommandReply::text(agent.usage().report()))
+            let usage = agent.session_usage();
+            // One report for every host: persisted meters when they exist,
+            // otherwise this process's live meter.
+            let coding = if usage.coding.calls > 0 {
+                &usage.coding
+            } else {
+                agent.usage()
+            };
+            Ok(CommandReply::text(
+                coding.report_breakdown(&usage.title, &usage.apec),
+            ))
         })?;
         registry.register("/model-status", |agent, _, args| {
             require_no_args(args, "/model-status")?;
@@ -363,77 +479,129 @@ impl CommandRegistry {
             )))
             })
         })?;
-        registry.register("/checkpoints", |agent, _, args| {
-            require_no_args(args, "/checkpoints")?;
-            let checkpoints = crate::checkpoints::list(agent.workdir(), agent.session_id())?;
-            if checkpoints.is_empty() {
-                return Ok(CommandReply::text(
-                    "No file snapshots yet. Kroma snapshots tracked Git worktrees before each task; this project is not one, or no task has run yet."
-                ));
-            }
-            let lines = checkpoints
-                .iter()
-                .enumerate()
-                .map(|(index, checkpoint)| {
-                    format!(
-                        "  [{}] {}  {}",
-                        index,
-                        &checkpoint.hash[..12],
-                        checkpoint.subject
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("
+        registry.register_agent_async("/checkpoints", |agent, _, args| {
+            Box::pin(async move {
+                require_no_args(args, "/checkpoints")?;
+                let workdir = agent.workdir().to_path_buf();
+                let session = agent.session_id().to_owned();
+                let checkpoints = {
+                    let workdir = workdir.clone();
+                    let session = session.clone();
+                    blocking_checkpoint(move |cancel| {
+                        crate::checkpoints::list_cancellable(&workdir, &session, cancel)
+                    })
+                    .await?
+                };
+                if checkpoints.is_empty() {
+                    return Ok(CommandReply::text(
+                        "No file snapshots yet. Kroma snapshots tracked Git worktrees before each task; this project is not one, or no task has run yet."
+                    ));
+                }
+                let lines = checkpoints
+                    .iter()
+                    .enumerate()
+                    .map(|(index, checkpoint)| {
+                        format!(
+                            "  [{}] {}  {}",
+                            index,
+                            &checkpoint.hash[..12],
+                            checkpoint.subject
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("
 ");
-            Ok(CommandReply::text(format!(
-                "File snapshots for session {} (newest first):
+                Ok(CommandReply::text(format!(
+                    "File snapshots for session {} (newest first):
 {lines}
 Use /restore-files <number>. Conversation history is unaffected; use /rewind for messages.",
-                agent.session_id()
-            )))
+                    session
+                )))
+            })
         })?;
-        registry.register("/restore-files", |agent, _, args| {
-            let checkpoints = crate::checkpoints::list(agent.workdir(), agent.session_id())?;
-            if checkpoints.is_empty() {
-                bail!("no file snapshots yet for this project");
-            }
-            let index = parse_number(args, "/restore-files <number>")?;
-            let checkpoint = checkpoints.get(index).ok_or_else(|| {
-                anyhow::anyhow!("no snapshot [{index}]; use /checkpoints to list them")
-            })?;
-            let report =
-                crate::checkpoints::restore(agent.workdir(), agent.session_id(), &checkpoint.hash)?;
-            let mut text = format!(
-                "Restored files from snapshot [{}] ({}). Conversation history was not changed.",
-                index,
-                &checkpoint.hash[..12]
-            );
-            if report.restored > 0 {
-                text.push_str(&format!(
-                    "
+        registry.register_agent_async("/restore-files", |agent, _, args| {
+            Box::pin(async move {
+                let mut parts = args.split_whitespace();
+                let index = parse_number(
+                    parts.next().unwrap_or_default(),
+                    "/restore-files <number> [-n]",
+                )?;
+                let preview_only = parts.next() == Some("-n");
+                let workdir = agent.workdir().to_path_buf();
+                let session = agent.session_id().to_owned();
+                let checkpoints = {
+                    let workdir = workdir.clone();
+                    let session = session.clone();
+                    blocking_checkpoint(move |cancel| {
+                        crate::checkpoints::list_cancellable(&workdir, &session, cancel)
+                    })
+                    .await?
+                };
+                if checkpoints.is_empty() {
+                    bail!("no file snapshots yet for this project");
+                }
+                let checkpoint = checkpoints.get(index).ok_or_else(|| {
+                    anyhow::anyhow!("no snapshot [{index}]; use /checkpoints to list them")
+                })?;
+                let hash = checkpoint.hash.clone();
+                let short = checkpoint.hash[..12].to_owned();
+                if preview_only {
+                    let preview = {
+                        let workdir = workdir.clone();
+                        let session = session.clone();
+                        let hash = hash.clone();
+                        blocking_checkpoint(move |cancel| {
+                            crate::checkpoints::preview_cancellable(
+                                &workdir, &session, &hash, cancel,
+                            )
+                        })
+                        .await?
+                    };
+                    return Ok(CommandReply::text(preview_text(index, &short, &preview)));
+                }
+                let report = {
+                    let workdir = workdir.clone();
+                    let session = session.clone();
+                    let hash = hash.clone();
+                    // A confirmed restore runs to completion: a half-restored
+                    // worktree is worse than a slower one.
+                    blocking_checkpoint(move |_cancel| {
+                        crate::checkpoints::restore(&workdir, &session, &hash)
+                    })
+                    .await?
+                };
+                let mut text = format!(
+                    "Restored files from snapshot [{}] ({}). Conversation history was not changed.",
+                    index,
+                    &checkpoints[index].hash[..12]
+                );
+                if report.restored > 0 {
+                    text.push_str(&format!(
+                        "
 {} changed file(s) were rewritten.",
-                    report.restored
-                ));
-            }
-            if !report.removed.is_empty() {
-                text.push_str(&format!(
-                    "
+                        report.restored
+                    ));
+                }
+                if !report.removed.is_empty() {
+                    text.push_str(&format!(
+                        "
 {} new file(s) were removed.",
-                    report.removed.len()
-                ));
-            }
-            if !report.remaining.is_empty() {
-                text.push_str(
-                    "
+                        report.removed.len()
+                    ));
+                }
+                if !report.remaining.is_empty() {
+                    text.push_str(
+                        "
 Some new files could not be removed:
 ",
-                );
-                text.push_str(&report.remaining.join(
-                    "
+                    );
+                    text.push_str(&report.remaining.join(
+                        "
 ",
-                ));
-            }
-            Ok(CommandReply::text(text))
+                    ));
+                }
+                Ok(CommandReply::text(text))
+            })
         })?;
         registry.register("/pending", |_, input, args| {
             require_no_args(args, "/pending")?;
@@ -501,6 +669,32 @@ pub fn pending_text(input: &TaskInput) -> String {
     lines.join("\n")
 }
 
+fn push_paths(text: &mut String, label: &str, paths: &[String]) {
+    if paths.is_empty() {
+        return;
+    }
+    let shown: Vec<&str> = paths.iter().take(8).map(String::as_str).collect();
+    text.push_str(&format!("\n{label}: {}", shown.join(", ")));
+    if paths.len() > shown.len() {
+        text.push_str(&format!(" (+{} more)", paths.len() - shown.len()));
+    }
+}
+
+fn preview_text(index: usize, short: &str, preview: &crate::checkpoints::RestorePreview) -> String {
+    let mut text = format!(
+        "Snapshot [{index}] ({short}) would rewrite {} file(s) and delete {} new file(s). Nothing has changed yet.",
+        preview.rewritten.len(),
+        preview.deleted.len()
+    );
+    push_paths(&mut text, "Rewritten", &preview.rewritten);
+    push_paths(&mut text, "Deleted", &preview.deleted);
+    push_paths(&mut text, "Preserved", &preview.preserved);
+    text.push_str(&format!(
+        "\nRun `/restore-files {index}` to apply it, or add `-n` to preview again. Conversation history is not affected."
+    ));
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,5 +713,21 @@ mod tests {
         assert!(commands
             .register("/bad name", |_, _, _| Ok(CommandReply::text("bad")))
             .is_err());
+    }
+
+    #[test]
+    fn unknown_slash_text_never_becomes_a_model_request() {
+        let commands = CommandRegistry::builtin(Vec::new()).unwrap();
+        let hint = commands
+            .unregistered_slash_hint("/model gpt-5")
+            .expect("a full-screen command is explained, not forwarded");
+        assert!(hint.contains("/model") && hint.contains("full-screen"));
+        let hint = commands
+            .unregistered_slash_hint("/nope")
+            .expect("an unknown command is explained");
+        assert!(hint.contains("not a known command"));
+        assert!(commands.unregistered_slash_hint("explain /model").is_none());
+        assert!(commands.unregistered_slash_hint("/").is_none());
+        assert!(commands.unregistered_slash_hint("/compact").is_none());
     }
 }

@@ -54,6 +54,7 @@ async fn run_command(dir: &Path, command: &str) -> Result<(ToolResult, Value)> {
                 workdir: dir,
                 archive: &archive,
                 on_output: None,
+                ask: None,
             },
         )
         .await;

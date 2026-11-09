@@ -236,7 +236,8 @@ pub fn cleanup_session_orphans(
     let referenced = referenced_captures(messages);
     let mut removed = 0;
     for entry in fs::read_dir(root)? {
-        let entry = entry?;
+        // One unreadable or busy capture must not stop the rest of the sweep.
+        let Ok(entry) = entry else { continue };
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy();
         if !name.starts_with(&prefix) || !name.ends_with(".log") {
@@ -246,7 +247,9 @@ pub fn cleanup_session_orphans(
         if referenced.contains(&path) {
             continue;
         }
-        let metadata = fs::symlink_metadata(&path)?;
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
         if !metadata.is_file() {
             continue;
         }
@@ -255,8 +258,7 @@ pub fn cleanup_session_orphans(
             .ok()
             .and_then(|changed| changed.elapsed().ok())
             .is_some_and(|elapsed| elapsed >= ORPHAN_GRACE);
-        if clear || stale {
-            fs::remove_file(&path)?;
+        if (clear || stale) && fs::remove_file(&path).is_ok() {
             removed += 1;
         }
     }
@@ -421,17 +423,18 @@ fn capture_dir(workdir: &Path) -> Result<PathBuf> {
         .fold(0xcbf29ce484222325u64, |hash, byte| {
             (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
         });
-    let dir = home
-        .join(".kroma")
-        .join("tool-outputs")
-        .join(format!("{hash:016x}"));
-    #[cfg(unix)]
-    let existed = dir.exists();
+    let base = home.join(".kroma");
+    let outputs = base.join("tool-outputs");
+    let dir = outputs.join(format!("{hash:016x}"));
     fs::create_dir_all(&dir).context("failed to create tool-output directory")?;
     #[cfg(unix)]
-    if !existed {
+    {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+        // Captures are private. Tighten the whole chain, including directories
+        // an older build (or another tool) left with default permissions.
+        for path in [&base, &outputs, &dir] {
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+        }
     }
     Ok(dir)
 }
@@ -516,13 +519,22 @@ fn archived_diagnostics(path: &Path, size: u64) -> Result<Vec<String>> {
 }
 
 fn read_capture(path: PathBuf) -> Result<(String, Option<String>, u64)> {
-    let size = fs::metadata(&path)?.len();
+    let size = match fs::metadata(&path) {
+        Ok(metadata) => metadata.len(),
+        // The command already ran; a capture that vanished must not turn a
+        // successful tool call into an error result.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((String::new(), None, 0));
+        }
+        Err(error) => return Err(error).context("reading captured tool output"),
+    };
     if size <= INLINE_OUTPUT_BYTES {
         let content = fs::read(&path).context("failed to read captured tool output")?;
         let text = String::from_utf8_lossy(&content);
         let lines: Vec<_> = text.lines().collect();
         if lines.len() <= INLINE_OUTPUT_LINES {
-            fs::remove_file(&path)?;
+            // Cleanup is best effort: the text is already in memory.
+            let _ = fs::remove_file(&path);
             return Ok((text.into_owned(), None, size));
         }
         // Preserve both beginning and end, plus a bounded selection of
@@ -658,8 +670,13 @@ impl ShellChoice {
 
     #[cfg(windows)]
     fn cmd() -> Self {
+        // `COMSPEC` is the absolute path Windows itself uses, which avoids the
+        // CreateProcess search order picking a `cmd.exe` from the project.
         Self {
-            program: PathBuf::from("cmd"),
+            program: env::var_os("COMSPEC")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .unwrap_or_else(|| PathBuf::from("cmd")),
             dialect: Dialect::Cmd,
         }
     }
@@ -955,23 +972,29 @@ async fn execute_internal(
     };
     let status = match shell_deadline() {
         Some(limit) => match tokio::time::timeout(limit, wait).await {
-            Ok(status) => status?,
+            Ok(status) => status,
             Err(_) => {
                 // The wait future is dropped before touching the child again.
                 #[cfg(any(unix, windows))]
                 guard.terminate();
                 let _ = child.start_kill();
                 let _ = child.wait().await;
+                // The child is reaped: never signal this group ID again, it may
+                // already belong to an unrelated process.
+                #[cfg(any(unix, windows))]
+                guard.disarm();
                 bail!(
                     "shell command exceeded KROMA_SHELL_TIMEOUT_SECS ({}s)",
                     limit.as_secs()
                 );
             }
         },
-        None => wait.await?,
+        None => wait.await,
     };
+    // Disarm before propagating errors: a reaped group ID can be reused.
     #[cfg(any(unix, windows))]
     guard.disarm();
+    let status = status?;
 
     let (stdout, stdout_file, stdout_bytes) = read_capture(stdout_path)?;
     let (stderr, stderr_file, stderr_bytes) = read_capture(stderr_path)?;

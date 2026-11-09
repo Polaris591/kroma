@@ -5,6 +5,7 @@ use crate::{
     config::Config,
     context::{BuiltinContextFactory, ContextConfig, ContextFactory},
     events::EventSink,
+    file_edit::FileEdit,
     history_tools::{HistoryRead, HistorySearch},
     mcp,
     model::ModelBackend,
@@ -115,6 +116,7 @@ pub async fn default_runtime_with(
     let mut tools = ToolRegistry::builtin();
     tools.register(Arc::new(HistorySearch))?;
     tools.register(Arc::new(HistoryRead))?;
+    tools.register(Arc::new(FileEdit))?;
     if !skills.is_empty() {
         tools.register(Arc::new(LoadSkill(skills.clone())))?;
     }

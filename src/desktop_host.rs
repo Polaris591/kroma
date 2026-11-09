@@ -231,6 +231,18 @@ impl EventSink for DesktopEvents {
             RuntimeEvent::TaskFinished { status } => {
                 self.push(json!({"kind":"task_finished","status":status}))
             }
+            RuntimeEvent::TaskControlChanged {
+                command,
+                owner,
+                id,
+                revision,
+                status,
+                reason,
+                summary,
+            } => self.push(json!({
+                "kind":"task_control","command":command,"owner":owner,"id":id,"revision":revision,
+                "status":status,"reason":reason,"summary":summary
+            })),
             RuntimeEvent::SessionCreated { id } => {
                 self.push(json!({"kind":"session_created","id":id}))
             }
@@ -279,6 +291,17 @@ pub fn snapshot_page(agent: &Agent, before: Option<usize>, limit: usize) -> Resu
     let start = end.saturating_sub(limit.clamp(1, MAX_SNAPSHOT_MESSAGES));
     Ok(json!({
         "session_id":agent.session_id(),
+        // Committed goal state is separate from the foreground result; the
+        // frontend must never derive completion from an assistant message.
+        "control":agent.task_control().and_then(|host| host.snapshot()).map(|snapshot| json!({
+            "command":agent.task_control().map(|host| host.command()),
+            "owner":snapshot.owner,
+            "id":snapshot.id,
+            "revision":snapshot.revision,
+            "status":snapshot.status.as_str(),
+            "reason":snapshot.reason,
+            "summary":snapshot.data.get("summary").cloned(),
+        })),
         "messages":&messages[start..end],
         "total_messages":total,
         "history_truncated":start > 0,
@@ -287,7 +310,13 @@ pub fn snapshot_page(agent: &Agent, before: Option<usize>, limit: usize) -> Resu
         "context_window":agent.context_window_tokens(),
         "model_limits":agent.model_report(),
         "available_input":agent.available_context_tokens(),
+        "context":agent.context_report()?,
         "tool_names":agent.available_tool_names(),
+        "skills":crate::skills::SkillCatalog::discover(agent.workdir())
+            .map(|catalog| catalog.list().into_iter().map(|skill| serde_json::json!({
+                "name":skill.name, "description":skill.description
+            })).collect::<Vec<_>>())
+            .unwrap_or_default(),
     }))
 }
 

@@ -126,6 +126,7 @@ async fn run_legacy(options: kroma::cli::RunOptions) -> Result<()> {
         } else {
             app::default_runtime(config).await?
         };
+        runtime.plugins.ensure_loadable()?;
         if !quiet {
             for warning in runtime
                 .startup_warnings
@@ -136,7 +137,33 @@ async fn run_legacy(options: kroma::cli::RunOptions) -> Result<()> {
             }
         }
         let mut agent = runtime.agent;
-        let prompt = kroma::convenience::file_reference(&prompt, agent.workdir())?;
+        if let Some(control) = runtime.plugins.task_control() {
+            agent.attach_task_control(control)?;
+        }
+        let mut prompt = kroma::convenience::file_reference(&prompt, agent.workdir())?;
+        if let Some(command) = agent.task_control_command_name() {
+            if let Some(arguments) = kroma::plugins::control_arguments(&command, &prompt) {
+                let arguments = arguments.to_string();
+                let line = prompt.clone();
+                match agent.task_control_command(&line, &arguments).await? {
+                    Some(kroma::plugins::ControlCommand::Prepared(task)) => {
+                        if !task.output.is_empty() {
+                            eprintln!("{}", task.output);
+                        }
+                        prompt = agent.stage_prepared_task(task)?;
+                    }
+                    Some(kroma::plugins::ControlCommand::Text(text)) => {
+                        kroma::cli_println!("{text}");
+                        return Ok(());
+                    }
+                    Some(kroma::plugins::ControlCommand::HostAction(action)) => {
+                        kroma::cli_println!("{}", agent.control_host_action(action)?);
+                        return Ok(());
+                    }
+                    None => {}
+                }
+            }
+        }
         let task_result: Result<()> = async {
             if json_mode {
                 let result = drive_task(&mut agent, &prompt, None, &mut |_| {}).await;
@@ -178,6 +205,7 @@ async fn run_legacy(options: kroma::cli::RunOptions) -> Result<()> {
         return kroma::tui::run(config).await;
     }
     let runtime = app::default_runtime(config).await?;
+    runtime.plugins.ensure_loadable()?;
     if let Some(name) = &runtime.selected_model_name {
         model_name = name.clone();
     }
@@ -200,6 +228,9 @@ async fn run_legacy(options: kroma::cli::RunOptions) -> Result<()> {
         let _ = runtime.plugins.register_commands(&mut commands);
     }
     let mut agent = runtime.agent;
+    if let Some(control) = runtime.plugins.task_control() {
+        agent.attach_task_control(control)?;
+    }
     let line_output = kroma::output::CliOutput::new();
 
     if !options.prompt.is_empty() {
@@ -306,6 +337,31 @@ async fn run_legacy(options: kroma::cli::RunOptions) -> Result<()> {
             }
             continue;
         }
+        if input.trim() == "/help" {
+            kroma::cli_println!("{}", commands.help_text());
+            continue;
+        }
+        if input.starts_with('/') {
+            match dispatch_control_line(&mut agent, input).await {
+                Ok(Some(ControlLine::Prepared(task))) => {
+                    let body = agent.stage_prepared_task(task)?;
+                    match run_task(&mut agent, &body, Some(&mut lines), Some(&line_output)).await {
+                        Ok(running) => run_followups = running,
+                        Err(error) => {
+                            eprintln!("Error: {error:#}");
+                            run_followups = false;
+                        }
+                    }
+                    continue;
+                }
+                Ok(Some(ControlLine::Handled)) => continue,
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("[command] {error:#}");
+                    continue;
+                }
+            }
+        }
         let command_result = {
             let command_future = commands.execute_async(input, &mut agent, &input_handle);
             tokio::pin!(command_future);
@@ -345,7 +401,14 @@ async fn run_legacy(options: kroma::cli::RunOptions) -> Result<()> {
                 eprintln!("[command] {error:#}");
                 continue;
             }
-            Ok(None) => {} // Ordinary user input, including unregistered slash text.
+            Ok(None) => {
+                // Slash text this session does not own is explained locally:
+                // it must never become a paid model request.
+                if let Some(hint) = commands.unregistered_slash_hint(input) {
+                    kroma::cli_println!("{hint}");
+                    continue;
+                }
+            }
         }
         let input = kroma::convenience::file_reference(input, agent.workdir())?;
         match run_task(&mut agent, &input, Some(&mut lines), Some(&line_output)).await {
@@ -411,7 +474,7 @@ async fn run_task(
                     kroma::cli_println!("{answer}");
                 }
             }
-            Ok(true)
+            Ok(!agent.task_control().is_some_and(|host| host.is_active()))
         }
         None => {
             eprintln!("[task] Cancelled. The current model request and shell were stopped.");
@@ -429,6 +492,9 @@ async fn drive_task(
     on_text: &mut (impl FnMut(&str) + Send),
 ) -> Result<Option<String>> {
     let input_handle = agent.task_input();
+    let control = agent.task_control().cloned();
+    let command = agent.task_control_command_name();
+    let mut cancel_goal = false;
     let mut stdin_closed = false;
     let result = {
         let mut task = Box::pin(agent.run(input, on_text));
@@ -456,7 +522,19 @@ async fn drive_task(
                         None => Ok(None),
                     }
                 }, if lines.is_some() && !stdin_closed => match next? {
-                    Some(text) => handle_running_input(&input_handle, text.trim()),
+                    Some(text) => {
+                        match command.as_deref().and_then(|command| kroma::plugins::running_control(command, text.trim())) {
+                            Some(kroma::plugins::RunningControl::Pause) => break None,
+                            Some(kroma::plugins::RunningControl::Cancel) => { cancel_goal = true; break None; },
+                            Some(kroma::plugins::RunningControl::Status) => {
+                                if let Some(snapshot) = control.as_ref().and_then(|host| host.snapshot()) {
+                                    eprintln!("[goal] {} · {} · {}", snapshot.id, snapshot.status.as_str(), snapshot.data.get("summary").and_then(serde_json::Value::as_str).unwrap_or(""));
+                                } else { eprintln!("[goal] 当前没有目标"); }
+                            },
+                            Some(kroma::plugins::RunningControl::Start) => eprintln!("[goal] 请先暂停或取消当前任务，再开始新目标。"),
+                            None => handle_running_input(&input_handle, text.trim()),
+                        }
+                    },
                     None => stdin_closed = true,
                 },
             }
@@ -465,7 +543,11 @@ async fn drive_task(
     match result {
         Some(result) => result.map(Some),
         None => {
-            if let Err(error) = agent.cancel() {
+            if let Err(error) = if cancel_goal {
+                agent.cancel_goal()
+            } else {
+                agent.cancel()
+            } {
                 eprintln!("[task] Cancelled, but the session could not record it: {error:#}");
             }
             Ok(None)
@@ -475,6 +557,44 @@ async fn drive_task(
 
 fn print_pending(input: &TaskInput) {
     eprintln!("{}", pending_text(input));
+}
+
+/// One explicit control command line routed through the unique controller.
+// Mirrors `ControlCommand`: built once per explicit control line, never in a hot
+// loop, so the variant size is not worth boxing across call sites.
+#[allow(clippy::large_enum_variant)]
+enum ControlLine {
+    Prepared(kroma::plugins::PreparedTask),
+    Handled,
+}
+
+/// Returns `None` for ordinary input, so existing commands and plain tasks keep
+/// their behavior. Only the CLI starts a prepared goal task in this milestone.
+async fn dispatch_control_line(agent: &mut Agent, input: &str) -> Result<Option<ControlLine>> {
+    let Some(command) = agent.task_control_command_name() else {
+        return Ok(None);
+    };
+    let Some(arguments) = kroma::plugins::control_arguments(&command, input) else {
+        return Ok(None);
+    };
+    match agent.task_control_command(input, arguments).await? {
+        Some(kroma::plugins::ControlCommand::Text(text)) => {
+            kroma::cli_println!("{text}");
+            Ok(Some(ControlLine::Handled))
+        }
+        Some(kroma::plugins::ControlCommand::HostAction(action)) => {
+            let text = agent.control_host_action(action)?;
+            kroma::cli_println!("{text}");
+            Ok(Some(ControlLine::Handled))
+        }
+        Some(kroma::plugins::ControlCommand::Prepared(task)) => {
+            if !task.output.is_empty() {
+                kroma::cli_println!("{}", task.output);
+            }
+            Ok(Some(ControlLine::Prepared(task)))
+        }
+        None => Ok(None),
+    }
 }
 
 fn handle_running_input(handle: &TaskInput, text: &str) {

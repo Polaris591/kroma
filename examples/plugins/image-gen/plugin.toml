@@ -17,6 +17,10 @@ api_key_env = "KROMA_IMAGE_API_KEY"
 [ui.tool_labels]
 image_generate = "Generate image"
 
+[[commands]]
+name = "/image"
+description = "Generate one image directly from a prompt, without a model turn"
+
 [[tools]]
 name = "image_generate"
 description = "Generate one image from a prompt or edit using input_images. References: attachment:N from the current user turn, previous:N from the preceding user turn, or image:<id> returned by this plugin. Returns a durable image id, local path, and actual dimensions. Never automatically repeat paid calls on uncertain failure."
@@ -43,4 +47,4 @@ description = "Desired aspect ratio. Unsupported ratios fail explicitly rather t
 enum = ["1:1", "3:2", "2:3", "16:9", "9:16", "4:3", "3:4"]
 [tools.parameters.properties.output_path]
 type = "string"
-description = "Optional relative path inside the current project; never overwrites existing files."
+description = "Optional relative path inside the current project; an existing file is replaced."

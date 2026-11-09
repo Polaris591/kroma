@@ -1,0 +1,7 @@
+# Pinned so `cargo clippy --all-targets -- -D warnings` cannot start failing on
+# an unrelated stable-channel lint addition. Keep this in sync with the
+# `toolchain:` inputs in .github/workflows/*.yml.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

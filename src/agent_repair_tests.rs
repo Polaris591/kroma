@@ -3,7 +3,7 @@ use crate::{
     context_state::SummarySegment,
     model::{ModelFuture, StreamFuture, TextResult, Usage},
     protocol::{FunctionCall, ToolCall},
-    tools::{Tool, ToolFuture, ToolResult},
+    tools::{AskAnswer, AskRequest, AskTool, Tool, ToolFuture, ToolResult},
 };
 use serde_json::{json, Value};
 use std::{
@@ -175,7 +175,7 @@ impl Tool for Evidence {
         json!({"type":"function","function":{"name":"evidence","parameters":{"type":"object","properties":{}}}})
     }
     fn execute<'a>(&'a self, _: &'a ToolCall, _: ToolContext<'a>) -> ToolFuture<'a> {
-        Box::pin(async { ToolResult::ok("x".repeat(47_000)) })
+        Box::pin(async { ToolResult::ok("x".repeat(65_000)) })
     }
 }
 
@@ -450,5 +450,118 @@ async fn native_search_keeps_local_tool_available_for_provider_retry() -> Result
             "page reading must stay available: {names:?}"
         );
     }
+    Ok(())
+}
+
+/// Emits one `ask` call, then a plain answer once the result is in.
+#[derive(Default)]
+struct AskModel {
+    calls: AtomicUsize,
+    seen: Mutex<Vec<Message>>,
+}
+
+impl ModelBackend for AskModel {
+    fn complete<'a>(
+        &'a self,
+        messages: &'a [Message],
+        _: &'a [Value],
+        _: &'a mut (dyn FnMut(&str) + Send),
+    ) -> StreamFuture<'a, Completion> {
+        Box::pin(async move {
+            let turn = self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.seen.lock().unwrap() = messages.to_vec();
+            let mut message = Message::new("assistant", "done");
+            if turn == 0 {
+                message = Message::new("assistant", "");
+                message.tool_calls = Some(vec![ToolCall {
+                    id: "ask-1".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "ask".into(),
+                        arguments:
+                            r#"{"question":"Which database?","options":["Postgres","SQLite"]}"#
+                                .into(),
+                    },
+                }]);
+            }
+            Ok(Completion {
+                message,
+                usage: Some(Usage {
+                    input: Some(100),
+                    output: Some(5),
+                    cached: Some(0),
+                    reasoning: Some(0),
+                    ..Default::default()
+                }),
+                elapsed: Duration::ZERO,
+                first_token: None,
+            })
+        })
+    }
+
+    fn generate_text<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+        _: usize,
+    ) -> ModelFuture<'a, TextResult> {
+        Box::pin(async { bail!("unexpected text generation") })
+    }
+}
+
+/// Stands in for the interface: records the question and picks an option.
+#[derive(Default)]
+struct Answerer {
+    asked: Mutex<Vec<AskRequest>>,
+}
+
+impl crate::tools::Asker for Answerer {
+    fn ask<'a>(
+        &'a self,
+        request: AskRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<AskAnswer>> + Send + 'a>> {
+        Box::pin(async move {
+            self.asked.lock().unwrap().push(request);
+            Some(AskAnswer::Answered {
+                picked: vec!["Postgres".into()],
+                typed: None,
+            })
+        })
+    }
+}
+
+/// The whole core path: the registry dispatches the host tool, the answer
+/// reaches the prompt as an ordinary tool result, and the turn continues.
+#[tokio::test]
+async fn the_agent_waits_for_the_person_and_feeds_the_answer_back() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let model = Arc::new(AskModel::default());
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(AskTool::new("ask", "Ask the user to choose")))?;
+    let mut agent = Agent::with_catalog_backends(
+        model.clone(),
+        tools,
+        Arc::new(BuiltinContextFactory),
+        PromptComposer::default(),
+        None,
+        fixture.0.clone(),
+        SessionCatalog::from_default(fixture.0.join("default.json"))?,
+        ContextConfig::with_output_reserve(24_000, 4096)?,
+        false,
+    )?;
+    let answerer = Arc::new(Answerer::default());
+    agent.set_asker(answerer.clone());
+
+    agent.run("move the data", &mut |_| {}).await?;
+
+    let asked = answerer.asked.lock().unwrap();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].question, "Which database?");
+    let seen = model.seen.lock().unwrap().clone();
+    assert!(
+        seen.iter().any(|message| message.role == "tool"
+            && message.content.as_deref() == Some("User selected: Postgres")),
+        "the model sees the answer as a tool result: {seen:?}"
+    );
     Ok(())
 }

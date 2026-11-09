@@ -325,10 +325,10 @@ fn context_checkpoint_has_visible_activity_and_returns_to_connecting() {
     ui.event(UiEvent::TaskStarted);
     ui.event(rx.try_recv().unwrap());
     assert_eq!(ui.phase, "compacting");
-    assert!(ui.activity_status().contains("360"));
-    assert!(ui.activity_status().contains("3 retries"));
+    assert!(ui.activity_status().contains("75s"));
+    assert!(ui.activity_status().contains("1 retry"));
     let rows = rendered_rows(&mut ui, 100, 28);
-    assert!(rows.iter().any(|row| row.contains("360")));
+    assert!(rows.iter().any(|row| row.contains("75s")));
     ui.event(UiEvent::ModelStarted);
     assert_eq!(ui.phase, "waiting");
     ui.event(UiEvent::TaskFinished);

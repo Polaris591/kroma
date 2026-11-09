@@ -3,13 +3,25 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread::sleep;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DATABASE_NAME: &str = "memory.sqlite3";
 const PROJECTS_DIR: &str = "projects";
 const REGISTRY_DIR: &str = "registry";
 const ID_FILE: &str = "kroma-memory-id";
 const DATABASE_SIDECARS: &[&str] = &["-wal", "-shm", "-journal"];
+/// Publishing an identity is a private temp file plus one no-overwrite link, so
+/// a reader rarely has to wait. The retries only cover an older writer that
+/// created the file before filling it.
+const IDENTITY_READS: usize = 5;
+const IDENTITY_RETRY: Duration = Duration::from_millis(20);
+const IDENTITY_ATTEMPTS: usize = 3;
+/// Nothing regenerates an identity silently: the memories of the old id stay in
+/// their own project folder, so recovery must be a deliberate user action.
+const IDENTITY_RECOVERY: &str = "a memory id is never regenerated automatically because the \
+existing memories stay in projects/<old-id>; restore the id, or move this file aside to start a \
+new identity (the old folder is not migrated)";
 
 #[derive(Clone, Debug)]
 pub struct Scope {
@@ -41,18 +53,15 @@ pub fn resolve(data_dir: &Path, workdir: &Path) -> Result<Scope> {
     if data_dir == Path::new(&workdir) {
         bail!("Data directory must not be the workdir");
     }
-    reject_executable_dir(&data_dir)?;
 
     let id = memory_id(&data_dir, Path::new(&workdir))?;
-    let projects = data_dir.join(PROJECTS_DIR);
-    let folder = projects.join(&id);
-    prepare_private_dir(&projects)?;
-    prepare_private_dir(&folder)?;
+    let projects = prepare_private_dir(&data_dir.join(PROJECTS_DIR))?;
+    let folder = prepare_private_dir(&projects.join(&id))?;
 
     let database = folder.join(DATABASE_NAME);
-    prepare_private_file(&database, true)?;
+    prepare_private_file(&database, true, &folder)?;
     for suffix in DATABASE_SIDECARS {
-        prepare_private_file(&sidecar_path(&database, suffix), false)?;
+        prepare_private_file(&sidecar_path(&database, suffix), false, &folder)?;
     }
 
     Ok(Scope {
@@ -65,16 +74,50 @@ pub fn resolve(data_dir: &Path, workdir: &Path) -> Result<Scope> {
 
 /// Stable memory identity. Inside Git it lives in the repository common dir, so
 /// every worktree shares it and a clone or a different repository does not.
-/// Outside Git a user-level registry keyed by the canonical workdir is used.
+/// Outside Git, and whenever `.git` cannot be written, a user-level registry
+/// keyed by the canonical root holds the very same id.
 fn memory_id(data_dir: &Path, workdir: &Path) -> Result<String> {
-    match git_common_dir(workdir) {
-        Some(common) => read_or_create_id(&common.join(ID_FILE), false),
-        None => {
-            let registry = data_dir.join(REGISTRY_DIR);
-            prepare_private_dir(&registry)?;
-            let key = sha256_hex(workdir.to_string_lossy().as_bytes());
-            read_or_create_id(&registry.join(format!("{key}.id")), true)
+    let Some(common) = git_common_dir(workdir) else {
+        let key = sha256_hex(workdir.to_string_lossy().as_bytes());
+        return ensure_identity(&registry_identity_path(data_dir, &key)?, true);
+    };
+    let repository = common.join(ID_FILE);
+    // A readable repository identity always wins, even when `.git` is read-only:
+    // reading must never fall back to a different namespace than the one that
+    // already holds this workspace's memories.
+    if let Some(id) = read_identity(&repository)? {
+        mirror_identity(data_dir, &common, &id);
+        return Ok(id);
+    }
+    // A registry entry can be the only surviving identity when `.git` could not
+    // be written earlier. Keep that namespace instead of minting a new one.
+    let registry =
+        registry_identity_path(data_dir, &sha256_hex(common.to_string_lossy().as_bytes()))?;
+    if let Some(id) = read_identity(&registry)? {
+        // Best effort: a concurrent publisher may already have picked the
+        // repository identity, which then wins on the next resolve.
+        let _ = publish_identity(&repository, &id);
+        // Resolve a concurrent publisher before using a different namespace.
+        match read_identity(&repository) {
+            Ok(Some(published)) => {
+                mirror_identity(data_dir, &common, &published);
+                return Ok(published);
+            }
+            Ok(None) => {}
+            Err(error) if is_read_only(&error) => {}
+            Err(error) => return Err(error),
         }
+        return Ok(id);
+    }
+    match ensure_identity(&repository, false) {
+        Ok(id) => {
+            mirror_identity(data_dir, &common, &id);
+            Ok(id)
+        }
+        // A read-only `.git` (packaged or read-only checkout) must not make
+        // memory unusable, so the identity moves to the user registry.
+        Err(error) if is_read_only(&error) => ensure_identity(&registry, true),
+        Err(error) => Err(error),
     }
 }
 
@@ -132,48 +175,148 @@ fn common_dir_of(gitdir: &Path) -> PathBuf {
     fs::canonicalize(&common).unwrap_or(common)
 }
 
-/// Read an existing identity file or create one atomically. `create_new` makes
-/// concurrent first runs converge on a single id instead of overwriting it.
-fn read_or_create_id(path: &Path, private: bool) -> Result<String> {
-    for _ in 0..2 {
-        match fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                bail!("Memory identity path is not a regular file")
+fn registry_identity_path(data_dir: &Path, key: &str) -> Result<PathBuf> {
+    let registry = prepare_private_dir(&data_dir.join(REGISTRY_DIR))?;
+    Ok(registry.join(format!("{key}.id")))
+}
+
+/// Keep the user registry in step with the repository identity so a later
+/// read-only `.git` resolves to the same namespace. The registry file is a
+/// mirror: memories of an older registry id stay untouched in their own folder.
+fn mirror_identity(data_dir: &Path, common: &Path, id: &str) {
+    let Ok(path) =
+        registry_identity_path(data_dir, &sha256_hex(common.to_string_lossy().as_bytes()))
+    else {
+        return;
+    };
+    if matches!(read_identity(&path), Ok(Some(existing)) if existing == id) {
+        return;
+    }
+    let temp = temp_identity_path(&path);
+    if write_identity(&temp, id).is_err() {
+        return;
+    }
+    if fs::rename(&temp, &path).is_err() {
+        let _ = fs::remove_file(&temp);
+        return;
+    }
+    let _ = restrict_file(&path);
+    let _ = verify_private(&path, "Private registry file");
+}
+
+/// Read an existing identity or publish a fresh one. Publishing never
+/// overwrites, so concurrent first runs converge on a single id.
+fn ensure_identity(path: &Path, private: bool) -> Result<String> {
+    for _ in 0..IDENTITY_ATTEMPTS {
+        if let Some(id) = read_identity(path)? {
+            if private {
+                restrict_file(path)?;
+                verify_private(path, "Private registry file")?;
             }
-            Ok(_) => {
-                let text = fs::read_to_string(path)
-                    .with_context(|| format!("Failed to read {}", path.display()))?;
-                let id = text.trim().to_string();
-                if !valid_identity(&id) {
-                    bail!("Memory identity file is invalid");
-                }
-                return Ok(id);
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| format!("Failed to inspect {}", path.display()))
-            }
+            return Ok(id);
         }
         let id = random_hex(16);
-        match OpenOptions::new().write(true).create_new(true).open(path) {
-            Ok(mut file) => {
-                use std::io::Write;
-                file.write_all(id.as_bytes())?;
-                file.write_all(b"\n")?;
-                file.sync_all()?;
-                drop(file);
+        match publish_identity(path, &id) {
+            Ok(()) => {
                 if private {
-                    let _ = restrict_file(path);
+                    restrict_file(path)?;
+                    verify_private(path, "Private registry file")?;
                 }
                 return Ok(id);
             }
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) if is_io_kind(&error, &[ErrorKind::AlreadyExists]) => continue,
             Err(error) => {
-                return Err(error).with_context(|| format!("Failed to create {}", path.display()))
+                return Err(error).with_context(|| {
+                    format!("Failed to create a memory identity: {}", path.display())
+                })
             }
         }
     }
-    bail!("Failed to create a memory identity")
+    bail!(
+        "Failed to create a memory identity: {} was published concurrently too often",
+        path.display()
+    )
+}
+
+/// `Ok(None)` means "not there yet". An existing file is either a usable id or
+/// an error: an empty or invalid id is never replaced, because the memories
+/// stored under it would be silently orphaned.
+fn read_identity(path: &Path) -> Result<Option<String>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if is_link_like(&metadata) || !metadata.is_file() => bail!(
+            "Memory identity must be a regular file, not a link: {}. {}",
+            path.display(),
+            IDENTITY_RECOVERY
+        ),
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Failed to inspect memory identity: {}", path.display()))
+        }
+    }
+    for attempt in 0..IDENTITY_READS {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read memory identity: {}", path.display()))?;
+        let id = text.trim();
+        if valid_identity(id) {
+            return Ok(Some(id.to_string()));
+        }
+        if !id.is_empty() {
+            bail!(
+                "Memory identity is invalid: {}. {}",
+                path.display(),
+                IDENTITY_RECOVERY
+            );
+        }
+        if attempt + 1 < IDENTITY_READS {
+            sleep(IDENTITY_RETRY);
+        }
+    }
+    bail!(
+        "Memory identity is empty (an interrupted write): {}. {}",
+        path.display(),
+        IDENTITY_RECOVERY
+    )
+}
+
+/// Write the id into a private sibling and publish it with a no-overwrite link,
+/// so no reader ever observes a half-written identity and no writer ever
+/// replaces an existing one.
+fn publish_identity(path: &Path, id: &str) -> Result<()> {
+    let temp = temp_identity_path(path);
+    write_identity(&temp, id)?;
+    let published = fs::hard_link(&temp, path);
+    let _ = fs::remove_file(&temp);
+    match published {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => Err(error.into()),
+        // Not every filesystem has hard links. A direct create-only write still
+        // cannot overwrite an identity, only its visibility window is wider.
+        Err(_) => write_identity(path, id),
+    }
+}
+
+fn write_identity(path: &Path, id: &str) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("Failed to create {}", path.display()))?;
+    use std::io::Write;
+    file.write_all(id.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn temp_identity_path(path: &Path) -> PathBuf {
+    path.with_file_name(format!(".{ID_FILE}.{}.tmp", random_hex(8)))
 }
 
 fn valid_identity(id: &str) -> bool {
@@ -245,96 +388,65 @@ fn prepare_data_dir(data_dir: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
-fn reject_executable_dir(data_dir: &Path) -> Result<()> {
-    let Ok(executable) = std::env::current_exe() else {
-        return Ok(());
-    };
-    let Ok(executable) = fs::canonicalize(executable) else {
-        return Ok(());
-    };
-    let Some(executable_dir) = executable.parent() else {
-        return Ok(());
-    };
-    if data_dir.starts_with(executable_dir) {
-        bail!("Data directory must not be inside the executable directory");
-    }
-    Ok(())
-}
-
-fn prepare_private_dir(path: &Path) -> Result<()> {
+/// Prepare a private directory and return its real path. A symlink or junction
+/// is a deliberate relocation (the data directory itself is allowed to be one),
+/// so it is followed and the real target is validated and restricted instead.
+fn prepare_private_dir(path: &Path) -> Result<PathBuf> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) => validate_dir_metadata(path, &metadata)?,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            #[cfg(unix)]
-            let mut builder = DirBuilder::new();
-            #[cfg(not(unix))]
-            let builder = DirBuilder::new();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            match builder.create(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                    validate_dir_metadata(path, &fs::symlink_metadata(path)?)?;
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("Failed to create private directory: {}", path.display())
-                    });
-                }
-            }
-        }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => create_private_dir(path)?,
         Err(error) => {
             return Err(error).with_context(|| {
                 format!("Failed to inspect private directory: {}", path.display())
             });
         }
     }
-    restrict_directory(path)
-}
-
-fn validate_dir_metadata(path: &Path, metadata: &fs::Metadata) -> Result<()> {
-    if is_link_like(metadata) {
-        bail!(
-            "Private storage directory must not be a symlink or reparse point: {}",
+    let real = fs::canonicalize(path).with_context(|| {
+        format!(
+            "Failed to resolve private directory (it may be a broken link): {}",
             path.display()
-        );
-    }
+        )
+    })?;
+    let metadata = fs::metadata(&real)
+        .with_context(|| format!("Failed to inspect private directory: {}", real.display()))?;
     if !metadata.is_dir() {
         bail!(
             "Private storage path must be a directory: {}",
             path.display()
         );
     }
-    Ok(())
+    reject_network_path(&real, "Private storage directory")?;
+    secure(&real, true)?;
+    verify_private(&real, "Private storage directory")?;
+    Ok(real)
 }
 
-fn prepare_private_file(path: &Path, create: bool) -> Result<()> {
+fn create_private_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    let builder = {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = DirBuilder::new();
+        builder.mode(0o700);
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = DirBuilder::new();
+    match builder.create(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("Failed to create private directory: {}", path.display())),
+    }
+}
+
+/// Prepare a private file the workspace writes itself. Files are never
+/// followed: a link here would move the database or a sidecar outside the
+/// project folder, where its SQLite writes would not be private.
+fn prepare_private_file(path: &Path, create: bool, folder: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => validate_file_metadata(path, &metadata)?,
         Err(error) if error.kind() == ErrorKind::NotFound && !create => return Ok(()),
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            match options.open(path) {
-                Ok(_) => {}
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                    validate_file_metadata(path, &fs::symlink_metadata(path)?)?;
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("Failed to create private database: {}", path.display())
-                    });
-                }
-            }
-        }
+        Err(error) if error.kind() == ErrorKind::NotFound => create_private_file(path)?,
         Err(error) => {
             return Err(error).with_context(|| {
                 format!(
@@ -344,7 +456,39 @@ fn prepare_private_file(path: &Path, create: bool) -> Result<()> {
             });
         }
     }
-    restrict_file(path)
+    let real = fs::canonicalize(path).with_context(|| {
+        format!(
+            "Failed to resolve private storage file (it may be a broken link): {}",
+            path.display()
+        )
+    })?;
+    if real.parent() != Some(folder) {
+        bail!(
+            "Private storage file must stay inside its project folder: {}",
+            path.display()
+        );
+    }
+    secure(&real, false)?;
+    verify_private(&real, "Private storage file")?;
+    Ok(())
+}
+
+fn create_private_file(path: &Path) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            validate_file_metadata(path, &fs::symlink_metadata(path)?)
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("Failed to create private database: {}", path.display())),
+    }
 }
 
 fn validate_file_metadata(path: &Path, metadata: &fs::Metadata) -> Result<()> {
@@ -381,6 +525,66 @@ fn is_link_like(metadata: &fs::Metadata) -> bool {
     }
     #[cfg(not(windows))]
     false
+}
+
+fn is_io_kind(error: &anyhow::Error, kinds: &[ErrorKind]) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(|io| kinds.contains(&io.kind()))
+}
+
+fn is_read_only(error: &anyhow::Error) -> bool {
+    is_io_kind(
+        error,
+        &[ErrorKind::PermissionDenied, ErrorKind::ReadOnlyFilesystem],
+    )
+}
+
+thread_local! {
+    /// Paths whose private permissions this process already applied. Squeezing
+    /// an ACL or a mode again on every recall was pure syscall overhead.
+    static SECURED: std::cell::RefCell<std::collections::BTreeSet<PathBuf>> =
+        std::cell::RefCell::new(std::collections::BTreeSet::new());
+}
+
+fn secure(path: &Path, directory: bool) -> Result<()> {
+    if SECURED.with(|done| done.borrow().contains(path)) {
+        return Ok(());
+    }
+    if directory {
+        restrict_directory(path)?;
+    } else {
+        restrict_file(path)?;
+    }
+    SECURED.with(|done| done.borrow_mut().insert(path.to_path_buf()));
+    Ok(())
+}
+
+/// Confirm the permissions just applied are really in force on the resolved
+/// target, so a filesystem that ignores modes is not silently trusted.
+#[cfg(unix)]
+fn verify_private(path: &Path, what: &str) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(path)
+        .with_context(|| format!("Failed to verify {what}: {}", path.display()))?
+        .permissions()
+        .mode()
+        & 0o777;
+    if mode & 0o077 != 0 {
+        bail!(
+            "{what} permissions could not be made private: {} is 0{mode:03o}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Windows private storage is an explicit protected DACL; a failed
+/// `SetNamedSecurityInfoW` is already an error, so there is nothing to re-read.
+#[cfg(not(unix))]
+fn verify_private(_path: &Path, _what: &str) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -632,6 +836,10 @@ mod tests {
             fs::create_dir(&work).unwrap();
             Self { root, data, work }
         }
+
+        fn canonical_data(&self) -> PathBuf {
+            fs::canonicalize(&self.data).unwrap()
+        }
     }
 
     fn git_repo(root: &Path, name: &str) -> PathBuf {
@@ -654,6 +862,17 @@ mod tests {
         worktree
     }
 
+    fn registry_identity(data: &Path, key_source: &Path) -> PathBuf {
+        let key = sha256_hex(key_source.to_string_lossy().as_bytes());
+        data.join(REGISTRY_DIR).join(format!("{key}.id"))
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
     #[test]
     fn identity_uses_a_user_registry_outside_git() {
         let fixture = Fixture::new();
@@ -662,12 +881,11 @@ mod tests {
         assert_eq!(scope.workdir, canonical.to_str().unwrap());
         assert_eq!(scope.id.len(), 32);
         assert!(scope.id.chars().all(|item| item.is_ascii_hexdigit()));
-        let data = fs::canonicalize(&fixture.data).unwrap();
-        assert_eq!(scope.folder, data.join("projects").join(&scope.id));
-        assert_eq!(scope.database, scope.folder.join("memory.sqlite3"));
+        let data = fixture.canonical_data();
+        assert_eq!(scope.folder, data.join(PROJECTS_DIR).join(&scope.id));
+        assert_eq!(scope.database, scope.folder.join(DATABASE_NAME));
 
-        let key = sha256_hex(scope.workdir.as_bytes());
-        let registry = data.join("registry").join(format!("{key}.id"));
+        let registry = registry_identity(&data, Path::new(&scope.workdir));
         assert_eq!(fs::read_to_string(&registry).unwrap().trim(), scope.id);
 
         let same = resolve(&fixture.data, &fixture.work.join(".")).unwrap();
@@ -705,6 +923,22 @@ mod tests {
     }
 
     #[test]
+    fn the_repository_identity_is_mirrored_into_the_user_registry() {
+        let fixture = Fixture::new();
+        let repo = git_repo(fixture.root.path(), "repo");
+        let scope = resolve(&fixture.data, &repo).unwrap();
+        let common = fs::canonicalize(repo.join(".git")).unwrap();
+        let mirror = registry_identity(&fixture.canonical_data(), &common);
+        assert_eq!(fs::read_to_string(&mirror).unwrap().trim(), scope.id);
+        assert_eq!(
+            fs::read_to_string(repo.join(".git").join(ID_FILE))
+                .unwrap()
+                .trim(),
+            scope.id
+        );
+    }
+
+    #[test]
     fn rejects_relative_data_dir() {
         let fixture = Fixture::new();
         assert!(resolve(Path::new("relative-data"), &fixture.work).is_err());
@@ -727,15 +961,15 @@ mod tests {
     fn private_storage_uses_0700_and_0600() {
         use std::os::unix::fs::PermissionsExt;
 
-        fn mode(path: &Path) -> u32 {
-            fs::metadata(path).unwrap().permissions().mode() & 0o777
-        }
-
         let fixture = Fixture::new();
         fs::create_dir_all(&fixture.data).unwrap();
         fs::set_permissions(&fixture.data, fs::Permissions::from_mode(0o755)).unwrap();
         let scope = resolve(&fixture.data, &fixture.work).unwrap();
-        assert_eq!(mode(&fixture.data), 0o755);
+        let registry = fixture.canonical_data().join(REGISTRY_DIR);
+        let identity = registry_identity(&fixture.canonical_data(), Path::new(&scope.workdir));
+        assert_eq!(mode(&fixture.data), 0o755, "the data root stays user-owned");
+        assert_eq!(mode(&registry), 0o700);
+        assert_eq!(mode(&identity), 0o600);
         assert_eq!(mode(scope.folder.parent().unwrap()), 0o700);
         assert_eq!(mode(&scope.folder), 0o700);
         assert_eq!(mode(&scope.database), 0o600);
@@ -757,33 +991,49 @@ mod tests {
     fn rejects_projects_path_that_is_not_a_directory() {
         let fixture = Fixture::new();
         fs::create_dir_all(&fixture.data).unwrap();
-        fs::write(fixture.data.join("projects"), b"not a directory").unwrap();
+        fs::write(fixture.data.join(PROJECTS_DIR), b"not a directory").unwrap();
         assert!(resolve(&fixture.data, &fixture.work).is_err());
     }
 
     #[test]
-    fn rejects_symlinked_projects_directory() {
+    fn a_relocated_projects_directory_is_followed_and_locked_down() {
         let fixture = Fixture::new();
-        let outside = fixture.root.path().join("outside");
-        fs::create_dir(&outside).unwrap();
+        let elsewhere = fixture.root.path().join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
         fs::create_dir_all(&fixture.data).unwrap();
-        if !dir_symlink(&outside, &fixture.data.join("projects")) {
+        if !dir_symlink(&elsewhere, &fixture.data.join(PROJECTS_DIR)) {
             return;
         }
-        assert!(resolve(&fixture.data, &fixture.work).is_err());
+        let scope = resolve(&fixture.data, &fixture.work).unwrap();
+        let real = fs::canonicalize(&elsewhere).unwrap();
+        assert_eq!(scope.folder, real.join(&scope.id));
+        assert_eq!(scope.database, real.join(&scope.id).join(DATABASE_NAME));
+        assert!(scope.database.is_file());
+        #[cfg(unix)]
+        assert_eq!(mode(&real), 0o700, "the relocation target is locked down");
+        let same = resolve(&fixture.data, &fixture.work).unwrap();
+        assert_eq!(same.id, scope.id);
+        assert_eq!(same.folder, scope.folder);
     }
 
     #[test]
-    fn rejects_symlinked_project_directory() {
+    fn a_relocated_project_folder_is_followed_and_stays_contained() {
         let fixture = Fixture::new();
         let seed = resolve(&fixture.data, &fixture.work).unwrap();
-        let outside = fixture.root.path().join("outside");
-        fs::create_dir(&outside).unwrap();
-        fs::create_dir_all(fixture.data.join("projects")).unwrap();
-        if !dir_symlink(&outside, &fixture.data.join("projects").join(&seed.id)) {
+        let elsewhere = fixture.root.path().join("project-elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        fs::remove_dir_all(&seed.folder).unwrap();
+        if !dir_symlink(&elsewhere, &seed.folder) {
             return;
         }
-        assert!(resolve(&fixture.data, &fixture.work).is_err());
+        let scope = resolve(&fixture.data, &fixture.work).unwrap();
+        let real = fs::canonicalize(&elsewhere).unwrap();
+        assert_eq!(scope.id, seed.id);
+        assert_eq!(scope.folder, real);
+        assert_eq!(scope.database, real.join(DATABASE_NAME));
+        assert!(scope.database.is_file());
+        #[cfg(unix)]
+        assert_eq!(mode(&real), 0o700);
     }
 
     #[test]
@@ -810,6 +1060,159 @@ mod tests {
             return;
         }
         assert!(resolve(&fixture.data, &fixture.work).is_err());
+    }
+
+    /// A portable build keeps its data next to the binary. Only the private
+    /// subdirectories need to be locked down, so that location is allowed.
+    #[test]
+    fn data_next_to_the_executable_is_allowed() {
+        let Ok(executable) = std::env::current_exe() else {
+            return;
+        };
+        let Some(parent) = executable.parent() else {
+            return;
+        };
+        let root = parent.join(format!("kroma-portable-{}", random_hex(6)));
+        let work = root.join("work");
+        if fs::create_dir_all(&work).is_err() {
+            return;
+        }
+        // Keep the identity inside the fixture instead of the enclosing repo.
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let data = root.join("data");
+        let scope = resolve(&data, &work).unwrap();
+        assert_eq!(
+            scope.database,
+            fs::canonicalize(&data)
+                .unwrap()
+                .join(PROJECTS_DIR)
+                .join(&scope.id)
+                .join(DATABASE_NAME)
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_first_resolves_converge_on_one_identity() {
+        let fixture = Fixture::new();
+        let data = fixture.data.clone();
+        let work = fixture.work.clone();
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let data = data.clone();
+                let work = work.clone();
+                std::thread::spawn(move || resolve(&data, &work).map(|scope| scope.id))
+            })
+            .collect();
+        let ids: Vec<String> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap().unwrap())
+            .collect();
+        assert!(
+            ids.iter().all(|id| *id == ids[0]),
+            "concurrent first runs must converge: {ids:?}"
+        );
+        assert!(valid_identity(&ids[0]));
+        let names: Vec<String> = fs::read_dir(fixture.canonical_data().join(REGISTRY_DIR))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names.len(),
+            1,
+            "one identity file and no leaked temp files: {names:?}"
+        );
+        assert!(names[0].ends_with(".id"));
+    }
+
+    #[test]
+    fn an_invalid_repository_identity_is_reported_and_not_replaced() {
+        let fixture = Fixture::new();
+        let repo = git_repo(fixture.root.path(), "repo");
+        fs::write(repo.join(".git").join(ID_FILE), b"zz\n").unwrap();
+        let error = resolve(&fixture.data, &repo).unwrap_err().to_string();
+        assert!(error.contains("Memory identity is invalid"), "{error}");
+        assert!(error.contains("never regenerated"), "{error}");
+        assert_eq!(
+            fs::read_to_string(repo.join(".git").join(ID_FILE)).unwrap(),
+            "zz\n"
+        );
+        assert!(
+            !fixture.canonical_data().join(PROJECTS_DIR).exists(),
+            "an unusable identity must not publish storage"
+        );
+    }
+
+    #[test]
+    fn an_invalid_registry_identity_is_reported_and_not_replaced() {
+        let fixture = Fixture::new();
+        let scope = resolve(&fixture.data, &fixture.work).unwrap();
+        let path = registry_identity(&fixture.canonical_data(), Path::new(&scope.workdir));
+        fs::write(&path, b"not a memory id\n").unwrap();
+        let error = resolve(&fixture.data, &fixture.work)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Memory identity is invalid"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "not a memory id\n");
+    }
+
+    #[test]
+    fn an_empty_identity_is_reported_and_not_replaced() {
+        let fixture = Fixture::new();
+        let scope = resolve(&fixture.data, &fixture.work).unwrap();
+        let path = registry_identity(&fixture.canonical_data(), Path::new(&scope.workdir));
+        fs::write(&path, b"").unwrap();
+        let error = resolve(&fixture.data, &fixture.work)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Memory identity is empty"), "{error}");
+        assert!(
+            error.contains(&path.display().to_string()),
+            "the error names the file: {error}"
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"",
+            "an interrupted identity is never regenerated"
+        );
+    }
+
+    /// A read-only `.git` (packaged or read-only checkout) must keep one stable
+    /// identity in the user registry and adopt it back once the repo is writable.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_git_dir_falls_back_to_the_registry_and_keeps_one_identity() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new();
+        let repo = git_repo(fixture.root.path(), "repo");
+        let git = repo.join(".git");
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o500)).unwrap();
+        // Root ignores directory modes, so probe instead of trusting the mode.
+        if fs::write(git.join("probe"), b"").is_ok() {
+            let _ = fs::remove_file(git.join("probe"));
+            fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let first = resolve(&fixture.data, &repo).unwrap();
+        let second = resolve(&fixture.data, &repo).unwrap();
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(second.id, first.id, "a read-only .git keeps one identity");
+        let registry =
+            registry_identity(&fixture.canonical_data(), &fs::canonicalize(&git).unwrap());
+        assert_eq!(fs::read_to_string(&registry).unwrap().trim(), first.id);
+        assert!(
+            !git.join(ID_FILE).exists(),
+            "a read-only .git is not written"
+        );
+
+        let third = resolve(&fixture.data, &repo).unwrap();
+        assert_eq!(third.id, first.id, "the repository adopts the registry id");
+        assert_eq!(
+            fs::read_to_string(git.join(ID_FILE)).unwrap().trim(),
+            first.id
+        );
     }
 
     #[cfg(unix)]

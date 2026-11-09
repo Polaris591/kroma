@@ -13,6 +13,30 @@ pub struct SummarySegment {
     pub text: String,
 }
 
+/// Provider-reported input for one completed request, kept so a reopened
+/// session keeps calibrating instead of dropping back to a byte estimate.
+/// Only counters and hashes are stored: the request projection itself is
+/// never duplicated on disk, and every reader revalidates it against the
+/// live transcript before using it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeasurementBase {
+    pub input: u64,
+    pub sent_len: usize,
+    pub message_count: usize,
+    pub extra_tokens: usize,
+    pub prefix_hash: u64,
+    pub system_hash: u64,
+    pub prompt_fingerprint: u64,
+    pub tools_hash: u64,
+    pub summaries_hash: u64,
+    pub state_revision: u64,
+    pub covered_until: usize,
+    #[serde(default)]
+    pub skips_system: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CompactionState {
     #[serde(default)]
@@ -26,6 +50,10 @@ pub struct CompactionState {
     pub cleared_tools: BTreeSet<usize>,
     #[serde(default)]
     pub revision: u64,
+    /// Last provider measurement that may still describe this state. Advisory
+    /// only: any checkpoint drops it and every reader revalidates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement: Option<MeasurementBase>,
 }
 
 impl Default for CompactionState {
@@ -37,6 +65,7 @@ impl Default for CompactionState {
             consumed_until: 1,
             cleared_tools: BTreeSet::new(),
             revision: 0,
+            measurement: None,
         }
     }
 }

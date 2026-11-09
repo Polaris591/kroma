@@ -120,6 +120,7 @@ async fn plugin_receives_opt_in_image_attachment_and_saves_a_durable_result() ->
                 workdir: &workdir,
                 archive: &archive,
                 on_output: None,
+                ask: None,
             },
         )
         .await;

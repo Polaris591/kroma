@@ -265,8 +265,8 @@ async fn project_instructions_reload_between_tasks_without_polluting_saved_syste
     Ok(())
 }
 
-/// First-call edits must be replanned once a nested instruction becomes
-/// relevant. A deferred tool result is durable but the command never ran.
+/// A nested instruction that a declared location points at is loaded before the
+/// write; a path that only appears in tool output is not a declared location.
 struct NestedInstructionProbe {
     seen: Mutex<Vec<Vec<Message>>>,
     discover_by_result: bool,
@@ -390,21 +390,32 @@ async fn nested_instruction_preflight(discover_by_result: bool) -> Result<()> {
         .as_deref()
         .unwrap()
         .contains("DEEP_DIRECTORY_RULE"));
-    assert!(seen[1][0]
+    let loaded = seen[1][0]
         .content
         .as_deref()
         .unwrap()
-        .contains("DEEP_DIRECTORY_RULE"));
+        .contains("DEEP_DIRECTORY_RULE");
     let tool_results: Vec<_> = seen[1].iter().filter(|m| m.role == "tool").collect();
-    assert_eq!(tool_results.len(), if discover_by_result { 2 } else { 1 });
-    assert!(tool_results
-        .last()
-        .unwrap()
-        .content
-        .as_deref()
-        .unwrap()
-        .contains("not_executed"));
-    assert!(!dir.join("marker.txt").exists());
+    if discover_by_result {
+        // A path that only shows up in tool output is not a declared location:
+        // the batch runs as returned and no nested rule is loaded for it.
+        assert!(!loaded);
+        assert_eq!(tool_results.len(), 2);
+        assert!(dir.join("marker.txt").exists());
+    } else {
+        // A declared target directory loads its own instructions first, and the
+        // write is replaced by a durable "not executed" result.
+        assert!(loaded);
+        assert_eq!(tool_results.len(), 1);
+        assert!(tool_results
+            .last()
+            .unwrap()
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("not_executed"));
+        assert!(!dir.join("marker.txt").exists());
+    }
     assert!(!dir.join("src/deep/marker.txt").exists());
     drop(seen);
     drop(agent);
@@ -418,6 +429,6 @@ async fn first_write_into_nested_directory_is_not_dispatched_before_instructions
 }
 
 #[tokio::test]
-async fn newly_discovered_nested_instructions_defer_remaining_batch_tools() -> Result<()> {
+async fn a_path_seen_only_in_tool_output_does_not_hold_back_the_batch() -> Result<()> {
     nested_instruction_preflight(true).await
 }

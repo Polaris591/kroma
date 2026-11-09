@@ -525,7 +525,7 @@ Docs: docs/quickstart.md - docs/security.md"
 pub fn help_for(topic: &str) -> &'static str {
     match topic {
         "config" => "Usage: kroma config [list|show|set <name>|use <name>|delete <name>|test <name>]\n\nProfiles live in ~/.kroma/config.json (or KROMA_CONFIG_FILE).\nRun 'kroma setup' for a guided first-run flow.",
-        "plugins" => "Usage: kroma plugins [list|enable <id>|disable <id>|install <path>|check <path>|uninstall <id>|config <id>|set <id> <key> <value>|reset <id> <key>]\n\nInstalled plugins are disabled until enabled; restart or /plugins reload after enabling.",
+        "plugins" => "Usage: kroma plugins [list|enable <id>|disable <id>|install <path>|check <path>|uninstall <id>|config <id>|set <id> <key> <value>|reset <id> <key>]\n\nInstalled plugins are disabled until enabled; restart or /plugins reload after enabling.\nPlugins with a [settings] table reject unknown keys; 'set' converts the value to the type of that key's manifest default (bool, integer, string array, string).",
         "diagnostics" => "Usage: kroma diagnostics [--output <new-directory>]\n\nWrites a local-only allowlisted bundle. No upload, model request or plugin process.",
         "trust-project" => "Usage: kroma trust-project [--revoke]\n\nApproves or revokes this project's .kroma/mcp.json. The approval is bound to its content.",
         "recover-context" => "Usage: kroma recover-context [session-id]\n\nResets unavailable custom context memory while preserving raw history.",

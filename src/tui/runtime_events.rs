@@ -67,6 +67,14 @@ pub enum UiEvent {
         chunk: String,
     },
     SessionTitleUpdated(String),
+    ControlStatus {
+        owner: String,
+        id: String,
+        revision: u64,
+        status: String,
+        reason: String,
+        summary: String,
+    },
     TaskFinished,
 }
 
@@ -160,6 +168,22 @@ impl crate::events::EventSink for UiSink {
                 id: id.to_owned(),
                 stream: stream.to_owned(),
                 chunk: chunk.to_owned(),
+            }),
+            RuntimeEvent::TaskControlChanged {
+                command: _,
+                owner,
+                id,
+                revision,
+                status,
+                reason,
+                summary,
+            } => Some(UiEvent::ControlStatus {
+                owner: owner.to_owned(),
+                id: id.to_owned(),
+                revision,
+                status: status.to_owned(),
+                reason: reason.to_owned(),
+                summary: summary.to_owned(),
             }),
             RuntimeEvent::TaskFinished { .. } => Some(UiEvent::TaskFinished),
             _ => None,

@@ -52,7 +52,12 @@ fixed on a best-effort basis, and credits are given only with permission.
 ## Safety limits to keep in mind
 
 Kroma executes tools with your user permissions and asks for no per-command
-approval. It is not a sandbox. Git-worktree snapshots cannot undo `git push`,
+approval. It is not a sandbox. The `shell` tool inherits the full host
+environment, including provider credentials, so a prompt-injected `env` or
+`echo $KEY` reaches the model and its provider. Project MCP servers are launched
+with host secrets stripped (`KROMA_PLUGIN_ISOLATE_ENV` extends that to plugins);
+shell commands deliberately are not, because builds and deploys depend on those
+variables. Git-worktree snapshots cannot undo `git push`,
 database or network side effects, files ignored by `.gitignore`, or changes
 outside the worktree. Run untrusted tasks in a disposable worktree, container or
 VM. Updates are manual only: there is no startup check and no background

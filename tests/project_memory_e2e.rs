@@ -1,4 +1,4 @@
-//! Real-host integration for the zero-maintenance project-memory plugin.
+//! Real-host integration for quote-backed project memory without lifecycle capture.
 //!
 //! The plugin binary is built separately (see examples/plugins/project-memory).
 //! Set KROMA_MEMORY_BIN to its path, or build the default debug binary. When no
@@ -167,6 +167,7 @@ async fn call_tool_with_user(
                 workdir,
                 archive,
                 on_output: None,
+                ask: None,
             },
         )
         .await;
@@ -264,12 +265,12 @@ async fn zero_maintenance_flow_is_automatic_persistent_and_isolated() -> Result<
         .content
         .as_deref()
         .unwrap_or("")
-        .contains("Project memory is automatic"));
+        .contains("Remember durable project preferences"));
     let manifest: toml::Value = toml::from_str(&fs::read_to_string(
         user.join("project-memory/plugin.toml"),
     )?)?;
     assert_eq!(manifest["api_version"].as_integer(), Some(2));
-    assert_eq!(manifest["capabilities"].as_array().map(Vec::len), Some(2));
+    assert_eq!(manifest["capabilities"].as_array().map(Vec::len), Some(1));
     assert!(manifest.get("hooks").is_none());
     assert!(manifest.get("context").is_none());
     assert!(manifest.get("events").is_none());
@@ -279,28 +280,49 @@ async fn zero_maintenance_flow_is_automatic_persistent_and_isolated() -> Result<
     let (content, error) = call_tool(
         &tools,
         "memory_remember",
-        json!({"kind":"preference","text":"Use pnpm, not npm","quote":quote}),
+        json!({"kind":"preference","text":"Never use pnpm","quote":quote}),
+        &workspace_a,
+        &archive,
+    )
+    .await;
+    assert!(
+        error,
+        "a host without real user proof cannot authorize a rule: {content}"
+    );
+    let (content, error) = call_tool_with_user(
+        &tools,
+        "memory_remember",
+        json!({"kind":"preference","text":"Use pnpm for this project, not npm","quote":quote}),
+        &workspace_a,
+        &archive,
+        Some(quote),
+        Some(1),
+    )
+    .await;
+    assert!(!error, "{content}");
+    let remembered: Value = serde_json::from_str(&content)?;
+    assert_eq!(remembered["state"], "accepted");
+    assert_eq!(remembered["searchable"], true);
+    let (content, error) = call_tool(
+        &tools,
+        "memory_read",
+        json!({"ids":[remembered["id"],"unknown"]}),
         &workspace_a,
         &archive,
     )
     .await;
     assert!(!error, "{content}");
-    let remembered: Value = serde_json::from_str(&content)?;
-    assert_eq!(remembered["state"], "pending");
-    assert_eq!(remembered["searchable"], false);
-    let (content, _) = call_tool(
-        &tools,
-        "memory_search",
-        json!({"query":"pnpm"}),
-        &workspace_a,
-        &archive,
-    )
-    .await;
-    let hits: Value = serde_json::from_str(&content)?;
-    assert!(
-        hits["results"].as_array().is_some_and(Vec::is_empty),
-        "pending rules must not be searchable"
+    let read: Value = serde_json::from_str(&content)?;
+    assert_eq!(read["count"], 1);
+    assert_eq!(
+        read["memories"][0]["text"], "Use pnpm for this project, not npm",
+        "the rule keeps its subject instead of a bare quote fragment"
     );
+    assert_eq!(
+        read["memories"][0]["source_quote"], quote,
+        "the user's own words stay as provenance"
+    );
+    assert_eq!(read["missing"], json!(["unknown"]));
 
     // New host contract: verified current-user text is supplied out-of-band,
     // not by the model's function arguments, and writes become active NOW.
@@ -331,6 +353,49 @@ async fn zero_maintenance_flow_is_automatic_persistent_and_isolated() -> Result<
     let hits: Value = serde_json::from_str(&content)?;
     assert_eq!(hits["results"].as_array().unwrap().len(), 1);
 
+    // A rule at the end of a long request is still the actual user's words.
+    let tail_rule = "长期使用结构化日志，保留错误上下文";
+    let long_current = format!(
+        "{}
+{tail_rule}",
+        "附加说明。".repeat(400)
+    );
+    let (content, error) = call_tool_with_user(
+        &tools,
+        "memory_remember",
+        json!({"kind":"decision","text":tail_rule,"quote":tail_rule}),
+        &workspace_a,
+        &archive,
+        Some(&long_current),
+        Some(3),
+    )
+    .await;
+    assert!(!error, "a tail that the host sent must verify: {content}");
+
+    // Beyond the host's bounded excerpt the quote is unverifiable; say so
+    // rather than claiming the user never said it.
+    let beyond = format!(
+        "{}
+{beyond_rule}",
+        "附加说明。".repeat(1200),
+        beyond_rule = "另一条规则"
+    );
+    let (content, error) = call_tool_with_user(
+        &tools,
+        "memory_remember",
+        json!({"kind":"decision","text":"另一条规则","quote":"另一条规则"}),
+        &workspace_a,
+        &archive,
+        Some(&beyond),
+        Some(4),
+    )
+    .await;
+    assert!(error, "an unsent tail must not be accepted: {content}");
+    assert!(
+        content.contains("beginning of this long user message"),
+        "{content}"
+    );
+
     let captured = Arc::new(EchoModel::default());
     let model = enabled.model_hooks(
         captured.clone(),
@@ -342,12 +407,11 @@ async fn zero_maintenance_flow_is_automatic_persistent_and_isolated() -> Result<
         Message::new("user", quote),
     ];
     model.complete(&first_task, &[], &mut |_| {}).await?;
-    // Legacy pending proposals are promoted only after the host's durable
-    // task boundary, not by an intermediate assistant model response.
-    model
-        .task_finished("session-a", &archive, &first_task, "completed")
-        .await?;
-    let (content, _) = call_tool(
+    assert!(
+        !model.has_task_finished_hook(),
+        "project memory must not collect task text or promote pending proposals"
+    );
+    let (content, error) = call_tool(
         &tools,
         "memory_search",
         json!({"query":"pnpm"}),
@@ -355,6 +419,7 @@ async fn zero_maintenance_flow_is_automatic_persistent_and_isolated() -> Result<
         &archive,
     )
     .await;
+    assert!(!error, "{content}");
     let hits: Value = serde_json::from_str(&content)?;
     assert_eq!(hits["results"].as_array().unwrap().len(), 1);
 
@@ -369,7 +434,10 @@ async fn zero_maintenance_flow_is_automatic_persistent_and_isolated() -> Result<
         .and_then(|message| message.content.as_deref())
         .unwrap_or("");
     assert!(injected.contains("<plugin-context trust=\"unverified-reference\">"));
-    assert!(injected.contains("Use pnpm, not npm"));
+    assert!(
+        injected.contains("Use pnpm for this project, not npm"),
+        "recall hands the model the stored rule: {injected}"
+    );
 
     drop(model);
     drop(tools);

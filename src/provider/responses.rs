@@ -116,6 +116,11 @@ pub(super) fn payload_with_cache_at(
     definitions.extend(native_tools.iter().cloned());
     let mut request = json!({"model":model,"input":input,"tools":definitions,
         "stream":true,"store":false,"include":["reasoning.encrypted_content"]});
+    if request["tools"].as_array().is_some_and(Vec::is_empty) {
+        // Several Responses-compatible endpoints reject an empty tool list; a
+        // tool-less request must omit the field.
+        request.as_object_mut().unwrap().remove("tools");
+    }
     if let Some(n) = max_output {
         request["max_output_tokens"] = json!(n);
     }

@@ -9,13 +9,13 @@ use std::{
 
 pub const EXECUTION_GUIDANCE: &str = "\nFor coding tasks, locate relevant symbols before reading large files and keep inspections focused on relevant files and ranges; prefer focused ranges and diagnostic excerpts over dumping entire files or logs unless full context is necessary; once the needed evidence is found, edit rather than re-inspecting unchanged files. When necessary inspections are independent, request them together as separate shell calls (or one concise command); keep dependent edits and checks in order. After implementing the requested changes, run the requested tests and relevant regression checks. If all requirements are met and those checks pass, finish with a concise result rather than running unrelated doctests, broad exploratory checks or repeated successful tests. If a check fails, investigate its actual cause and re-run after a meaningful fix. Do not omit required verification just to save calls.";
 
-// V7 (F+C+E) is layered on the same built-in guidance used in the ablation.
-// Keep the three trialed instructions in their tested order, but do not repeat
+// V7 (F+C+E) keeps its instruction order; the quality paragraph incorporates
+// B (reuse-first) as the production default. C remains an experiment only. Do not repeat
 // execution guidance here: the final response should be concise without a
 // fixed sentence limit, so complex work can explain verification and risk.
 pub const V7_GUIDANCE: &str = concat!(
     "\nGive a brief user-facing progress update when starting substantial work, making an important confirmed discovery or changing direction, and starting validation. Describe actions or verified results, not internal reasoning. Skip routine tool-by-tool narration and progress updates for simple questions; do not add model requests or split batchable operations just to report progress. When you finish, reply concisely and accurately about what changed and what was verified. Complex tasks may warrant a fuller explanation of the modifications, verification evidence, failure causes and remaining risks; report uncertainty rather than hiding it.",
-    "\nPrefer the simplest correct implementation consistent with the existing codebase. Avoid redundant comments, explanatory boilerplate, unnecessary helper layers, and unrelated refactoring. Preserve required APIs, edge cases, tests, and non-obvious invariants. Never sacrifice correctness just to reduce code length.",
+    "\nPrefer the simplest correct implementation consistent with the existing codebase. Before adding code, prefer suitable project implementations, then standard-library or platform capabilities and existing dependencies, before writing new code. Avoid redundant comments, explanatory boilerplate, unnecessary helper layers, and unrelated refactoring. Preserve required APIs, edge cases, tests, and non-obvious invariants. Never sacrifice correctness just to reduce code length.",
     "\nInvestigate tooling internals only when the evidence points there."
 );
 
@@ -289,6 +289,18 @@ impl PromptComposer {
         }
     }
 
+    /// Estimated tokens of each request-only prompt segment, measured with the
+    /// same byte heuristic the budget uses. Reported separately so the Desktop
+    /// can show where the system prompt budget actually goes.
+    pub fn segment_tokens(&self) -> (usize, usize, usize) {
+        let tokens = |text: &String| crate::token_estimate::content_tokens(text.as_bytes());
+        (
+            self.additions.iter().map(tokens).sum(),
+            self.instruction_files.iter().map(tokens).sum(),
+            self.trailing.iter().map(tokens).sum(),
+        )
+    }
+
     /// Token estimate for the complete system prompt relative to the
     /// persisted system message. The persisted message is the raw baseline;
     /// comparing against a default-composed baseline would hide the built-in
@@ -355,6 +367,17 @@ mod tests {
         assert!(composer.extra_estimated_tokens(&raw[0]) > first_extra);
         fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn built_in_quality_defaults_to_b_and_preserves_safety_without_persona() {
+        assert!(V7_GUIDANCE.contains("prefer suitable project implementations"));
+        assert!(V7_GUIDANCE.contains("Preserve required APIs, edge cases, tests"));
+        assert!(V7_GUIDANCE.contains("Never sacrifice correctness"));
+        assert!(!V7_GUIDANCE.contains("make the smallest complete change across that scope"));
+        for marker in ["lazy senior", "lite/full/ultra", "shortcut:", "Ponytail"] {
+            assert!(!V7_GUIDANCE.contains(marker));
+        }
     }
 
     #[test]

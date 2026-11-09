@@ -27,6 +27,9 @@ const MAX_LIST: usize = 20;
 const MAX_SESSION_HISTORY: usize = 200;
 const KEEP_SESSION_HISTORY: usize = 100;
 const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+/// Wall-clock bound for one checkpoint git operation. The store lock is held
+/// while git runs, so an unbounded call would freeze every later snapshot.
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 const LOCK_FILE: &str = "kroma-transaction.lock";
 const EXCLUDED_DIRS: &[&str] = &[
     "target",
@@ -87,8 +90,23 @@ fn store_dir(root: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Desktops spawn these commands without a console. Without
+/// CREATE_NO_WINDOW each `git` call flashes a terminal window over the app.
+fn hide_console(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+    }
+}
+
 fn repository_root(workdir: &Path, cancel: Option<Arc<AtomicBool>>) -> Result<Option<PathBuf>> {
     let mut command = Command::new("git");
+    hide_console(&mut command);
     command
         .arg("-C")
         .arg(workdir)
@@ -166,6 +184,7 @@ impl Repo {
         let root = self.root.to_string_lossy().into_owned();
         let index = self.store.join("index").to_string_lossy().into_owned();
         let mut command = Command::new("git");
+        hide_console(&mut command);
         command
             .current_dir(&self.root)
             .args([
@@ -202,6 +221,7 @@ impl Repo {
         let null_config = if cfg!(windows) { "NUL" } else { "/dev/null" };
         let store = self.store.to_string_lossy().into_owned();
         let mut command = Command::new("git");
+        hide_console(&mut command);
         command
             .args(["--git-dir", &store, "--no-pager", "-c", "gc.auto=0"])
             .args(args)
@@ -221,14 +241,10 @@ impl Repo {
     }
 
     fn run_command(&self, mut command: Command, input: Option<&[u8]>) -> Result<Output> {
-        // Ordinary list/restore operations need no polling or scratch output.
-        if self.cancel.is_none() && input.is_none() {
-            return checked_output(
-                command
-                    .output()
-                    .context("running git for a file checkpoint")?,
-            );
-        }
+        // Every checkpoint git call runs while the store lock is held, so one
+        // unbounded call freezes every later snapshot in this project. Output
+        // goes to scratch files (no pipe deadlock) and the child is killed when
+        // the deadline expires or the caller cancels.
         fs::create_dir_all(&self.store)?;
         let mut scratch = ScratchFiles(Vec::new());
         let (stdout_file, stdout_path) = scratch.create(&self.store, "out")?;
@@ -243,56 +259,34 @@ impl Repo {
             drop(file);
             command.stdin(fs::File::open(path)?);
         }
-        let status = if self.cancel.is_none() {
-            command.status()?
-        } else {
-            // Git transactions are synchronous and may also run from tests or
-            // external hosts without a Tokio runtime. tokio::process::Command
-            // needs a reactor even for a polling try_wait loop; supply a small
-            // temporary one only in that case. The ordinary Agent path runs
-            // inside spawn_blocking and reuses its existing runtime handle.
-            let fallback_runtime = if tokio::runtime::Handle::try_current().is_err() {
-                Some(
-                    tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .context("initializing cancellable Git process reactor")?,
-                )
-            } else {
-                None
-            };
-            let _reactor_guard = fallback_runtime.as_ref().map(|runtime| runtime.enter());
-            let mut command = tokio::process::Command::from(command);
-            command.kill_on_drop(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                command.as_std_mut().process_group(0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // A fresh process group lets a timeout take git helpers with it.
+            command.process_group(0);
+        }
+        let mut child = command
+            .spawn()
+            .context("running git for a file checkpoint")?;
+        let deadline = git_deadline();
+        let mut waits = 0u32;
+        let status = loop {
+            if self.cancelled() {
+                terminate_git(&mut child);
+                bail!("file checkpoint cancelled");
             }
-            #[cfg(windows)]
-            let (mut child, _tree) = crate::winsys::ChildTreeGuard::spawn(&mut command)?;
-            #[cfg(not(windows))]
-            let mut child = command.spawn()?;
-            loop {
-                if self.cancelled() {
-                    #[cfg(windows)]
-                    _tree.terminate();
-                    #[cfg(unix)]
-                    if let Some(pid) = child.id() {
-                        // The child owns a fresh process group, including Git helpers.
-                        unsafe {
-                            libc::kill(-(pid as i32), libc::SIGKILL);
-                        }
+            match child.try_wait()? {
+                Some(status) => break status,
+                None => {
+                    if deadline.is_some_and(|limit| Instant::now() >= limit) {
+                        terminate_git(&mut child);
+                        bail!(
+                            "git checkpoint command exceeded {}s; set KROMA_GIT_TIMEOUT_SECS to change the bound",
+                            GIT_COMMAND_TIMEOUT.as_secs()
+                        );
                     }
-                    let _ = child.start_kill();
-                    while child.try_wait()?.is_none() {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    bail!("file checkpoint cancelled");
-                }
-                match child.try_wait()? {
-                    Some(status) => break status,
-                    None => std::thread::sleep(Duration::from_millis(5)),
+                    waits = (waits + 1).min(4);
+                    std::thread::sleep(Duration::from_millis(2u64 << waits));
                 }
             }
         };
@@ -302,6 +296,45 @@ impl Repo {
             stderr: fs::read(stderr_path)?,
         })
     }
+}
+/// Bound for one git call. `KROMA_GIT_TIMEOUT_SECS=0` disables it for very large
+/// worktrees; the value is clamped to one hour so a typo cannot mean "forever".
+fn git_deadline() -> Option<Instant> {
+    let secs = match env::var("KROMA_GIT_TIMEOUT_SECS") {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(0) => return None,
+            Ok(secs) => secs.min(3_600),
+            Err(_) => {
+                crate::runtime_log!("[checkpoint] ignoring invalid KROMA_GIT_TIMEOUT_SECS={raw:?}");
+                GIT_COMMAND_TIMEOUT.as_secs()
+            }
+        },
+        Err(_) => GIT_COMMAND_TIMEOUT.as_secs(),
+    };
+    Some(Instant::now() + Duration::from_secs(secs))
+}
+
+/// Kill a git child and reap it, including its helpers. A surviving git process
+/// would keep `.lock` files that block every later snapshot.
+fn terminate_git(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id() as i32;
+        // The child owns a fresh process group, so git helpers die with it.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn checked_output(output: Output) -> Result<Output> {
@@ -453,11 +486,52 @@ fn prune_history_to(repo: &Repo, reference: &str, max: usize, keep: usize) -> Re
     Ok(())
 }
 
-fn snapshot_turn(repo: &Repo, session: &str, turn: u64) -> Result<Option<String>> {
+/// Stage the whole worktree into the checkpoint store. `git add` refuses any
+/// pathspec that names a directory .gitignore already covers — including an
+/// exclude pathspec — so a rejected first attempt drops exactly those
+/// exclusions and retries. Ignored content stays out either way.
+fn stage_worktree(repo: &Repo) -> Result<()> {
     let specs = pathspecs();
-    let mut add_args = vec!["add", "-A", "--"];
-    add_args.extend(specs.iter().map(String::as_str));
-    repo.git(&add_args)?;
+    let mut args = vec!["add", "-A", "--"];
+    args.extend(specs.iter().map(String::as_str));
+    let Err(error) = repo.git(&args) else {
+        return Ok(());
+    };
+    let message = format!("{error:#}");
+    let dropped: Vec<&str> = EXCLUDED_DIRS
+        .iter()
+        .copied()
+        .filter(|dir| {
+            message.contains(&format!(
+                "
+{dir}"
+            ))
+        })
+        .collect();
+    if dropped.is_empty() {
+        return Err(error);
+    }
+    let retry: Vec<String> = std::iter::once(".".to_owned())
+        .chain(
+            EXCLUDED_DIRS
+                .iter()
+                .filter(|dir| !dropped.contains(dir))
+                .map(|dir| format!(":(exclude){dir}")),
+        )
+        .collect();
+    let mut retry_args = vec!["add", "-A", "--"];
+    retry_args.extend(retry.iter().map(String::as_str));
+    repo.git(&retry_args)?;
+    Ok(())
+}
+
+fn snapshot_turn(
+    repo: &Repo,
+    session: &str,
+    turn: u64,
+    anchor: Option<usize>,
+) -> Result<Option<String>> {
+    stage_worktree(repo)?;
     let tree = String::from_utf8_lossy(&repo.git(&["write-tree"])?.stdout)
         .trim()
         .to_owned();
@@ -489,11 +563,18 @@ fn snapshot_turn(repo: &Repo, session: &str, turn: u64) -> Result<Option<String>
                 String::from_utf8_lossy(&output.stdout)
                     .trim()
                     .strip_prefix("turn ")
+                    .and_then(|rest| rest.split_whitespace().next())
                     .and_then(|number| number.parse::<u64>().ok())
             })
     });
     let turn = previous_turn.map_or(turn, |last| turn.max(last.saturating_add(1)));
-    let message = format!("turn {turn}");
+    // The anchor records the transcript length this snapshot precedes, so the
+    // Desktop can pair a stored snapshot with the turn that produced it even
+    // though turn numbers only advance for tool-using tasks.
+    let message = match anchor {
+        Some(index) => format!("turn {turn} anchor {index}"),
+        None => format!("turn {turn}"),
+    };
     let mut commit = vec![
         "-c",
         "commit.gpgsign=false",
@@ -583,6 +664,7 @@ fn snapshot_inner(
     workdir: &Path,
     session: &str,
     turn: u64,
+    anchor: Option<usize>,
     cancel: Option<Arc<AtomicBool>>,
 ) -> Result<Option<String>> {
     if env::var_os("KROMA_NO_CHECKPOINTS").is_some() {
@@ -594,7 +676,7 @@ fn snapshot_inner(
     let store = store_dir(&root)?;
     run_transaction(&root, &store, cancel, |repo| {
         initialized_store(repo)?;
-        snapshot_turn(repo, session, turn)
+        snapshot_turn(repo, session, turn, anchor)
     })
 }
 
@@ -602,7 +684,7 @@ fn snapshot_inner(
 /// the tree is unchanged, the feature is disabled, or the directory is not a
 /// Git worktree.
 pub fn snapshot(workdir: &Path, session: &str, turn: u64) -> Result<Option<String>> {
-    snapshot_inner(workdir, session, turn, None)
+    snapshot_inner(workdir, session, turn, None, None)
 }
 
 /// Cancellable snapshot used by an agent task. Dropping the task future sets
@@ -611,9 +693,228 @@ pub(crate) fn snapshot_cancellable(
     workdir: &Path,
     session: &str,
     turn: u64,
+    anchor: Option<usize>,
     cancelled: Arc<AtomicBool>,
 ) -> Result<Option<String>> {
-    snapshot_inner(workdir, session, turn, Some(cancelled))
+    snapshot_inner(workdir, session, turn, anchor, Some(cancelled))
+}
+
+/// One stored snapshot with the transcript length it precedes.
+pub struct SnapshotTurn {
+    pub turn: u64,
+    pub anchor: Option<usize>,
+    pub hash: String,
+}
+
+/// File changes attributed to one turn, measured from the snapshot taken
+/// before it to the snapshot after it (or to the live worktree, newest turn).
+pub struct TurnDiff {
+    pub turn: u64,
+    pub added: usize,
+    pub removed: usize,
+    pub truncated: bool,
+    pub files: Vec<TurnFileChange>,
+}
+
+pub struct TurnFileChange {
+    pub path: String,
+    pub status: String,
+    pub added: usize,
+    pub removed: usize,
+}
+
+fn parse_turn(subject: &str) -> (Option<u64>, Option<usize>) {
+    let mut turn = None;
+    let mut anchor = None;
+    let mut parts = subject.split_whitespace();
+    while let Some(part) = parts.next() {
+        match part {
+            "turn" => turn = parts.next().and_then(|value| value.parse().ok()),
+            "anchor" => anchor = parts.next().and_then(|value| value.parse().ok()),
+            _ => {}
+        }
+    }
+    (turn, anchor)
+}
+
+fn snapshot_turns_from(repo: &Repo, session: &str) -> Result<Vec<SnapshotTurn>> {
+    if !repo.store.join("HEAD").is_file() {
+        return Ok(Vec::new());
+    }
+    let reference = session_ref(session);
+    let Ok(output) = repo.git(&[
+        "log",
+        &format!("--max-count={MAX_LIST}"),
+        "--format=%H%x09%s",
+        &reference,
+        "--",
+    ]) else {
+        return Ok(Vec::new());
+    };
+    let mut turns = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut parts = line.splitn(2, '\t');
+        let (Some(hash), Some(subject)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let (turn, anchor) = parse_turn(subject);
+        let Some(turn) = turn else { continue };
+        turns.push(SnapshotTurn {
+            turn,
+            anchor,
+            hash: hash.to_owned(),
+        });
+    }
+    Ok(turns)
+}
+
+/// Stored snapshot turns, newest first, for pairing with transcript turns.
+pub fn snapshot_turns(workdir: &Path, session: &str) -> Result<Vec<SnapshotTurn>> {
+    let Some(root) = repository_root(workdir, None)? else {
+        return Ok(Vec::new());
+    };
+    let store = store_dir(&root)?;
+    run_transaction(&root, &store, None, |repo| {
+        snapshot_turns_from(repo, session)
+    })
+}
+
+/// Snapshot commit for one turn, if the project has any.
+pub fn turn_hash(workdir: &Path, session: &str, turn: u64) -> Result<Option<String>> {
+    Ok(snapshot_turns(workdir, session)?
+        .into_iter()
+        .find(|entry| entry.turn == turn)
+        .map(|entry| entry.hash))
+}
+
+/// Resolve the two trees that bracket one turn.
+fn bracket(repo: &Repo, session: &str, turn: u64) -> Result<Option<(String, String)>> {
+    let turns = snapshot_turns_from(repo, session)?;
+    let Some(position) = turns.iter().position(|entry| entry.turn == turn) else {
+        return Ok(None);
+    };
+    let from = turns[position].hash.clone();
+    // Newest first: the snapshot created after this turn is the next one up.
+    if position > 0 {
+        return Ok(Some((from, turns[position - 1].hash.clone())));
+    }
+    stage_worktree(repo)?;
+    let tree = String::from_utf8_lossy(&repo.git(&["write-tree"])?.stdout)
+        .trim()
+        .to_owned();
+    Ok(Some((from, tree)))
+}
+
+const MAX_TURN_FILES: usize = 200;
+
+fn turn_diff_from(repo: &Repo, session: &str, turn: u64) -> Result<Option<TurnDiff>> {
+    let Some((from, to)) = bracket(repo, session, turn)? else {
+        return Ok(None);
+    };
+    let names = repo.git(&["diff", "--name-status", "--no-renames", &from, &to])?;
+    let numstat = repo.git(&["diff", "--numstat", "--no-renames", &from, &to])?;
+    let mut counts = std::collections::HashMap::new();
+    for line in String::from_utf8_lossy(&numstat.stdout).lines() {
+        let mut parts = line.splitn(3, '\t');
+        let (Some(added), Some(removed), Some(file)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        counts.insert(
+            file.to_owned(),
+            (
+                added.parse::<usize>().unwrap_or(0),
+                removed.parse::<usize>().unwrap_or(0),
+            ),
+        );
+    }
+    let mut files = Vec::new();
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for line in String::from_utf8_lossy(&names.stdout).lines() {
+        let mut parts = line.splitn(2, '\t');
+        let (Some(status), Some(file)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let (file_added, file_removed) = counts.get(file).copied().unwrap_or((0, 0));
+        added += file_added;
+        removed += file_removed;
+        files.push(TurnFileChange {
+            path: file.to_owned(),
+            status: status.chars().next().unwrap_or('M').to_string(),
+            added: file_added,
+            removed: file_removed,
+        });
+    }
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let truncated = files.len() > MAX_TURN_FILES;
+    files.truncate(MAX_TURN_FILES);
+    Ok(Some(TurnDiff {
+        turn,
+        added,
+        removed,
+        truncated,
+        files,
+    }))
+}
+
+pub fn turn_diff(workdir: &Path, session: &str, turn: u64) -> Result<Option<TurnDiff>> {
+    let Some(root) = repository_root(workdir, None)? else {
+        return Ok(None);
+    };
+    let store = store_dir(&root)?;
+    run_transaction(&root, &store, None, |repo| {
+        turn_diff_from(repo, session, turn)
+    })
+}
+
+/// Recent per-turn change summaries, computed inside one Git transaction.
+pub fn turn_diffs(workdir: &Path, session: &str, max: usize) -> Result<Vec<TurnDiff>> {
+    let Some(root) = repository_root(workdir, None)? else {
+        return Ok(Vec::new());
+    };
+    let store = store_dir(&root)?;
+    run_transaction(&root, &store, None, |repo| {
+        let turns = snapshot_turns_from(repo, session)?;
+        let mut diffs = Vec::new();
+        for entry in turns.iter().take(max) {
+            if let Some(diff) = turn_diff_from(repo, session, entry.turn)? {
+                diffs.push(diff);
+            }
+        }
+        Ok(diffs)
+    })
+}
+
+pub fn turn_file_diff(workdir: &Path, session: &str, turn: u64, file: &str) -> Result<String> {
+    let Some(root) = repository_root(workdir, None)? else {
+        return Ok(String::new());
+    };
+    let store = store_dir(&root)?;
+    run_transaction(&root, &store, None, |repo| {
+        let Some((from, to)) = bracket(repo, session, turn)? else {
+            return Ok(String::new());
+        };
+        let output = repo.git(&["diff", "--no-renames", &from, &to, "--", file])?;
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    })
+}
+
+/// Cancellable form used by the interactive UI. The worker stops between git
+/// calls when the caller goes away instead of finishing a transaction nobody is
+/// waiting for.
+pub fn list_cancellable(
+    workdir: &Path,
+    session: &str,
+    cancel: Arc<AtomicBool>,
+) -> Result<Vec<Checkpoint>> {
+    let Some(root) = repository_root(workdir, Some(cancel.clone()))? else {
+        return Ok(Vec::new());
+    };
+    let store = store_dir(&root)?;
+    run_transaction(&root, &store, Some(cancel), |repo| list_from(repo, session))
 }
 
 pub fn list(workdir: &Path, session: &str) -> Result<Vec<Checkpoint>> {
@@ -662,6 +963,73 @@ fn list_from(repo: &Repo, session: &str) -> Result<Vec<Checkpoint>> {
 /// Restore every file captured by a checkpoint, removing non-ignored files
 /// created or first captured after it. Excluded directories and ignored files
 /// are left alone.
+/// Cancellable form of [`restore`] for the interactive UI.
+pub fn restore_cancellable(
+    workdir: &Path,
+    session: &str,
+    hash: &str,
+    cancel: Arc<AtomicBool>,
+) -> Result<RestoreReport> {
+    let Some(root) = repository_root(workdir, Some(cancel.clone()))? else {
+        bail!("file checkpoints are only available inside a Git worktree");
+    };
+    let store = store_dir(&root)?;
+    run_transaction(&root, &store, Some(cancel), |repo| {
+        restore_from(repo, session, hash)
+    })
+}
+
+pub fn preview_cancellable(
+    workdir: &Path,
+    session: &str,
+    hash: &str,
+    cancel: Arc<AtomicBool>,
+) -> Result<RestorePreview> {
+    let Some(root) = repository_root(workdir, Some(cancel.clone()))? else {
+        bail!("file checkpoints are only available inside a Git worktree");
+    };
+    let store = store_dir(&root)?;
+    run_transaction(&root, &store, Some(cancel), |repo| {
+        preview_from(repo, session, hash)
+    })
+}
+
+fn preview_from(repo: &Repo, session: &str, hash: &str) -> Result<RestorePreview> {
+    let scope = restore_scope(repo, session, hash)?;
+    let mut deleted = Vec::new();
+    let mut preserved = Vec::new();
+    for bytes in split_paths(&scope.current) {
+        if scope.captured.contains(bytes) {
+            continue;
+        }
+        let path = path_from_bytes(bytes);
+        if is_excluded(&path) || scope.ignored.contains(bytes) {
+            continue;
+        }
+        if !safe_ancestors(&repo.root, &path) {
+            preserved.push(format!("{} (linked ancestor preserved)", path.display()));
+            continue;
+        }
+        if fs::symlink_metadata(repo.root.join(&path)).is_err() {
+            continue;
+        }
+        deleted.push(path.to_string_lossy().into_owned());
+    }
+    let mut rewritten: Vec<String> = scope
+        .captured
+        .iter()
+        .filter(|bytes| scope.changed.contains(*bytes))
+        .map(|bytes| path_from_bytes(bytes).display().to_string())
+        .collect();
+    rewritten.sort();
+    deleted.sort();
+    Ok(RestorePreview {
+        rewritten,
+        deleted,
+        preserved,
+    })
+}
+
 pub fn restore(workdir: &Path, session: &str, hash: &str) -> Result<RestoreReport> {
     let Some(root) = repository_root(workdir, None)? else {
         bail!("file checkpoints are only available inside a Git worktree");
@@ -690,7 +1058,26 @@ fn path_from_bytes(bytes: &[u8]) -> PathBuf {
     }
 }
 
-fn restore_from(repo: &Repo, session: &str, hash: &str) -> Result<RestoreReport> {
+/// What a restore would touch, computed without writing anything.
+pub struct RestorePreview {
+    pub rewritten: Vec<String>,
+    pub deleted: Vec<String>,
+    pub preserved: Vec<String>,
+}
+
+struct RestoreScope {
+    changed: HashSet<Vec<u8>>,
+    captured: HashSet<Vec<u8>>,
+    captured_bytes: Vec<u8>,
+    ignored: HashSet<Vec<u8>>,
+    current: Vec<u8>,
+    current_paths: HashSet<Vec<u8>>,
+}
+
+/// Every check a restore needs before it may touch a file: the checkpoint must
+/// belong to this conversation, and the three path sets must describe one
+/// consistent view of the worktree.
+fn restore_scope(repo: &Repo, session: &str, hash: &str) -> Result<RestoreScope> {
     if !repo.store.join("HEAD").is_file() {
         bail!("no file checkpoints exist for this project yet");
     }
@@ -706,7 +1093,6 @@ fn restore_from(repo: &Repo, session: &str, hash: &str) -> Result<RestoreReport>
     diff_args.extend(specs.iter().map(String::as_str));
     let changed = repo.git(&diff_args)?.stdout;
     let changed: HashSet<Vec<u8>> = split_paths(&changed).map(<[u8]>::to_vec).collect();
-    let mut restored = 0;
     let captured_bytes = repo
         .git(&["ls-tree", "-r", "-z", "--name-only", hash])?
         .stdout;
@@ -731,6 +1117,26 @@ fn restore_from(repo: &Repo, session: &str, hash: &str) -> Result<RestoreReport>
         ])?
         .stdout;
     let current_paths: HashSet<Vec<u8>> = split_paths(&current).map(<[u8]>::to_vec).collect();
+    Ok(RestoreScope {
+        changed,
+        captured,
+        captured_bytes,
+        ignored,
+        current,
+        current_paths,
+    })
+}
+
+fn restore_from(repo: &Repo, session: &str, hash: &str) -> Result<RestoreReport> {
+    let RestoreScope {
+        changed,
+        captured,
+        captured_bytes,
+        ignored,
+        current,
+        current_paths,
+    } = restore_scope(repo, session, hash)?;
+    let mut restored = 0;
     let mut removed = Vec::new();
     let mut remaining = Vec::new();
     for bytes in split_paths(&current) {
@@ -893,7 +1299,7 @@ mod tests {
             );
             let captured = run_transaction(&root, &repo.store, Some(flag), |repo| {
                 initialized_store(repo)?;
-                snapshot_turn(repo, "perf", index)
+                snapshot_turn(repo, "perf", index, None)
             })?;
             let elapsed = start.elapsed();
             if index == 0 {
@@ -998,7 +1404,7 @@ mod tests {
         fs::write(root.join("next"), "next transaction")?;
         assert!(
             run_transaction(&root, &repo.store, None, |repo| snapshot_turn(
-                repo, "next", 1
+                repo, "next", 1, None
             ))?
             .is_some()
         );
@@ -1009,13 +1415,13 @@ mod tests {
     #[test]
     fn restore_handles_empty_trees_and_file_directory_transitions() -> Result<()> {
         let (root, repo) = initialized("types")?;
-        let empty = snapshot_turn(&repo, "types", 1)?.unwrap();
+        let empty = snapshot_turn(&repo, "types", 1, None)?.unwrap();
         fs::write(root.join("item"), "file")?;
-        let file = snapshot_turn(&repo, "types", 2)?.unwrap();
+        let file = snapshot_turn(&repo, "types", 2, None)?.unwrap();
         fs::remove_file(root.join("item"))?;
         fs::create_dir(root.join("item"))?;
         fs::write(root.join("item/child"), "nested")?;
-        let directory = snapshot_turn(&repo, "types", 3)?.unwrap();
+        let directory = snapshot_turn(&repo, "types", 3, None)?.unwrap();
         restore_from(&repo, "types", &file)?;
         assert_eq!(fs::read_to_string(root.join("item"))?, "file");
         restore_from(&repo, "types", &directory)?;
@@ -1030,9 +1436,9 @@ mod tests {
     fn restore_preserves_files_that_became_ignored_after_being_captured() -> Result<()> {
         let (root, repo) = initialized("new-ignore")?;
         fs::write(root.join("keep"), "initial")?;
-        let old = snapshot_turn(&repo, "ignored", 1)?.unwrap();
+        let old = snapshot_turn(&repo, "ignored", 1, None)?.unwrap();
         fs::write(root.join("later"), "captured later")?;
-        snapshot_turn(&repo, "ignored", 2)?;
+        snapshot_turn(&repo, "ignored", 2, None)?;
         fs::write(
             root.join(".gitignore"),
             "later
@@ -1052,10 +1458,10 @@ mod tests {
     fn restoring_never_removes_files_through_symlink_or_junction_ancestors() -> Result<()> {
         let (root, repo) = initialized("linked-ancestor")?;
         let outside = temp_dir("outside");
-        let old = snapshot_turn(&repo, "links", 1)?.unwrap();
+        let old = snapshot_turn(&repo, "links", 1, None)?.unwrap();
         fs::create_dir(root.join("linked"))?;
         fs::write(root.join("linked/victim"), "captured later")?;
-        snapshot_turn(&repo, "links", 2)?;
+        snapshot_turn(&repo, "links", 2, None)?;
         fs::remove_dir_all(root.join("linked"))?;
         fs::write(outside.join("victim"), "outside must survive")?;
         #[cfg(unix)]
@@ -1089,10 +1495,10 @@ mod tests {
     fn snapshot_deduplicates_and_restores_a_git_worktree() -> Result<()> {
         let (root, repo) = initialized("restore")?;
         fs::write(root.join("notes.txt"), "first\n")?;
-        let first = snapshot_turn(&repo, "session-a", 1)?.expect("first snapshot");
-        assert!(snapshot_turn(&repo, "session-a", 2)?.is_none());
+        let first = snapshot_turn(&repo, "session-a", 1, None)?.expect("first snapshot");
+        assert!(snapshot_turn(&repo, "session-a", 2, None)?.is_none());
         fs::write(root.join("notes.txt"), "second\n")?;
-        let second = snapshot_turn(&repo, "session-a", 3)?.expect("second snapshot");
+        let second = snapshot_turn(&repo, "session-a", 3, None)?.expect("second snapshot");
         assert_ne!(first, second);
         fs::write(root.join("new.txt"), "created later\n")?;
         assert_eq!(list_from(&repo, "session-a")?.len(), 2);
@@ -1110,9 +1516,9 @@ mod tests {
     fn snapshots_continue_turn_numbers_after_agent_restart() -> Result<()> {
         let (root, repo) = initialized("restart-number")?;
         fs::write(root.join("notes.txt"), "before restart\n")?;
-        let first = snapshot_turn(&repo, "restart-session", 1)?.unwrap();
+        let first = snapshot_turn(&repo, "restart-session", 1, None)?.unwrap();
         fs::write(root.join("notes.txt"), "after restart\n")?;
-        let second = snapshot_turn(&repo, "restart-session", 1)?.unwrap();
+        let second = snapshot_turn(&repo, "restart-session", 1, None)?.unwrap();
         assert_ne!(first, second);
         let subject =
             String::from_utf8_lossy(&repo.git(&["show", "-s", "--format=%s", &second])?.stdout)
@@ -1127,9 +1533,9 @@ mod tests {
     fn restore_removes_files_first_captured_by_a_later_snapshot() -> Result<()> {
         let (root, repo) = initialized("later")?;
         fs::write(root.join("base.txt"), "base\n")?;
-        let first = snapshot_turn(&repo, "session-a", 1)?.expect("first snapshot");
+        let first = snapshot_turn(&repo, "session-a", 1, None)?.expect("first snapshot");
         fs::write(root.join("later.txt"), "captured later\n")?;
-        snapshot_turn(&repo, "session-a", 2)?.expect("second snapshot");
+        snapshot_turn(&repo, "session-a", 2, None)?.expect("second snapshot");
         assert!(root.join("later.txt").is_file());
 
         let report = restore_from(&repo, "session-a", &first)?;
@@ -1145,7 +1551,7 @@ mod tests {
         let (root, repo) = initialized("ignored")?;
         fs::write(root.join(".gitignore"), "*.log\n")?;
         fs::write(root.join("keep.txt"), "old\n")?;
-        let first = snapshot_turn(&repo, "session-a", 1)?.expect("first snapshot");
+        let first = snapshot_turn(&repo, "session-a", 1, None)?.expect("first snapshot");
 
         fs::write(root.join("ignored.log"), "ignored\n")?;
         fs::create_dir_all(root.join("target"))?;
@@ -1182,9 +1588,9 @@ mod tests {
         let index = fs::read(root.join(".git/index"))?;
         let head = fs::read(root.join(".git/HEAD"))?;
 
-        let first = snapshot_turn(&repo, "session-a", 1)?.expect("first snapshot");
+        let first = snapshot_turn(&repo, "session-a", 1, None)?.expect("first snapshot");
         fs::write(root.join("tracked.txt"), "changed\n")?;
-        snapshot_turn(&repo, "session-a", 2)?.expect("second snapshot");
+        snapshot_turn(&repo, "session-a", 2, None)?.expect("second snapshot");
         restore_from(&repo, "session-a", &first)?;
 
         assert_eq!(fs::read(root.join(".git/index"))?, index);
@@ -1198,7 +1604,7 @@ mod tests {
         let (root, repo) = initialized("names")?;
         fs::write(root.join("file with space.txt"), "first\n")?;
         fs::write(root.join("naïve.txt"), "unicode\n")?;
-        let first = snapshot_turn(&repo, "session-a", 1)?.expect("first snapshot");
+        let first = snapshot_turn(&repo, "session-a", 1, None)?.expect("first snapshot");
 
         fs::write(root.join("file with space.txt"), "second\n")?;
         fs::write(root.join("new file.txt"), "created later\n")?;
@@ -1230,7 +1636,7 @@ mod tests {
                     )?;
                     run_transaction(&root, &store, None, |repo| {
                         initialized_store(repo)?;
-                        snapshot_turn(repo, &format!("session-{worker}"), turn)?;
+                        snapshot_turn(repo, &format!("session-{worker}"), turn, None)?;
                         Ok(())
                     })?;
                 }
@@ -1260,7 +1666,7 @@ mod tests {
         let result = run_transaction(&root, &repo.store, Some(cancel), |repo| {
             initialized_store(repo)?;
             cancelled.store(true, Ordering::SeqCst);
-            snapshot_turn(repo, "session-cancelled", 1)
+            snapshot_turn(repo, "session-cancelled", 1, None)
         });
         assert!(result.is_err(), "cancelled snapshot must stop");
         assert!(repo
@@ -1273,7 +1679,7 @@ mod tests {
             .is_err());
         // The transaction lock must be released even though the snapshot stopped.
         let hash = run_transaction(&root, &repo.store, None, |repo| {
-            snapshot_turn(repo, "session-cancelled", 1)
+            snapshot_turn(repo, "session-cancelled", 1, None)
         })?;
         assert!(hash.is_some());
         cleanup(&root, &repo);
@@ -1284,11 +1690,11 @@ mod tests {
     fn session_history_can_be_bounded_without_losing_the_latest_snapshot() -> Result<()> {
         let (root, repo) = initialized("history")?;
         fs::write(root.join("notes.txt"), "one\n")?;
-        snapshot_turn(&repo, "session-a", 1)?;
+        snapshot_turn(&repo, "session-a", 1, None)?;
         fs::write(root.join("notes.txt"), "two\n")?;
-        snapshot_turn(&repo, "session-a", 2)?;
+        snapshot_turn(&repo, "session-a", 2, None)?;
         fs::write(root.join("notes.txt"), "three\n")?;
-        let latest = snapshot_turn(&repo, "session-a", 3)?.unwrap();
+        let latest = snapshot_turn(&repo, "session-a", 3, None)?.unwrap();
         let reference = session_ref("session-a");
         let count = |reference: &str| -> usize {
             String::from_utf8_lossy(

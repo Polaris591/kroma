@@ -33,8 +33,9 @@ These documents are retained for context, and some record proposals, experiments
 
 - [Design notes](design-notes.md)
 - [Model catalog](model-catalog.md)
-- [Project Memory design](project-memory-design.md), [V2 contract](project-memory-v2-contract.md), and [zero-maintenance notes](project-memory-zero-maintenance.md)
-- [Subagent design](subagents-design.md) and [1.0 design](subagents-1.0-design.md)
+- [Project Memory](project-memory.md) — current behavior, original-wording rules, user controls and storage
+- [Subagents](subagents.md) — execution-kernel design reference and the archived 1.0 contract
+- [Goal plugin design](goal-plugin-design.md) — R1 contracts and recovery; the plugin, host controller and CLI/TUI/Desktop dispatch are implemented and covered by the 12 goal end-to-end tests in `tests/task_control_e2e.rs`, while release validation (a real-provider end-to-end run and a deployment rehearsal) is still pending
 - [Historical deployment notes](promotion-linux-do.md)
 - [Plugin roadmap](../PLUGIN_ROADMAP.md), [benchmark archive](../benchmarks/README.md) and [review archive](../reviews/README.md)
 

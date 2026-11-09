@@ -17,13 +17,13 @@ use std::{
 
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(10);
 
-/// A checkpoint is a non-streaming summary request. Each attempt gets the
-/// same generous six-minute deadline; the outer guard allows the initial
-/// attempt plus three timeout retries. Session titles remain short and keep
-/// their own 120-second deadline.
-pub(crate) const CHECKPOINT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(360);
-pub(crate) const CHECKPOINT_MAX_TIMEOUT_RETRIES: usize = 3;
-pub(crate) const CHECKPOINT_TOTAL_TIMEOUT: Duration = Duration::from_secs(1_440);
+/// A checkpoint is a non-streaming summary request made while the user waits,
+/// so it is bounded twice: each attempt gets 75 seconds and one retry, and the
+/// outer guard caps the whole thing at three minutes. A summary is never worth
+/// a silent quarter-hour. Session titles stay short with their own deadline.
+pub(crate) const CHECKPOINT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(75);
+pub(crate) const CHECKPOINT_MAX_TIMEOUT_RETRIES: usize = 1;
+pub(crate) const CHECKPOINT_TOTAL_TIMEOUT: Duration = Duration::from_secs(180);
 const TITLE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn text_attempt_timeout(short: bool) -> Duration {
@@ -370,6 +370,12 @@ pub(crate) fn failed_summary_attempts(error: &anyhow::Error) -> Option<(&Usage, 
         .chain()
         .find_map(|cause| cause.downcast_ref::<SummaryFailure>())
         .map(|failure| (&failure.usage, failure.requests, failure.measured_requests))
+}
+
+/// The checkpoint/title path must retry the same transient failures as the
+/// foreground request: one 429 or gateway 502 must not fail the whole user turn.
+fn is_retryable_summary_error(error: &anyhow::Error) -> bool {
+    is_timeout(error) || retry_delay(error, 1).is_some()
 }
 
 fn retry_delay(error: &anyhow::Error, retry_index: u32) -> Option<Duration> {
@@ -1488,6 +1494,11 @@ impl ModelClient {
         if self.usage_stream_rejected.load(Ordering::Relaxed) {
             payload.as_object_mut().unwrap().remove("stream_options");
         }
+        if tools.is_empty() {
+            // Some OpenAI-compatible endpoints reject `tools: []`; a tool-less
+            // request must omit the field instead of sending an empty array.
+            payload.as_object_mut().unwrap().remove("tools");
+        }
         // DeepSeek's tool-thinking protocol replays reasoning from ALL turns,
         // including assistant messages without a tool call. Provenance-tagged
         // history can be safely replayed across user turns/model switches.
@@ -1815,6 +1826,10 @@ impl ModelClient {
                     .await
                     .context("text-generation model request failed")?;
                 let status = response.status();
+                // Capture Retry-After before the body read consumes the
+                // response: a 429/5xx here must be retried like the foreground
+                // path instead of failing the whole turn.
+                let retry_after = parse_retry_after(&response);
                 let body = if status.is_success() {
                     read_limited_text(response, MAX_APEC_RESPONSE_BYTES).await
                 } else {
@@ -1823,7 +1838,11 @@ impl ModelClient {
                 .context("failed to read text-generation response")?;
                 if !status.is_success() {
                     let excerpt: String = body.chars().take(500).collect();
-                    bail!("text-generation model returned HTTP {status}: {excerpt}");
+                    return Err(anyhow::Error::new(ModelHttpError {
+                        status,
+                        retry_after,
+                        message: excerpt,
+                    }));
                 }
                 match self.protocol {
                     ApiProtocol::Chat => parse_apec_text_response(&body),
@@ -1896,12 +1915,15 @@ impl ModelClient {
                 Err(error)
                     if !short
                         && timeouts < CHECKPOINT_MAX_TIMEOUT_RETRIES
-                        && is_timeout(&error) =>
+                        && is_retryable_summary_error(&error) =>
                 {
                     timeouts += 1;
                     usage_known = false;
+                    if let Some(delay) = retry_delay(&error, timeouts as u32) {
+                        tokio::time::sleep(delay).await;
+                    }
                     crate::runtime_log!(
-                        "[compact] request timed out; retrying ({timeouts}/{})",
+                        "[compact] transient request failure; retrying ({timeouts}/{})",
                         CHECKPOINT_MAX_TIMEOUT_RETRIES
                     );
                 }
@@ -2463,47 +2485,6 @@ impl ModelBackend for ModelClient {
         })
     }
 
-    fn complete_with_reasoning<'a>(
-        &'a self,
-        messages: &'a [Message],
-        tools: &'a [Value],
-        on_text: &'a mut (dyn FnMut(&str) + Send),
-        on_reasoning: &'a mut (dyn FnMut(&str) + Send),
-    ) -> StreamFuture<'a, Completion> {
-        Box::pin(async move {
-            self.complete_with_tools_stream(
-                messages,
-                tools,
-                None,
-                &mut |delta| on_text(delta),
-                &mut |delta| on_reasoning(delta),
-                &mut |_| {},
-            )
-            .await
-        })
-    }
-
-    fn complete_with_task_images<'a>(
-        &'a self,
-        messages: &'a [Message],
-        tools: &'a [Value],
-        images: &'a TaskImageCache,
-        on_text: &'a mut (dyn FnMut(&str) + Send),
-        on_reasoning: &'a mut (dyn FnMut(&str) + Send),
-    ) -> StreamFuture<'a, Completion> {
-        Box::pin(async move {
-            self.complete_with_tools_stream(
-                messages,
-                tools,
-                Some(images),
-                &mut |delta| on_text(delta),
-                &mut |delta| on_reasoning(delta),
-                &mut |_| {},
-            )
-            .await
-        })
-    }
-
     fn complete_with_activity<'a>(
         &'a self,
         messages: &'a [Message],
@@ -2634,9 +2615,9 @@ mod tests {
 
     #[test]
     fn checkpoint_attempts_allow_three_six_minute_retries() {
-        assert_eq!(CHECKPOINT_ATTEMPT_TIMEOUT, Duration::from_secs(360));
-        assert_eq!(CHECKPOINT_MAX_TIMEOUT_RETRIES, 3);
-        assert_eq!(CHECKPOINT_TOTAL_TIMEOUT, Duration::from_secs(1_440));
+        assert_eq!(CHECKPOINT_ATTEMPT_TIMEOUT, Duration::from_secs(75));
+        assert_eq!(CHECKPOINT_MAX_TIMEOUT_RETRIES, 1);
+        assert_eq!(CHECKPOINT_TOTAL_TIMEOUT, Duration::from_secs(180));
         assert_eq!(text_attempt_timeout(false), CHECKPOINT_ATTEMPT_TIMEOUT);
         assert_eq!(text_attempt_timeout(true), TITLE_ATTEMPT_TIMEOUT);
     }
@@ -2810,6 +2791,25 @@ mod tests {
         let checkpoint = responses.checkpoint_payload(&checkpoint_messages, &[], Some(4096), 2)?;
         assert_eq!(foreground["reasoning"], checkpoint["reasoning"]);
         assert!(checkpoint["reasoning"].get("summary").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn tool_less_requests_omit_the_tools_field() -> Result<()> {
+        let messages = vec![Message::new("user", "inspect")];
+        let chat = ModelClient::new("http://127.0.0.1:9/v1", None, "test".into())?;
+        let payload = chat.payload(&messages, &[], None)?;
+        assert!(
+            payload.get("tools").is_none(),
+            "an empty tools array is rejected by some Chat endpoints"
+        );
+        let responses = ModelClient::new("http://127.0.0.1:9/v1", None, "test".into())?
+            .with_protocol("responses")?;
+        let payload = responses.payload(&messages, &[], None)?;
+        assert!(
+            payload.get("tools").is_none(),
+            "an empty tools array is rejected by some Responses endpoints"
+        );
         Ok(())
     }
 

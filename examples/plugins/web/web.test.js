@@ -1,921 +1,739 @@
 "use strict";
 const {test,beforeEach,afterEach} = require("node:test");
 const assert = require("node:assert/strict");
-const {dispatch,parseDDG,parseBingRSS,plainText,fetchPage,search} = require("./web");
-const originalFetch=global.fetch;
-const credentials = Object.fromEntries(["EXA_API_KEY", "BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY", "YDC_API_KEY", "PARALLEL_API_KEY", "FIRECRAWL_API_KEY", "FIRECRAWL_BASE_URL"].map(key => [key, process.env[key]]));
-beforeEach(() => { for (const key of Object.keys(credentials)) delete process.env[key]; });
+const {dispatch,search,fetchPage,fetchMany,readable,httpUrl} = require("./web");
+const {createStore} = require("./cache");
+const originalFetch = global.fetch;
+const envKeys = ["EXA_API_KEY", "BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY", "YDC_API_KEY", "PARALLEL_API_KEY"];
+const saved = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
+beforeEach(() => { for (const key of envKeys) delete process.env[key]; });
 afterEach(() => {
   global.fetch = originalFetch;
-  for (const [key, value] of Object.entries(credentials)) {
+  for (const [key, value] of Object.entries(saved)) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
 });
-function mock(body,type="text/html") {
-  return new Response(body,{status:200,headers:{"content-type":type}});
+function json(value, status = 200) {
+  return new Response(JSON.stringify(value), {status, headers: {"content-type": "application/json"}});
 }
-test("DDG HTML results decode redirect and snippet",()=>{
-  const html='<div class="result"><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Fa">Sample &amp; Example</a><a class="result__snippet">A <b>test</b> description</a></div>';
-  assert.deepEqual(parseDDG(html,4),[{title:"Sample & Example",url:"https://example.org/a",snippet:"A test description"}]);
-});
-test("Bing RSS search works without API key",async()=>{
-  const rss='<rss><channel><item><title>Topic &amp; Title</title><link>https://example.org/topic</link><description>Found &amp; read</description></item></channel></rss>';
-  assert.deepEqual(parseBingRSS(rss,5),[{title:"Topic & Title",url:"https://example.org/topic",snippet:"Found & read"}]);
-  global.fetch=async url=>{
-    assert.match(String(url),/format=rss/);
-    return mock(rss,"application/rss+xml");
-  };
-  const result=JSON.parse(await search("topic", {provider: "bing"}));
-  assert.equal(result.provider,"bing");
-  assert.equal(result.results[0].url,"https://example.org/topic");
-});
-test("DDG web_search and web_fetch extract page",async()=>{
-  global.fetch=async url=>{
-    if(String(url).includes("duckduckgo")) return mock('<a class="result__a" href="https://example.org/a">A test</a>');
-    return mock('<html><head><title>Page &amp; topic</title></head><nav>Skip</nav><main><h1>Hello</h1><p>Readable <strong>text</strong>.</p></main><footer>Noise</footer></html>');
-  };
-  const searched=JSON.parse(await dispatch({type:"tool",name:"web_search",arguments:{query:"hello"},config:{provider:"duckduckgo"}}));
-  assert.equal(searched.results[0].url,"https://example.org/a");
-  const fetched=JSON.parse(await dispatch({type:"tool",name:"web_fetch",arguments:{url:"https://example.org"},config:{}}));
-  assert.equal(fetched.title,"Page & topic");
-  assert.match(fetched.text,/Hello/);
-  assert.doesNotMatch(fetched.text,/Skip|Noise/);
-});
-test("Brave uses header token and structured web results",async()=>{
-  global.fetch=async (url,opts)=>{
-    assert.match(String(url),/api.search.brave.com/);
-    assert.equal(opts.headers["X-Subscription-Token"],"test-key");
-    return mock(JSON.stringify({web:{results:[{title:"Brave",url:"https://example.org",description:"Snippet"}]}}),"application/json");
-  };
-  const result=JSON.parse(await search("test",{provider:"brave",brave_api_key:"test-key"}));
-  assert.equal(result.results[0].title,"Brave");
-});
+function html(body) {
+  return new Response(body, {headers: {"content-type": "text/html"}});
+}
+const DOC = "<html><body><main><h1>Title</h1><p>" + "readable words ".repeat(60) + "</p></main></body></html>";
 
-test("default auto priority includes the configured Brave key", async () => {
-  const manifest = require("node:fs").readFileSync(require("node:path").join(__dirname, "plugin.toml"), "utf8");
-  const priority = JSON.parse(manifest.match(/^search_priority\s*=\s*(\[[^\n]+\])/m)[1]);
-  assert.ok(priority.includes("brave"));
-  global.fetch=async url=>{
-    assert.match(String(url), /api.search.brave.com/);
-    return mock(JSON.stringify({web:{results:[{title:"Brave default",url:"https://example.org",description:"ok"}]}}),"application/json");
-  };
-  const result = JSON.parse(await search("docs", {provider:"auto",search_priority:priority,brave_api_key:"brave-only"}));
-  assert.equal(result.provider,"brave");
-});
-test("SearXNG uses JSON search API",async()=>{
-  global.fetch=async url=>{
-    assert.match(String(url),/format=json/);
-    return mock(JSON.stringify({results:[{title:"Sear",url:"https://docs.example.org",content:"works"}]}),"application/json");
-  };
-  const result=JSON.parse(await search("rust",{provider:"searxng",searxng_url:"https://searx.example.org"}));
-  assert.equal(result.results[0].snippet,"works");
-});
-test("fetch truncation returns bounded text",async()=>{
-  global.fetch=async()=>mock("<main>"+"word ".repeat(500)+"</main>");
-  const result=JSON.parse(await fetchPage("https://example.org",{},1000));
-  assert.equal(result.truncated,true);
-  assert.equal(result.text.length,1000);
-});
-test("web_fetch find returns bounded matching passages without a second request", async () => {
-  let calls = 0;
-  global.fetch = async () => { calls++; return mock(`<main><h1>Heading</h1><p>${"unrelated ".repeat(110)}</p><h2>Timeout policy</h2><p>The timeout is adaptive.</p><p>${"padding ".repeat(90)}</p></main>`); };
-  const url = "https://example.org/find-case";
-  await fetchPage(url);
-  const found = JSON.parse(await dispatch({type:"tool",name:"web_fetch",arguments:{url,find:"timeout",max_chars:1000}}));
-  assert.equal(found.provider,"http");
-  assert.ok(found.match_count >= 1);
-  assert.match(found.text,/timeout/i);
-  assert.ok(found.text.length < found.total_chars);
-  assert.ok(found.matches[0].start_char >= 0);
-  assert.equal(calls,1);
-  await assert.rejects(fetchPage(url,{},1000,10,"timeout"),{code:"INVALID_ARGUMENT"});
-  await assert.rejects(fetchPage(url,{},1000,0,""),{code:"INVALID_ARGUMENT"});
-});
-
-test("static-first render retries only an unreadable page and only with owner opt-in", async () => {
-  const calls=[];
-  global.fetch=async (url,options) => {
-    calls.push(new URL(url).hostname);
-    if(new URL(url).hostname === "api.firecrawl.dev") {
-      assert.equal(options.method,"POST");
-      return mock(JSON.stringify({success:true,data:{markdown:"# Rendered\nUseful content",metadata:{title:"Rendered"}}}),"application/json");
-    }
-    return mock('<html><title>Just a moment</title><body>Checking your browser</body></html>');
-  };
-  await assert.rejects(fetchPage("https://example.org/render-off",{render_fallback:"off"}),{code:"UNREADABLE_PAGE"});
-  assert.deepEqual(calls,["example.org"]);
-  const page=JSON.parse(await fetchPage("https://example.org/render-on",{
-    render_fallback:"firecrawl",firecrawl_api_key:"test-key"
-  }));
-  assert.equal(page.provider,"firecrawl");
-  assert.match(page.text,/Useful content/);
-  assert.deepEqual(calls,["example.org","example.org","api.firecrawl.dev"]);
-});
-test("explicit Firecrawl fallback handles blocked HTTP responses without retrying transport errors", async () => {
-  const calls=[];
-  global.fetch=async url=>{
-    calls.push(new URL(url).hostname);
-    if (new URL(url).hostname === "api.firecrawl.dev") {
-      return mock(JSON.stringify({success:true,data:{markdown:"# Unblocked",metadata:{title:"Unblocked"}}}),"application/json");
-    }
-    return new Response("Forbidden",{status:403,headers:{"content-type":"text/html"}});
-  };
-  const url="https://example.org/http-403-fallback";
-  await assert.rejects(fetchPage(url,{render_fallback:"off"}),{status:403});
-  const result=JSON.parse(await fetchPage(url,{render_fallback:"firecrawl",firecrawl_api_key:"test-key"}));
-  assert.equal(result.provider,"firecrawl");
-  assert.match(result.text,/Unblocked/);
-  assert.deepEqual(calls,["example.org","example.org","api.firecrawl.dev"]);
-});
-test("rejects unsupported URL and missing key",async()=>{
-  await assert.rejects(fetchPage("file:///etc/passwd"),/HTTP/);
-  await assert.rejects(search("x",{provider:"brave",brave_api_key:""}),/BRAVE_SEARCH_API_KEY/);
-  assert.equal(plainText("<b>a</b> &amp; <p>b</p>"),"a & b");
-});
-
-
-test("site filters reject unrelated hosts, deduplicate tracking URLs and fill the requested count", async () => {
-  global.fetch = async () => mock(JSON.stringify({results: [
-    {title: "Wrong", url: "https://notexample.org/a"},
-    {title: "Wrong suffix", url: "https://example.org.evil.test/a"},
-    {title: "A", url: "https://docs.example.org/a?utm_source=search#anchor", content: "<b>Useful</b>"},
-    {title: "Duplicate", url: "https://docs.example.org/a"},
-    {title: "Excluded", url: "https://private.example.org/a"},
-    {title: "Invalid", url: "javascript:alert(1)"},
-    {title: "B", url: "https://example.org/b"}
-  ]}), "application/json");
-  const result = JSON.parse(await search("docs site:example.org -site:private.example.org",
-    {provider: "searxng", searxng_url: "https://search.example.org"}, 2));
-  assert.deepEqual(result.results.map(x => x.url), ["https://docs.example.org/a", "https://example.org/b"]);
-  assert.equal(result.results[0].snippet, "Useful");
-});
-
-
-
-test("SearXNG search endpoint is not duplicated and invalid JSON is reported", async () => {
-  global.fetch = async url => {
-    assert.equal(new URL(url).pathname, "/instance/search");
-    return mock("not json", "application/json");
-  };
-  await assert.rejects(search("test", {provider: "searxng", searxng_url: "https://search.example.org/instance/search"}), {code: "INVALID_RESPONSE"});
-});
-
-test("RSS CDATA titles, descriptions and URLs are extracted", () => {
-  const results = parseBingRSS('<rss><item><title><![CDATA[Title &amp; More]]></title><link><![CDATA[https://example.org/cdata]]></link><description><![CDATA[<b>Snippet</b>]]></description></item></rss>', 1);
-  assert.deepEqual(results, [{title: "Title & More", url: "https://example.org/cdata", snippet: "Snippet"}]);
-});
-
-test("DDG snippets do not leak from the next result and missing href is ignored", () => {
-  const results = parseDDG('<a class="result__a">Invalid</a><a class="result__a" href="https://a.example.org">A</a><a class="result__a" href="https://b.example.org">B</a><div class="result__snippet">B snippet</div>', 5);
-  assert.equal(results.length, 2);
-  assert.equal(results[0].snippet, "");
-  assert.equal(results[1].snippet, "B snippet");
-});
-
-test("extracts documentation body instead of sidebar and preserves code, links and tables", async () => {
-  global.fetch = async () => mock(`<title>Docs &amp; API</title><body>
-    <div id="column2"><div id="toc">Huge navigation</div></div>
-    <div id="apicontent"><header><h1>API reference</h1></header>
-      <p>Read <a href="../guide?q=1&amp;x=2">the guide</a>.</p>
-      <div><p>Nested text</p></div><p>After nested div</p>
-      <pre><code>if (a &lt; b) {\n  run();\n}</code></pre>
-      <table><tr><th>Name</th><th>Type</th></tr><tr><td>count</td><td>number</td></tr></table>
-      <p hidden>Hidden noise</p><div aria-hidden="true">Not visible</div>
-      <script>malicious()</script><footer>Footer noise</footer>
-    </div></body>`);
-  const page = JSON.parse(await fetchPage("https://docs.example.org/api/reference"));
-  assert.equal(page.title, "Docs & API");
-  assert.match(page.text, /# API reference/);
-  assert.match(page.text, /\[the guide\]\(https:\/\/docs.example.org\/guide\?q=1&x=2\)/);
-  assert.match(page.text, /After nested div/);
-  assert.match(page.text, /```\nif \(a < b\) {\n  run\(\);\n}\n```/);
-  assert.match(page.text, /\| Name \| Type \|/);
-  assert.doesNotMatch(page.text, /Huge navigation|Hidden noise|Not visible|malicious|Footer noise/);
-});
-
-test("selects complete main rather than the first tiny article", async () => {
-  global.fetch = async () => mock('<body><article>Ad</article><main><div>First</div><p>Complete documentation body.</p></main></body>');
-  const page = JSON.parse(await fetchPage("https://example.org/multiple"));
-  assert.match(page.text, /Complete documentation/);
-  assert.doesNotMatch(page.text, /Ad/);
-});
-
-test("long pages can be continued without refetching or losing characters", async () => {
-  let calls = 0;
-  const source = "A".repeat(999) + "😀" + "end ".repeat(600);
-  global.fetch = async () => { calls++; return mock(source, "text/plain"); };
-  const first = JSON.parse(await fetchPage("https://example.org/continuation", {}, 1000));
-  assert.equal(first.next_start, 999);
-  assert.equal(first.total_chars, source.length);
-  const next = JSON.parse(await dispatch({type: "tool", name: "web_fetch", arguments: {
-    url: "https://example.org/continuation", start_char: first.next_start, max_chars: 30000
-  }}));
-  assert.equal(first.text + next.text, source);
-  assert.equal(next.next_start, null);
-  assert.equal(next.truncated, false);
-  assert.equal(calls, 1);
-});
-
-test("a new read from zero refreshes a cached page and offsets are validated", async () => {
-  global.fetch = async () => mock("old", "text/plain");
-  await fetchPage("https://example.org/refresh");
-  global.fetch = async () => mock("new", "text/plain");
-  assert.equal(JSON.parse(await fetchPage("https://example.org/refresh")).text, "new");
-  await assert.rejects(fetchPage("https://example.org/refresh", {}, 1000, -1), {code: "INVALID_OFFSET"});
-  await assert.rejects(fetchPage("https://example.org/refresh", {}, 1000, 100), {code: "INVALID_OFFSET"});
-});
-
-test("specific main content wins over a larger generic wrapper with unquoted HTML attributes", async () => {
-  global.fetch = async () => mock(`<div id=content><div role=navigation>${"Sidebar ".repeat(500)}</div>
-    <header>Site branding</header><div id=gtoc>${"Other API links ".repeat(500)}</div>
-    <div role=main id=apicontent><h1>Global objects</h1><p>Actual API documentation.</p></div></div>`);
-  const page = JSON.parse(await fetchPage("https://example.org/wrapped"));
-  assert.match(page.text, /Actual API documentation/);
-  assert.doesNotMatch(page.text, /Sidebar|Site branding|Other API/);
-});
-
-test("script markup cannot close the surrounding main or leak script text", async () => {
-  global.fetch = async () => mock('<main><p>Before</p><script>const html="</main><p>Injected</p>";</script><p>After</p></main>');
-  const page = JSON.parse(await fetchPage("https://example.org/script"));
-  assert.match(page.text, /Before/);
-  assert.match(page.text, /After/);
-  assert.doesNotMatch(page.text, /Injected|const html/);
-});
-
-
-
-test("extraction limit is explicit, output whitespace is compact and code whitespace survives", async () => {
-  global.fetch = async () => mock('<main><div><p>First</p></div>\n<div><p>Second</p></div><pre>line 1\n\n\nline 4</pre></main>');
-  const page = JSON.parse(await fetchPage("https://example.org/spacing"));
-  assert.match(page.text, /First\n\nSecond/);
-  assert.match(page.text, /```\nline 1\n\n\nline 4\n```/);
-  global.fetch = async () => mock("<main>" + "<span>x</span>".repeat(50001) + "</main>");
-  await assert.rejects(fetchPage("https://example.org/too-many-elements"), error => {
-    assert.equal(error.code, "UNREADABLE_PAGE");
-    assert.match(error.message, /50,000/);
-    return true;
-  });
-});
-
-test("hidden main candidates cannot replace visible content", async () => {
-  global.fetch = async () => mock('<body><main hidden>Hidden main</main><div><p>Visible body</p></div></body>');
-  const page = JSON.parse(await fetchPage("https://example.org/hidden-main"));
-  assert.equal(page.text, "Visible body");
-});
-
-test("auto rejects invalid API priority configuration before network access", async () => {
-  let calls = 0;
-  global.fetch = async () => { calls++; throw Error("must not fetch"); };
-  for (const search_priority of [[], ["auto"], ["bing"], ["duckduckgo"], ["exa", "exa"], "exa,", {}, ["secret-key"]]) {
-    await assert.rejects(search("guide", {exa_api_key: "secret", search_priority}), error => {
-      assert.equal(error.code, "CONFIG_ERROR");
-      assert.doesNotMatch(error.message, /secret/);
-      return true;
-    });
-  }
-  assert.equal(calls, 0);
-});
-
-test("unrelated results fail domain checks without switching providers", async () => {
-  let calls = 0;
-  global.fetch = async () => {
-    calls++;
-    return mock('<rss><item><title>Wrong</title><link>https://unrelated.org</link></item></rss>', "application/rss+xml");
-  };
-  await assert.rejects(search("fetch site:nodejs.org", {provider: "bing"}), {code: "NO_RESULTS"});
-  assert.equal(calls, 1);
-});
-
-test("explicit provider overrides multiple configured backends and never retries", async () => {
-  let calls = 0;
-  global.fetch = async url => {
-    calls++;
-    assert.equal(new URL(url).hostname, "api.search.brave.com");
-    return new Response("denied", {status: 403});
-  };
-  await assert.rejects(search("test", {provider: "brave", brave_api_key: "key", exa_api_key: "other", searxng_url: "https://search.example.org"}), {code: "HTTP_ERROR"});
-  assert.equal(calls, 1);
-});
-
-test("evicted, missing and expired continuation snapshots fail without refetching", async () => {
-  let calls = 0;
-  global.fetch = async () => { calls++; return mock("content ".repeat(200), "text/plain"); };
-  for (let i = 0; i < 7; i++) await fetchPage(`https://example.org/eviction-${i}`);
-  await assert.rejects(fetchPage("https://example.org/eviction-0", {}, 1000, 100), {code: "CACHE_MISS"});
-  await assert.rejects(fetchPage("https://example.org/never-read", {}, 1000, 100), {code: "CACHE_MISS"});
-  assert.equal(calls, 7);
-  const now = Date.now;
-  try {
-    Date.now = () => now() + 120000;
-    await assert.rejects(fetchPage("https://example.org/eviction-6", {}, 1000, 100), error => {
-      assert.equal(error.code, "CACHE_MISS");
-      assert.match(error.message, /start_char = 0/);
-      return true;
-    });
-  } finally { Date.now = now; }
-  assert.equal(calls, 7);
-  const fresh = JSON.parse(await fetchPage("https://example.org/eviction-6", {}, 1000));
-  const next = JSON.parse(await fetchPage("https://example.org/eviction-6", {}, 1000, fresh.next_start));
-  assert.equal(next.next_start, null);
-  assert.equal(calls, 8);
-});
-
-test("a single configured backend is selected and gets no fallback on failure", async () => {
-  let calls = 0;
-  global.fetch = async url => {
-    calls++;
-    assert.equal(new URL(url).hostname, "search.example.org");
-    return new Response("bad gateway", {status: 502});
-  };
-  await assert.rejects(search("test", {searxng_url: "https://search.example.org", search_priority: ["searxng"]}), {code: "HTTP_ERROR"});
-  assert.equal(calls, 1);
-  global.fetch = async () => mock(JSON.stringify({results: [{title: "Doc", url: "https://example.org/doc"}]}), "application/json");
-  assert.equal(JSON.parse(await search("test", {searxng_url: "https://search.example.org", search_priority: ["searxng"]})).provider, "searxng");
-});
-
-test("Exa POST uses native domain filters and original highlights, not generated summaries", async () => {
-  process.env.EXA_API_KEY = "env-key";
-  let calls = 0;
+test("exa receives a POST with the key and native domain filters", async () => {
   global.fetch = async (url, options) => {
-    calls++;
     assert.equal(String(url), "https://api.exa.ai/search");
     assert.equal(options.method, "POST");
-    assert.equal(options.headers["x-api-key"], "env-key");
-    assert.equal(options.headers["Content-Type"], "application/json");
-    assert.equal(options.redirect, "manual");
-    assert.deepEqual(JSON.parse(options.body), {
-      query: "Node fetch", type: "auto", numResults: 2, contents: {highlights: true},
-      includeDomains: ["nodejs.org"], excludeDomains: ["private.nodejs.org"]
-    });
-    return mock(JSON.stringify({results: [
-      {title: "Wrong host", url: "https://nodejs.org.evil.test"},
-      {title: "Excluded", url: "https://private.nodejs.org/doc"},
-      {title: "Fetch", url: "https://nodejs.org/api/globals.html?utm_source=exa", highlights: ["First <b>passage</b>", "Second passage", null], summary: "Do not return this"},
-      {title: "More", url: "https://nodejs.org/api/http.html", summary: "Not an original passage"}
-    ], output: {content: "Generated answer"}}), "application/json");
+    assert.equal(options.headers["x-api-key"], "exa-key");
+    const body = JSON.parse(options.body);
+    assert.equal(body.query, "rust async");
+    assert.deepEqual(body.includeDomains, ["docs.rs"]);
+    assert.deepEqual(body.excludeDomains, ["reddit.com"]);
+    return json({results: [{title: "Tokio", url: "https://docs.rs/tokio", highlights: ["async runtime", "tasks"]}]});
   };
-  const result = JSON.parse(await search("Node fetch site:nodejs.org -site:private.nodejs.org", {}, 2));
+  const result = JSON.parse(await search("rust async site:docs.rs -site:reddit.com", {provider: "exa", exa_api_key: "exa-key"}));
   assert.equal(result.provider, "exa");
-  assert.equal(result.results.length, 2);
-  assert.equal(result.results[0].url, "https://nodejs.org/api/globals.html");
-  assert.equal(result.results[0].snippet, "First passage Second passage");
-  assert.equal(result.results[1].snippet, "");
-  assert.doesNotMatch(JSON.stringify(result), /env-key|Generated|Do not return/);
-  assert.equal(calls, 1);
+  assert.equal(result.results[0].snippet, "async runtime tasks");
 });
 
-test("Exa configuration overrides environment and sends only requested bounded results", async () => {
-  process.env.EXA_API_KEY = "env-key";
-  global.fetch = async (_url, options) => {
-    assert.equal(options.headers["x-api-key"], "configured-key");
-    assert.deepEqual(JSON.parse(options.body), {
-      query: "plain query", type: "auto", numResults: 10, contents: {highlights: true}
-    });
-    return mock(JSON.stringify({results: [{title: "Found", url: "https://example.org"}]}), "application/json");
-  };
-  const result = JSON.parse(await search("plain query", {provider: "exa", exa_api_key: "configured-key"}, 100));
-  assert.equal(result.results.length, 1);
-});
-
-test("JSON providers distinguish malformed responses from empty results", async () => {
-  for (const config of [
-    {provider: "exa", exa_api_key: "key"},
-    {provider: "brave", brave_api_key: "key"},
-    {provider: "searxng", searxng_url: "https://search.example.org"}
-  ]) {
-    for (const body of ["not-json", "null", "{}", '{"results":{}}', '{"web":{"results":{}}}']) {
-      global.fetch = async () => mock(body, "application/json");
-      await assert.rejects(search("test", config), {code: "INVALID_RESPONSE"});
-    }
-    global.fetch = async () => mock(JSON.stringify(config.provider === "brave" ? {web: {results: []}} : {results: []}), "application/json");
-    await assert.rejects(search("test", config), {code: "NO_RESULTS"});
-  }
-});
-
-test("Exa errors do not leak credentials, retry or fall back", async () => {
-  let calls = 0;
-  for (const status of [401, 403, 429, 500]) {
-    global.fetch = async () => { calls++; return new Response("secret-key", {status}); };
-    await assert.rejects(search("test", {provider: "exa", exa_api_key: "secret-key", searxng_url: "https://search.example.org"}), error => {
-      assert.equal(error.code, "HTTP_ERROR");
-      assert.match(error.message, new RegExp(String(status)));
-      assert.doesNotMatch(error.message, /secret-key/);
-      return true;
-    });
-  }
-  assert.equal(calls, 4);
-  await assert.rejects(search("test", {provider: "exa"}), {code: "CONFIG_ERROR"});
-});
-
-test("invalid queries, sites and provider settings do not make requests", async () => {
-  global.fetch = async () => { throw Error("must not fetch"); };
-  for (const query of ["", " ", null, "x".repeat(601), "test site:!@#$"]) {
-    await assert.rejects(search(query, {provider: "exa", exa_api_key: "key"}), {code: "INVALID_QUERY"});
-  }
-  await assert.rejects(search("test", {provider: "unknown"}), {code: "CONFIG_ERROR"});
-});
-
-test("table captions, section headings, headers and code survive one complete read", async () => {
-  global.fetch = async () => mock('<title>Versioned API</title><main><h2>Node 22 options</h2><table><caption>Request settings</caption><thead><tr><th>Option</th><th>Default</th></tr></thead><tbody><tr><td>timeout</td><td>15000 ms</td></tr><tr><td>signal</td><td>undefined</td></tr></tbody></table><pre><code>if (a &lt; b) {\n  fetch(url);\n}</code></pre></main>');
-  const page = JSON.parse(await fetchPage("https://example.org/table-context"));
-  assert.match(page.text, /## Node 22 options/);
-  assert.match(page.text, /Request settings/);
-  assert.match(page.text, /\| Option \| Default \|/);
-  assert.match(page.text, /\| timeout \| 15000 ms \|/);
-  assert.match(page.text, /\| signal \| undefined \|/);
-  assert.match(page.text, /```\nif \(a < b\) {\n  fetch\(url\);\n}\n```/);
-  assert.equal(page.next_start, null);
-});
-
-for (const provider of ["tavily", "you", "parallel", "firecrawl"]) {
-  test(`${provider} authenticates, bounds results, preserves source snippets and enforces domains`, async () => {
-    let calls = 0;
-    global.fetch = async (url, options) => {
-      calls++;
-      const expected = {tavily: "api.tavily.com", you: "ydc-index.io", parallel: "api.parallel.ai", firecrawl: "api.firecrawl.dev"};
-      assert.equal(new URL(url).hostname, expected[provider]);
-      assert.equal(options.method, "POST");
-      assert.equal(options.redirect, "manual");
-      const body = JSON.parse(options.body);
-      const entries = [
-        {title: "Wrong", url: "https://example.org.evil.test/doc"},
-        {title: "Private", url: "https://private.example.org/doc"},
-        {title: "Good", url: "https://example.org/doc?utm_source=test", content: "Source snippet",
-          snippets: ["First", "Second"], excerpts: ["First", "Second"], description: "Source snippet"}
-      ];
-      let response;
-      if (provider === "tavily") {
-        assert.equal(options.headers.Authorization, "Bearer fake-secret");
-        assert.deepEqual(body, {query: "API docs", search_depth: "basic", max_results: 2,
-          include_answer: false, include_raw_content: false, include_domains: ["example.org"], exclude_domains: ["private.example.org"]});
-        response = {results: entries, answer: "Ignore generated answer"};
-      } else if (provider === "you") {
-        assert.equal(options.headers["X-API-Key"], "fake-secret");
-        assert.deepEqual(body, {query: "API docs site:example.org -site:private.example.org", count: 2});
-        response = {results: {web: entries}};
-      } else if (provider === "parallel") {
-        assert.equal(options.headers["x-api-key"], "fake-secret");
-        assert.deepEqual(body, {objective: "API docs site:example.org -site:private.example.org", search_queries: ["API docs"],
-          mode: "fast", max_chars_total: 3600, advanced_settings: {max_results: 2,
-            source_policy: {include_domains: ["example.org"], exclude_domains: ["private.example.org"]}}});
-        response = {results: entries};
-      } else {
-        assert.equal(options.headers.Authorization, "Bearer fake-secret");
-        assert.equal(new URL(url).pathname, "/v2/search");
-        assert.deepEqual(body, {query: "API docs site:example.org -site:private.example.org", limit: 2});
-        response = {success: true, data: {web: entries}};
-      }
-      return mock(JSON.stringify(response), "application/json");
-    };
-    const result = JSON.parse(await search("API docs site:example.org -site:private.example.org", {
-      provider, [provider + "_api_key"]: "fake-secret"
-    }, 2));
-    assert.equal(calls, 1);
-    assert.equal(result.provider, provider);
-    assert.equal(result.results.length, 1);
-    assert.equal(result.results[0].url, "https://example.org/doc");
-    assert.equal(result.results[0].snippet, ["you", "parallel"].includes(provider) ? "First Second" : "Source snippet");
-    assert.doesNotMatch(JSON.stringify(result), /fake-secret|generated answer/);
-  });
-
-  test(`${provider} errors do not retry, echo bodies or fall back`, async () => {
-    const config = {provider, [provider + "_api_key"]: "fake-secret"};
-    await assert.rejects(search("test", {provider}), {code: "CONFIG_ERROR"});
-    for (const body of ["null", "not-json", "{}", '{"results":{}}', '{"success":false,"error":"fake-secret"}']) {
-      global.fetch = async () => mock(body, "application/json");
-      await assert.rejects(search("test", config), {code: "INVALID_RESPONSE"});
-    }
-    const empty = provider === "you" ? {results: {web: []}} : provider === "firecrawl" ? {success: true, data: {web: []}} : {results: []};
-    global.fetch = async () => mock(JSON.stringify(empty), "application/json");
-    await assert.rejects(search("test", config), {code: "NO_RESULTS"});
-    let calls = 0;
-    for (const status of [401, 403, 429, 500]) {
-      global.fetch = async () => { calls++; return new Response("fake-secret", {status}); };
-      await assert.rejects(search("test", config), error => {
-        assert.equal(error.code, "HTTP_ERROR");
-        assert.doesNotMatch(error.message, /fake-secret/);
-        return true;
-      });
-    }
-    assert.equal(calls, 4);
-  });
-}
-
-test("all new credentials participate in auto and tool callers cannot select a paid provider", async () => {
-  for (const [provider, env] of Object.entries({tavily: "TAVILY_API_KEY", you: "YDC_API_KEY", parallel: "PARALLEL_API_KEY", firecrawl: "FIRECRAWL_API_KEY"})) {
-    process.env[env] = "fake-env-key";
-    global.fetch = async () => new Response(null, {status: 401});
-    await assert.rejects(search("test", {search_priority: [provider]}), {code: "HTTP_ERROR"});
-    await assert.rejects(search("test", {exa_api_key: "other-key", search_priority: [provider, "exa"]}), {code: "HTTP_ERROR"});
-    delete process.env[env];
-    global.fetch = async () => mock(JSON.stringify({results: [{title: "Found", url: "https://example.org"}]}), "application/json");
-    await assert.rejects(dispatch({type: "tool", name: "web_search", config: {provider, exa_api_key: "key"},
-      arguments: {query: "test", provider: "exa"}}), {code: "INVALID_ARGUMENT"});
-  }
-});
-
-test("Firecrawl extraction validates source status and reuses its own continuation snapshot", async () => {
-  let calls = 0;
-  const content = "Markdown paragraph.\n\n".repeat(100);
+test("brave uses its header token and description field", async () => {
   global.fetch = async (url, options) => {
-    calls++;
-    assert.equal(url, "https://api.firecrawl.dev/v2/scrape");
-    assert.equal(options.headers.Authorization, "Bearer fake-key");
-    assert.deepEqual(JSON.parse(options.body), {url: "https://example.org/firecrawl-doc", formats: ["markdown"], onlyMainContent: true, maxAge: 0});
-    return mock(JSON.stringify({success: true, data: {markdown: content, metadata: {title: "Doc", statusCode: 200}}}), "application/json");
+    assert.equal(options.headers["X-Subscription-Token"], "brave-key");
+    assert.match(String(url), /count=2/);
+    return json({web: {results: [{title: "Docs", url: "https://example.org/a", description: "Snippet"}]}});
   };
-  const config = {fetch_provider: "firecrawl", firecrawl_api_key: "fake-key", firecrawl_fresh_scrape: true};
-  const first = JSON.parse(await fetchPage("https://example.org/firecrawl-doc", config, 1000));
-  const second = JSON.parse(await fetchPage("https://example.org/firecrawl-doc", config, 30000, first.next_start));
-  assert.equal(first.provider, "firecrawl");
-  assert.equal(first.text + second.text, content);
-  assert.equal(calls, 1);
-  await assert.rejects(fetchPage("https://example.org/firecrawl-doc", {}, 1000, 1000), {code: "CACHE_MISS"});
-  for (const data of [{markdown: "failure", metadata: {statusCode: 403}}, {markdown: "failure", metadata: {error: "fake-key"}}]) {
-    global.fetch = async () => mock(JSON.stringify({success: true, data}), "application/json");
-    await assert.rejects(fetchPage("https://example.org/firecrawl-doc", config), {code: "HTTP_ERROR"});
-  }
-  global.fetch = async () => mock('{"success":true,"data":{"markdown":""}}', "application/json");
-  await assert.rejects(fetchPage("https://example.org/firecrawl-doc", config), {code: "UNREADABLE_PAGE"});
-  await assert.rejects(search("test", {provider: "firecrawl", firecrawl_api_key: "key", firecrawl_base_url: "http://remote.test"}), {code: "CONFIG_ERROR"});
-  await assert.rejects(search("test", {provider: "firecrawl", firecrawl_api_key: "key", firecrawl_api_version: "v3"}), {code: "CONFIG_ERROR"});
+  const result = JSON.parse(await search("docs", {provider: "brave", brave_api_key: "brave-key"}, 2));
+  assert.deepEqual(result.results[0], {title: "Docs", url: "https://example.org/a", snippet: "Snippet"});
 });
 
-test("Firecrawl reads apply the same target check instead of forwarding a private URL", async () => {
-  const allow = process.env.KROMA_WEB_ALLOW_PRIVATE;
-  delete process.env.KROMA_WEB_ALLOW_PRIVATE;
+test("tavily and you read their own response shapes", async () => {
+  global.fetch = async (url, options) => {
+    if (String(url).includes("tavily")) {
+      assert.equal(options.headers.Authorization, "Bearer tavily-key");
+      assert.equal(JSON.parse(options.body).include_answer, false);
+      return json({results: [{title: "T", url: "https://example.org/t", content: "tavily snippet"}]});
+    }
+    assert.equal(options.headers["X-API-Key"], "you-key");
+    return json({results: {web: [{title: "Y", url: "https://example.org/y", snippets: ["one", "two"]}]}});
+  };
+  assert.equal(JSON.parse(await search("t", {provider: "tavily", tavily_api_key: "tavily-key"})).results[0].snippet, "tavily snippet");
+  assert.equal(JSON.parse(await search("y", {provider: "you", you_api_key: "you-key"})).results[0].snippet, "one two");
+});
+
+test("parallel sends an objective and reads excerpts", async () => {
+  global.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    assert.equal(body.objective, "compare runtimes");
+    assert.deepEqual(body.search_queries, ["compare runtimes"]);
+    return json({results: [{title: "P", url: "https://example.org/p", excerpts: ["first", "second"]}]});
+  };
+  assert.equal(JSON.parse(await search("compare runtimes", {provider: "parallel", parallel_api_key: "k"})).results[0].snippet, "first second");
+});
+
+test("searxng uses its JSON API and may live on a private host", async () => {
+  global.fetch = async url => {
+    assert.match(String(url), /searx\.example\.org\/search\?format=json&q=rust/);
+    return json({results: [{title: "Sear", url: "https://docs.example.org", content: "works"}]});
+  };
+  const result = JSON.parse(await search("rust", {provider: "searxng", searxng_url: "https://searx.example.org"}));
+  assert.equal(result.results[0].snippet, "works");
+});
+
+test("mwmbl joins its title and extract fragments", async () => {
+  global.fetch = async url => {
+    assert.match(String(url), /api\.mwmbl\.org.*s=rust/);
+    return json([{url: "https://example.org/m", title: [{value: "Mw"}], extract: [{value: "mbl "}, {value: "text"}]}]);
+  };
+  const result = JSON.parse(await search("rust", {provider: "mwmbl"}));
+  assert.equal(result.results[0].title, "Mw");
+  assert.equal(result.results[0].snippet, "mbl text");
+});
+
+test("auto starts at the best available backend and hands over on failure", async () => {
+  const calls = [];
+  global.fetch = async url => {
+    calls.push(String(url));
+    if (String(url).includes("exa")) return json({error: "boom"}, 500);
+    return json({web: {results: [{title: "Brave", url: "https://example.org/b", description: "ok"}]}});
+  };
+  const result = JSON.parse(await search("docs", {provider: "auto", exa_api_key: "e", brave_api_key: "b"}));
+  assert.equal(result.provider, "brave");
+  assert.ok(calls.length >= 2, "the chain advanced");
+  assert.equal(result.attempts[0].provider, "exa_public", "the keyless Exa endpoint is tried first");
+  assert.ok(result.attempts.some(item => item.provider === "exa" && item.code === "HTTP_ERROR"));
+});
+
+test("keyless auto falls back to the free index and says so", async () => {
+  global.fetch = async () => json([{url: "https://example.org/free", title: [{value: "Free"}], extract: [{value: "text"}]}]);
+  const result = JSON.parse(await search("docs", {provider: "auto"}));
+  assert.equal(result.provider, "mwmbl");
+  assert.equal(result.mode, "free");
+  assert.match(result.warning, /Mwmbl/);
+});
+
+test("the keyless chain starts at Exa public, then Firecrawl, then Mwmbl", async () => {
+  const calls = [];
+  global.fetch = async url => {
+    calls.push(String(url));
+    if (String(url).includes("firecrawl")) return json({success: false}, 503);
+    return json([{url: "https://example.org/free", title: [{value: "Free"}], extract: [{value: "ok"}]}]);
+  };
+  const result = JSON.parse(await search("docs", {provider: "free"}));
+  assert.equal(result.provider, "mwmbl");
+  assert.match(calls[0], /mcp.exa.ai/);
+  assert.equal(calls.length, 3);
+});
+
+test("site filters, tracking cleanup, dedupe and snippet clipping happen locally", async () => {
+  global.fetch = async () => json({results: [
+    {title: "Keep", url: "https://docs.example.org/a?utm_source=x#frag", content: "a".repeat(600)},
+    {title: "Duplicate", url: "https://docs.example.org/a", content: "dup"},
+    {title: "Wrong host", url: "https://evil.example.net/b", content: "nope"},
+    {title: "Excluded", url: "https://blog.docs.example.org/c", content: "nope"}
+  ]});
+  const result = JSON.parse(await search("q site:docs.example.org -site:blog.docs.example.org", {provider: "searxng", searxng_url: "https://searx.example.org"}));
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0].url, "https://docs.example.org/a");
+  assert.equal(result.results[0].snippet_truncated, true);
+  assert.ok(result.results[0].snippet.endsWith("…"));
+});
+
+test("filtering out every result reports NO_RESULTS instead of inventing one", async () => {
+  global.fetch = async () => json({results: [{title: "x", url: "https://other.example.org", content: "y"}]});
+  await assert.rejects(search("q site:docs.example.org", {provider: "searxng", searxng_url: "https://searx.example.org"}), {code: "NO_RESULTS"});
+});
+
+test("bad input fails with actionable codes", async () => {
+  await assert.rejects(search("", {}), {code: "INVALID_QUERY"});
+  await assert.rejects(search("x".repeat(601), {}), {code: "INVALID_QUERY"});
+  await assert.rejects(search("q site:http://", {}), {code: "INVALID_QUERY"});
+  await assert.rejects(search("q", {provider: "nope"}), {code: "CONFIG_ERROR"});
+  await assert.rejects(search("q", {provider: "brave"}), {code: "CONFIG_ERROR"});
+  await assert.rejects(dispatch({type: "tool", name: "web_search", arguments: {query: "q", provider: "exa"}}), {code: "INVALID_ARGUMENT"});
+  await assert.rejects(dispatch({type: "tool", name: "other", arguments: {}}), {code: "UNKNOWN_TOOL"});
+  await assert.rejects(dispatch({type: "hook"}), {code: "INVALID_REQUEST"});
+});
+
+test("web_fetch chunks a long document and continues from the cached snapshot", async () => {
+  let calls = 0;
+  const body = "<html><body><main><p>" + "word ".repeat(800) + "</p></main></body></html>";
+  global.fetch = async () => { calls++; return html(body); };
+  const first = JSON.parse(await fetchPage("https://example.org/long", {}, 1000));
+  assert.equal(first.chars, 1000);
+  assert.equal(first.next_start, 1000);
+  assert.equal(first.truncated, true);
+  const second = JSON.parse(await fetchPage("https://example.org/long", {}, 1000, first.next_start));
+  assert.equal(second.start_char, 1000);
+  assert.equal(first.text + second.text, second.total_chars > 2000 ? first.text + second.text : "");
+  assert.equal(calls, 1);
+});
+
+test("continuation for an unknown or expired URL refuses to refetch", async () => {
+  global.fetch = async () => { throw new Error("must not fetch"); };
+  await assert.rejects(fetchPage("https://example.org/never-read", {}, 1000, 1000), {code: "CACHE_MISS"});
+});
+
+test("the continuation window slides while a long document is being read", () => {
+  let now = 1000;
+  const store = createStore({ttl: 100, limit: 3, now: () => now});
+  const page = {text: "x"};
+  store.set(["a"], page);
+  now = 190;
+  assert.equal(store.get("a"), page);
+  now = 280;
+  assert.equal(store.get("a"), page, "a read must refresh the window");
+  now = 420;
+  assert.equal(store.get("a"), null);
+  for (const key of ["a", "b", "c", "d"]) store.set([key], {text: key});
+  assert.equal(store.size, 3, "only the newest address names are kept");
+});
+
+test("find returns bounded passages without a top-level text or second request", async () => {
+  let calls = 0;
+  global.fetch = async () => { calls++; return html("<main><p>" + "alpha beta gamma delta ".repeat(120) + "</p></main>"); };
+  const found = JSON.parse(await fetchPage("https://example.org/find", {}, 30000, 0, "gamma delta"));
+  assert.equal(calls, 1);
+  assert.equal(found.text, undefined);
+  assert.ok(found.match_count >= 5);
+  assert.equal(found.matches.length, 5);
+  assert.equal(found.next_start, null);
+  assert.ok(found.matches.every(match => Number.isInteger(match.start_char)));
+  await assert.rejects(fetchPage("https://example.org/find", {}, 2000, 100, "gamma"), {code: "INVALID_ARGUMENT"});
+});
+
+test("mdBook pages survive the sidebar class on <html> and keep hidden nodes out", async () => {
+  const body = '<html class="light sidebar-visible"><head><title>Hello</title></head><body>'
+    + '<nav><a href="/a">Skip</a></nav><main><p>' + "内容".repeat(600) + "</p></main></body></html>";
+  global.fetch = async () => html(body);
+  const page = JSON.parse(await fetchPage("https://docs.example.org/mdbook", {}));
+  assert.equal(page.title, "Hello");
+  assert.ok(page.total_chars > 600);
+  assert.doesNotMatch(page.text, /Skip/);
+});
+
+test("a JavaScript application shell is reported as unreadable, not as a read", async () => {
+  const shell = '<html><body><div id="app"></div><script>boot()</script><noscript>enable javascript</noscript></body></html>';
+  global.fetch = async () => html(shell);
+  await assert.rejects(fetchPage("https://example.org/spa", {}), {code: "UNREADABLE_PAGE"});
+  const navOnly = "<html><body><div>" + Array.from({length: 8}, (_, i) => `<a href="/p${i}">Menu ${i}</a>`).join("") + "</div></body></html>";
+  global.fetch = async () => html(navOnly);
+  await assert.rejects(fetchPage("https://example.org/nav", {}), error => {
+    assert.equal(error.code, "UNREADABLE_PAGE");
+    assert.match(error.message, /navigation links only/);
+    return true;
+  });
+});
+
+test("readable() keeps short real text and rejects near-empty pages", () => {
+  const note = "A short but genuine note about this API and its limits.";
+  assert.equal(readable({text: note}).text, note);
+  assert.throws(() => readable({text: ""}), {code: "UNREADABLE_PAGE"});
+  assert.throws(() => readable({text: "参数错误"}), {code: "UNREADABLE_PAGE"});
+});
+
+test("a truncated source warns and never claims the tail is readable", async () => {
+  global.fetch = async () => new Response("x".repeat(1600000), {headers: {"content-type": "text/plain"}});
+  const chunk = JSON.parse(await fetchPage("https://example.org/huge", {}, 30000));
+  assert.equal(chunk.truncated, true);
+  assert.match(chunk.warning, /1.5 MB/);
+  const tail = JSON.parse(await fetchPage("https://example.org/huge", {}, 30000, 1499000));
+  assert.equal(tail.next_start, null);
+  assert.equal(tail.truncated, true);
+});
+
+test("plain text passes through unchanged and keeps valid offsets", async () => {
+  const text = "a".repeat(999) + "😀".repeat(10);
+  global.fetch = async () => new Response(text, {headers: {"content-type": "text/plain"}});
+  const page = JSON.parse(await fetchPage("https://example.org/utf16", {}, 1000));
+  assert.equal(page.chars, 999, "a split surrogate pair is not returned as half a character");
+  assert.equal(page.next_start, 999);
+  assert.equal(JSON.parse(await fetchPage("https://example.org/utf16", {}, 1000, 999)).chars, 20);
+});
+
+test("a JavaScript shell is rendered remotely only when a Firecrawl key is stored", async () => {
+  const calls = [];
+  global.fetch = async (url, options) => {
+    calls.push(String(url));
+    if (String(url).includes("api.firecrawl.dev")) {
+      assert.equal(options.headers.Authorization, "Bearer fc-test");
+      assert.deepEqual(JSON.parse(options.body), {url: "https://app.example.org/spa", formats: ["markdown"], onlyMainContent: true});
+      return json({success: true, data: {markdown: "# Rendered\n\nReal content from the browser.", metadata: {title: "Rendered title", statusCode: 200}}});
+    }
+    return html('<html><body><div id="app"></div><noscript>enable javascript</noscript></body></html>');
+  };
+  const page = JSON.parse(await fetchPage("https://app.example.org/spa", {firecrawl_api_key: "fc-test"}));
+  assert.equal(page.provider, "firecrawl");
+  assert.equal(page.title, "Rendered title");
+  assert.match(page.text, /Real content/);
+  assert.equal(calls.filter(url => url.includes("api.firecrawl.dev")).length, 1);
+});
+
+test("without a Firecrawl key the same page stays unreadable", async () => {
+  let calls = 0;
+  global.fetch = async () => { calls++; return html('<html><body><div id="app"></div></body></html>'); };
+  await assert.rejects(fetchPage("https://app.example.org/plain", {}), {code: "UNREADABLE_PAGE"});
+  assert.equal(calls, 2, "direct attempt, then the keyless fallback");
+});
+
+test("only blocked responses (403/429) escalate to rendering, server errors do not", async () => {
+  const calls = [];
+  global.fetch = async url => {
+    calls.push(String(url));
+    if (String(url).includes("api.firecrawl.dev")) {
+      return json({success: true, data: {markdown: "# Blocked page\n\nRendered body text.", metadata: {statusCode: 200}}});
+    }
+    return new Response("denied", {status: 403});
+  };
+  const page = JSON.parse(await fetchPage("https://guard.example.org/x", {firecrawl_api_key: "k"}));
+  assert.equal(page.provider, "firecrawl");
+  assert.equal(calls.filter(url => url.includes("api.firecrawl.dev")).length, 1);
+
+  calls.length = 0;
+  global.fetch = async url => {
+    calls.push(String(url));
+    return new Response("boom", {status: 500});
+  };
+  await assert.rejects(fetchPage("https://guard.example.org/y", {firecrawl_api_key: "k"}), {code: "HTTP_ERROR"});
+  assert.equal(calls.length, 1, "a server error must not spend a rendering call");
+});
+
+test("a Firecrawl failure keeps its own error code", async () => {
+  global.fetch = async url => {
+    if (String(url).includes("api.firecrawl.dev")) return json({success: false, error: "bad key"});
+    return html('<html><body><div id="app"></div></body></html>');
+  };
+  await assert.rejects(fetchPage("https://app.example.org/fail", {firecrawl_api_key: "k"}), {code: "INVALID_RESPONSE"});
+});
+
+test("perplexity, serper, kagi and bocha use their documented endpoints and shapes", async () => {
+  const seen = [];
+  global.fetch = async (url, options) => {
+    seen.push({url: String(url), headers: options.headers, body: JSON.parse(options.body)});
+    if (String(url).includes("perplexity")) {
+      return json({results: [{title: "P", url: "https://example.org/p", snippet: "perplexity snippet"}]});
+    }
+    if (String(url).includes("serper")) {
+      return json({organic: [{title: "S", link: "https://example.org/s", snippet: "serper snippet"}]});
+    }
+    if (String(url).includes("kagi.com")) {
+      return json({data: {search: [{title: "K", url: "https://example.org/k", snippet: "kagi snippet"}]}});
+    }
+    return json({data: {webPages: {value: [{name: "B", url: "https://example.org/b", snippet: "bocha snippet"}]}}});
+  };
+  const per = JSON.parse(await search("q", {provider: "perplexity", perplexity_api_key: "pk"}));
+  assert.equal(per.results[0].snippet, "perplexity snippet");
+  assert.equal(seen[0].url, "https://api.perplexity.ai/search");
+  assert.equal(seen[0].headers.Authorization, "Bearer pk");
+  assert.deepEqual(seen[0].body, {query: "q"});
+
+  const ser = JSON.parse(await search("q", {provider: "serper", serper_api_key: "sk"}, 4));
+  assert.equal(ser.results[0].url, "https://example.org/s");
+  assert.equal(seen[1].url, "https://google.serper.dev/search");
+  assert.equal(seen[1].headers["X-API-KEY"], "sk");
+  assert.equal(seen[1].body.num, 4);
+
+  const kag = JSON.parse(await search("q", {provider: "kagi", kagi_api_key: "kk"}));
+  assert.equal(kag.results[0].snippet, "kagi snippet");
+  assert.equal(seen[2].url, "https://kagi.com/api/v1/search");
+  assert.equal(seen[2].headers.Authorization, "Bearer kk");
+
+  const boc = JSON.parse(await search("q", {provider: "bocha", bocha_api_key: "bk"}, 3));
+  assert.deepEqual(boc.results[0], {title: "B", url: "https://example.org/b", snippet: "bocha snippet"});
+  assert.equal(seen[3].url, "https://api.bochaai.com/v1/web-search");
+  assert.equal(seen[3].body.count, 3);
+
+  const auto = JSON.parse(await search("q", {provider: "auto", bocha_api_key: "bk"}));
+  assert.equal(auto.provider, "bocha", "the only configured key is used");
+});
+
+test("firecrawl search works with a key and without one", async () => {
+  const calls = [];
+  global.fetch = async (url, options) => {
+    calls.push({url: String(url), headers: {...options.headers}, body: JSON.parse(options.body)});
+    return json({success: true, data: {web: [{title: "F", url: "https://example.org/f", description: "firecrawl snippet"}]}});
+  };
+  const withKey = JSON.parse(await search("q", {provider: "firecrawl", firecrawl_api_key: "fc"}, 2));
+  assert.equal(withKey.results[0].snippet, "firecrawl snippet");
+  assert.equal(calls[0].url, "https://api.firecrawl.dev/v2/search");
+  assert.equal(calls[0].headers.Authorization, "Bearer fc");
+  assert.deepEqual(calls[0].body, {query: "q", limit: 2});
+
+  await search("q", {provider: "firecrawl"});
+  assert.equal(calls[1].headers.Authorization, undefined, "keyless low-volume search sends no header");
+});
+
+test("searchapi queries Google through its documented parameters", async () => {
+  global.fetch = async url => {
+    const parsed = new URL(String(url));
+    assert.equal(parsed.origin + parsed.pathname, "https://www.searchapi.io/api/v1/search");
+    assert.equal(parsed.searchParams.get("engine"), "google");
+    assert.equal(parsed.searchParams.get("q"), "rust async");
+    assert.equal(parsed.searchParams.get("api_key"), "sa-key");
+    return json({organic_results: [{title: "SA", link: "https://example.org/sa", snippet: "searchapi snippet"}]});
+  };
+  const result = JSON.parse(await search("rust async", {provider: "searchapi", searchapi_api_key: "sa-key"}));
+  assert.deepEqual(result.results[0], {title: "SA", url: "https://example.org/sa", snippet: "searchapi snippet"});
+});
+
+test("quality order is the default, and the owner can replace it", async () => {
+  const calls = [];
+  global.fetch = async url => {
+    calls.push(String(url));
+    return json({results: [{title: "X", url: "https://example.org/x", content: "snippet"}]});
+  };
+  const auto = JSON.parse(await search("q", {provider: "auto", exa_api_key: "e", tavily_api_key: "t"}));
+  assert.match(calls[0], /mcp.exa.ai/, "the keyless Exa public endpoint ranks first");
+  assert.equal(auto.provider, "exa", "a failed keyless attempt hands over to the paid Exa key");
+  const custom = JSON.parse(await search("q", {provider: "auto", exa_api_key: "e", tavily_api_key: "t", search_chain: "tavily,exa"}));
+  assert.equal(custom.provider, "tavily", "a custom chain wins");
+  await assert.rejects(search("q", {provider: "auto", exa_api_key: "e", search_chain: "exa,duckduckgo"}), {code: "CONFIG_ERROR"});
+});
+
+test("a Chinese query starts at the Chinese index when one is configured", async () => {
+  const seen = [];
+  global.fetch = async url => {
+    seen.push(String(url));
+    return json({data: {webPages: {value: [{name: "中文结果", url: "https://example.org/cn", snippet: "内容"}]}}});
+  };
+  const result = JSON.parse(await search("异步运行时对比", {provider: "auto", exa_api_key: "e", bocha_api_key: "b"}));
+  assert.equal(result.provider, "bocha");
+  assert.match(seen[0], /bochaai/);
+});
+
+test("an explicit provider never falls back to another vendor", async () => {
+  let calls = 0;
+  global.fetch = async () => { calls++; return json({error: "boom"}, 500); };
+  await assert.rejects(search("q", {provider: "brave", brave_api_key: "b", exa_api_key: "e"}), {code: "HTTP_ERROR"});
+  assert.equal(calls, 1);
+});
+
+test("serpapi and linkup use their documented contracts", async () => {
+  const seen = [];
+  global.fetch = async (url, options) => {
+    seen.push({url: new URL(String(url)), headers: options.headers});
+    if (String(url).includes("serpapi")) {
+      return json({organic_results: [{title: "SP", link: "https://example.org/sp", snippet: "serpapi snippet"}]});
+    }
+    return json({results: [{name: "LU", url: "https://example.org/lu", content: "linkup content"}]});
+  };
+  const sp = JSON.parse(await search("rust", {provider: "serpapi", serpapi_api_key: "sp-key"}));
+  assert.deepEqual(sp.results[0], {title: "SP", url: "https://example.org/sp", snippet: "serpapi snippet"});
+  assert.equal(seen[0].url.origin + seen[0].url.pathname, "https://serpapi.com/search");
+  assert.equal(seen[0].url.searchParams.get("engine"), "google");
+  assert.equal(seen[0].url.searchParams.get("api_key"), "sp-key");
+
+  const lu = JSON.parse(await search("rust", {provider: "linkup", linkup_api_key: "lu-key"}));
+  assert.deepEqual(lu.results[0], {title: "LU", url: "https://example.org/lu", snippet: "linkup content"});
+  assert.equal(seen[1].url.origin + seen[1].url.pathname, "https://api.linkup.so/v1/search");
+  assert.equal(seen[1].url.searchParams.get("outputType"), "searchResults");
+  assert.equal(seen[1].headers.Authorization, "Bearer lu-key");
+});
+
+test("a host this network cannot reach is handed to rendering", async () => {
+  const calls = [];
+  global.fetch = async url => {
+    calls.push(String(url));
+    if (String(url).includes("api.firecrawl.dev")) {
+      return json({success: true, data: {markdown: "# Reached elsewhere\n\nRendered text.", metadata: {title: "G", statusCode: 200}}});
+    }
+    const failure = new TypeError("fetch failed");
+    failure.cause = {code: "ECONNREFUSED"};
+    throw failure;
+  };
+  const page = JSON.parse(await fetchPage("https://blocked.example.org/x", {firecrawl_api_key: "k"}, 400));
+  assert.equal(page.provider, "firecrawl");
+  assert.match(page.text, /Rendered text/);
+  assert.equal(calls.length, 3, "direct attempt, free fallback, rendering attempt");
+});
+
+test("urls fetch several pages in one call and keep per-page errors", async () => {
+  global.fetch = async url => {
+    if (String(url).includes("bad.example")) throw Object.assign(new TypeError("fetch failed"), {cause: {code: "ENOTFOUND"}});
+    return html("<html><body><main><p>" + "content ".repeat(60) + "</p></main></body></html>");
+  };
+  const batch = JSON.parse(await fetchMany(["https://ok.example/a", "https://bad.example/b"], {}, 600));
+  assert.equal(batch.count, 2);
+  assert.ok(batch.results[0].chars > 0 && batch.results[0].chars <= 600, "each page keeps its own size cap");
+  assert.equal(batch.results[1].code, "NETWORK_ERROR");
+  await assert.rejects(fetchMany([], {}, 600), {code: "INVALID_ARGUMENT"});
+});
+
+test("a PDF is converted when a rendering key exists", async () => {
+  const pdf = Buffer.concat([Buffer.from("%PDF-1.7\n"), Buffer.from("binary".repeat(100))]);
+  global.fetch = async url => {
+    if (String(url).includes("api.firecrawl.dev")) {
+      return json({success: true, data: {markdown: "# Paper\n\nConverted PDF text.", metadata: {title: "Paper", statusCode: 200}}});
+    }
+    return new Response(pdf, {headers: {"content-type": "application/pdf"}});
+  };
+  const page = JSON.parse(await fetchPage("https://example.org/paper.pdf", {firecrawl_api_key: "k"}, 400));
+  assert.equal(page.provider, "firecrawl");
+  assert.match(page.text, /Converted PDF/);
+  await assert.rejects(fetchPage("https://example.org/other.pdf", {}, 400), error => {
+    assert.equal(error.code, "PDF_DETECTED");
+    assert.match(error.message, /firecrawl_api_key/);
+    return true;
+  });
+});
+
+test("a YouTube transcript comes from the caption track", async () => {
+  const watch = '<html><head><title>Rust talk - YouTube</title></head><body>"captionTracks":[{"baseUrl":"https://www.youtube.com/api/timedtext?v=abc&lang=en","languageCode":"en"}]</body></html>';
+  global.fetch = async url => {
+    if (String(url).includes("/watch?v=abc")) return new Response(watch, {headers: {"content-type": "text/html"}});
+    return json({events: [
+      {tStartMs: 0, segs: [{utf8: "hello"}]},
+      {tStartMs: 2000, segs: [{utf8: "world"}]},
+      {tStartMs: 40000, segs: [{utf8: "later part"}]}
+    ]});
+  };
+  const page = JSON.parse(await fetchPage("https://www.youtube.com/watch?v=abc", {}, 2000));
+  assert.equal(page.provider, "youtube");
+  assert.equal(page.title, "Rust talk");
+  assert.match(page.text, /\[00:00\] hello world/);
+  assert.match(page.text, /\[00:40\] later part/);
+});
+
+test("a video without captions fails without spending a rendering call", async () => {
+  let calls = 0;
+  global.fetch = async () => { calls++; return html("<html><title>No captions - YouTube</title></html>"); };
+  await assert.rejects(fetchPage("https://youtu.be/nocap", {firecrawl_api_key: "k"}, 500), {code: "NO_CAPTIONS"});
+  assert.equal(calls, 1);
+});
+
+test("search1api and valyu follow their documented contracts", async () => {
+  const seen = [];
+  global.fetch = async (url, options) => {
+    seen.push({url: String(url), headers: options.headers, body: JSON.parse(options.body)});
+    if (String(url).includes("search1api")) {
+      return json({results: [{title: "S1", link: "https://example.org/s1", snippet: "one api"}]});
+    }
+    return json({results: [{title: "V", url: "https://example.org/v", content: "valyu content"}]});
+  };
+  const one = JSON.parse(await search("rust", {provider: "search1api", search1api_api_key: "k1"}, 3));
+  assert.deepEqual(one.results[0], {title: "S1", url: "https://example.org/s1", snippet: "one api"});
+  assert.equal(seen[0].url, "https://api.search1api.com/search");
+  assert.equal(seen[0].headers.Authorization, "Bearer k1");
+  assert.equal(seen[0].body.max_results, 3);
+
+  const val = JSON.parse(await search("rust", {provider: "valyu", valyu_api_key: "k2"}));
+  assert.equal(val.results[0].snippet, "valyu content");
+  assert.equal(seen[1].url, "https://api.valyu.ai/v1/search");
+  assert.equal(seen[1].headers["x-api-key"], "k2");
+  assert.equal(seen[1].body.search_type, "web");
+});
+
+function sse(payload, session) {
+  return new Response("event: message\ndata: " + JSON.stringify(payload) + "\n\n",
+    {status: 200, headers: {"content-type": "text/event-stream", ...(session ? {"mcp-session-id": session} : {})}});
+}
+function exaStub(handler) {
+  return async (url, options) => {
+    if (!String(url).includes("mcp.exa.ai")) throw new Error("unexpected host " + url);
+    const body = JSON.parse(options.body);
+    return handler(body, options);
+  };
+}
+const exaSearchText = "Title: Async Rust\nURL: https://a.example/async\nPublished: N/A\nAuthor: N/A\nHighlights:\nasync runtimes explained";
+
+test("exa_public searches and reads through the keyless MCP endpoint", async () => {
+  const seen = [];
+  global.fetch = exaStub((body, options) => {
+    seen.push({method: body.method, session: options.headers["mcp-session-id"]});
+    if (body.method === "initialize") return sse({jsonrpc: "2.0", id: body.id, result: {protocolVersion: "2024-11-05"}}, "sess-1");
+    if (body.params.name === "web_search_exa") {
+      return sse({jsonrpc: "2.0", id: body.id, result: {content: [{type: "text", text: exaSearchText}]}});
+    }
+    return sse({jsonrpc: "2.0", id: body.id, result: {content: [{type: "text", text: "# Page\nURL: https://a.example/page\n\nBody text from Exa."}]}});
+  });
+  const found = JSON.parse(await search("rust async", {provider: "exa_public"}, 3));
+  assert.equal(found.results[0].title, "Async Rust");
+  assert.equal(found.results[0].url, "https://a.example/async");
+  assert.match(found.results[0].snippet, /async runtimes/);
+
+  const page = JSON.parse(await fetchPage("https://a.example/page", {}, 400));
+  assert.equal(page.provider, "exa_public");
+  assert.equal(page.title, "Page");
+  assert.match(page.text, /Body text from Exa/);
+  assert.deepEqual(seen.map(item => item.method), ["initialize", "tools/call", "tools/call"], "the session is reused");
+  assert.equal(seen[2].session, "sess-1");
+});
+
+test("an expired Exa session is renewed once", async () => {
+  let calls = 0;
+  global.fetch = exaStub(body => {
+    calls++;
+    if (body.method === "initialize") return sse({jsonrpc: "2.0", id: body.id, result: {}}, "sess-" + calls);
+    if (calls === 2) return new Response("expired", {status: 400});
+    return sse({jsonrpc: "2.0", id: body.id, result: {content: [{type: "text", text: exaSearchText}]}});
+  });
+  const found = JSON.parse(await search("rust", {provider: "exa_public"}, 2));
+  assert.equal(found.results[0].url, "https://a.example/async");
+});
+
+test("a long page reports a heading outline with offsets", async () => {
+  const body = "<html><body><main><h1>Alpha</h1><p>" + "text ".repeat(80) + "</p><h2>Beta</h2><p>" + "more ".repeat(80) + "</p></main></body></html>";
+  global.fetch = async () => html(body);
+  const page = JSON.parse(await fetchPage("https://outline.example/doc", {}, 1000));
+  assert.equal(page.headings.length, 2);
+  assert.deepEqual(page.headings.map(item => item.text), ["Alpha", "Beta"]);
+  assert.equal(page.text.slice(page.headings[1].start_char, page.headings[1].start_char + 6), "## Bet");
+});
+
+test("urls are fetched concurrently", async () => {
+  let inFlight = 0, peak = 0;
+  global.fetch = async () => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    inFlight--;
+    return html("<html><body><main><p>" + "word ".repeat(80) + "</p></main></body></html>");
+  };
+  const batch = JSON.parse(await fetchMany(["https://a.example/1", "https://b.example/2", "https://c.example/3", "https://d.example/4"], {}, 500));
+  assert.equal(batch.results.length, 4);
+  assert.ok(peak > 1, "requests overlap instead of queueing");
+});
+
+test("time_range reaches the backends that support it and marks the ones that do not", async () => {
+  const seen = [];
+  global.fetch = async (url, options) => {
+    seen.push({url: String(url), body: options.body ? JSON.parse(options.body) : null, headers: options.headers});
+    if (String(url).includes("brave")) return json({web: {results: [{title: "B", url: "https://example.org/b", description: "s"}]}});
+    if (String(url).includes("serper")) return json({organic: [{title: "S", link: "https://example.org/s", snippet: "s"}]});
+    if (String(url).includes("bocha")) return json({data: {webPages: {value: [{name: "C", url: "https://example.org/c", snippet: "s"}]}}});
+    if (String(url).includes("exa.ai")) return json({results: [{title: "E", url: "https://example.org/e", highlights: ["h"]}]});
+    if (String(url).includes("searx")) return json({results: [{title: "X", url: "https://example.org/x", content: "s"}]});
+    if (String(url).includes("kagi")) return json({data: {search: [{title: "K", url: "https://example.org/k", snippet: "s"}]}});
+    throw new Error("unexpected " + url);
+  };
+  const week = JSON.parse(await search("q", {provider: "brave", brave_api_key: "k"}, 2, "week"));
+  assert.equal(week.time_range, "week");
+  assert.equal(new URL(seen[0].url).searchParams.get("freshness"), "pw");
+
+  const day = JSON.parse(await search("q", {provider: "serper", serper_api_key: "k"}, 2, "day"));
+  assert.equal(day.time_range, "day");
+  assert.equal(seen[1].body.tbs, "qdr:d");
+
+  const year = JSON.parse(await search("q", {provider: "bocha", bocha_api_key: "k"}, 2, "year"));
+  assert.equal(seen[2].body.freshness, "oneYear");
+  assert.equal(year.time_range, "year");
+
+  await search("q", {provider: "exa", exa_api_key: "k"}, 2, "year");
+  assert.match(seen[3].body.startPublishedDate, /^\d{4}-\d{2}-\d{2}$/);
+
+  await search("q", {provider: "searxng", searxng_url: "https://searx.example.org"}, 2, "day");
+  assert.equal(new URL(seen[4].url).searchParams.get("time_range"), "day");
+
+  const ignored = JSON.parse(await search("q", {provider: "kagi", kagi_api_key: "k"}, 2, "day"));
+  assert.equal(ignored.time_range_ignored, true);
+  await assert.rejects(search("q", {provider: "brave", brave_api_key: "k"}, 2, "hour"), {code: "INVALID_ARGUMENT"});
+});
+
+test("an identical search is answered from the short cache", async () => {
   let calls = 0;
   global.fetch = async () => {
     calls++;
-    return mock(JSON.stringify({success: true, data: {markdown: "Private page", metadata: {statusCode: 200}}}), "application/json");
+    return json({results: [{title: "Cache", url: "https://example.org/c", content: "s"}]});
   };
-  const config = {fetch_provider: "firecrawl", firecrawl_api_key: "fake-key"};
-  try {
-    await assert.rejects(fetchPage("http://169.254.169.254/latest/meta-data/", config), {code: "BLOCKED_ADDRESS"});
-    assert.equal(calls, 0, "a blocked target must not be sent to the extraction API");
-    process.env.KROMA_WEB_ALLOW_PRIVATE = "1";
-    assert.equal(JSON.parse(await fetchPage("http://169.254.169.254/latest/meta-data/", config)).text, "Private page");
-    assert.equal(calls, 1);
-  } finally {
-    if (allow === undefined) delete process.env.KROMA_WEB_ALLOW_PRIVATE;
-    else process.env.KROMA_WEB_ALLOW_PRIVATE = allow;
-  }
-});
-
-// Legacy custom priority is still valid; production default is Fast/Brave/Exa.
-const priorityKeys = {parallel_api_key: "fake-p", you_api_key: "fake-y", exa_api_key: "fake-e", tavily_api_key: "fake-t", paid_fallback: true,
-  search_priority:["parallel","you","exa","tavily"]};
-const found = {title: "Docs", url: "https://nodejs.org/api/globals.html", snippets: ["Source"], highlights: ["Source"], content: "Source", excerpts: ["Source"]};
-function priorityResponse(host) {
-  return mock(JSON.stringify(host === "ydc-index.io" ? {results: {web: [found]}} : {results: [found]}), "application/json");
-}
-
-test("auto follows Pi priority, stops at first success and reports only actual failed attempts", async () => {
-  const calls = [];
-  global.fetch = async url => {
-    const host = new URL(url).hostname;
-    calls.push(host);
-    if (host === "api.parallel.ai") return new Response("not logged", {status: 503});
-    return priorityResponse(host);
-  };
-  const result = JSON.parse(await search("timeout site:nodejs.org", priorityKeys));
-  assert.deepEqual(calls, ["api.parallel.ai", "ydc-index.io"]);
-  assert.equal(result.provider, "you");
-  assert.equal(result.attempts.length, 1);
-  assert.equal(result.attempts[0].provider, "parallel");
-  assert.equal(result.attempts[0].code, "HTTP_ERROR");
-  assert.equal(result.attempts[0].status, 503);
-  assert.doesNotMatch(JSON.stringify(result), /fake-|not logged/);
-  calls.length = 0;
-  global.fetch = async url => { calls.push(new URL(url).hostname); return priorityResponse(calls[0]); };
-  const first = JSON.parse(await search("timeout", priorityKeys));
-  assert.equal(first.provider, "parallel");
-  assert.deepEqual(first.attempts, []);
-  assert.deepEqual(calls, ["api.parallel.ai"]);
-});
-
-test("auto skips missing keys, respects custom array/comma priority and never adds unlisted paid providers", async () => {
-  const calls = [];
-  global.fetch = async url => { const host = new URL(url).hostname; calls.push(host); return priorityResponse(host); };
-  for (const search_priority of [["tavily", "exa", "you"], "tavily, exa, you"]) {
-    const result = JSON.parse(await search("timeout", {...priorityKeys, search_priority}));
-    assert.equal(result.provider, "tavily");
-  }
-  const result = JSON.parse(await search("timeout", {exa_api_key: "key", firecrawl_api_key: "unlisted-key"}));
-  assert.equal(result.provider, "exa");
-  assert.deepEqual(calls, ["api.tavily.com", "api.tavily.com", "api.exa.ai"]);
-});
-
-test("auto switches on network errors and 429/5xx only, retaining the full ordered failure chain", async () => {
-  const calls = [];
-  global.fetch = async url => {
-    const host = new URL(url).hostname;
-    calls.push(host);
-    if (host === "api.parallel.ai") throw Error("fake-secret");
-    if (host === "ydc-index.io") return new Response("fake-secret", {status: 429});
-    if (host === "api.exa.ai") return new Response("fake-secret", {status: 500});
-    return priorityResponse(host);
-  };
-  const result = JSON.parse(await search("timeout", priorityKeys));
-  assert.equal(result.provider, "tavily");
-  assert.deepEqual(result.attempts.map(x => x.code), ["NETWORK_ERROR", "HTTP_ERROR", "HTTP_ERROR"]);
-  assert.deepEqual(calls, ["api.parallel.ai", "ydc-index.io", "api.exa.ai", "api.tavily.com"]);
-  assert.doesNotMatch(JSON.stringify(result), /fake-secret/);
-});
-
-test("auto stops on auth, query/config errors, no results, invalid data and redirects", async () => {
-  for (const status of [400, 401, 402, 403, 404, 408, 422]) {
-    let calls = 0;
-    global.fetch = async () => { calls++; return new Response("fake-secret", {status}); };
-    await assert.rejects(search("timeout", priorityKeys), error => {
-      assert.equal(error.code, "HTTP_ERROR");
-      assert.equal(error.attempts.length, 1);
-      assert.equal(error.attempts[0].status, status);
-      return true;
-    });
-    assert.equal(calls, 1);
-  }
-  for (const [response, code] of [
-    [() => mock('{"results":[]}', "application/json"), "NO_RESULTS"],
-    [() => mock('{"results":[{"url":"https://wrong.org"}]}', "application/json"), "NO_RESULTS"],
-    [() => mock("not JSON", "application/json"), "INVALID_RESPONSE"],
-    [() => new Response(null, {status: 307, headers: {location: "https://other.org"}}), "REDIRECT_ERROR"]
-  ]) {
-    let calls = 0;
-    global.fetch = async () => { calls++; return response(); };
-    await assert.rejects(search("timeout site:nodejs.org", priorityKeys), {code});
-    assert.equal(calls, 1);
-  }
-  let calls = 0;
-  global.fetch = async () => { calls++; throw Error(); };
-  await assert.rejects(search("timeout site:!@#$", priorityKeys), {code: "INVALID_QUERY"});
-  assert.equal(calls, 0);
-  await assert.rejects(search("timeout", {...priorityKeys, parallel_api_key: 123}), {code: "CONFIG_ERROR"});
-  assert.equal(calls, 0);
-});
-
-test("paid provider selection is configured, never selected by the model", async () => {
-  const calls = [];
-  global.fetch = async url => { calls.push(new URL(url).hostname); return new Response(null, {status: 503}); };
-  await assert.rejects(dispatch({type: "tool", name: "web_search", config: priorityKeys,
-    arguments: {query: "timeout", provider: "exa"}}), error => {
-    assert.equal(error.code, "INVALID_ARGUMENT");
-    assert.equal(error.attempts, undefined);
-    return true;
-  });
-  await assert.rejects(search("timeout", {provider:"exa", exa_api_key:"test", ...priorityKeys}), {code:"HTTP_ERROR"});
-  assert.deepEqual(calls, ["api.exa.ai"]);
-});
-
-test("auto pays at most one configured backend by default, failover requires user opt-in", async () => {
-  const calls = [];
-  global.fetch = async url => { calls.push(new URL(url).hostname); return new Response(null, {status: 503}); };
-  await assert.rejects(search("rust docs", {...priorityKeys, paid_fallback: false}), {code: "HTTP_ERROR"});
-  assert.deepEqual(calls, ["api.parallel.ai"]);
-  await assert.rejects(search("rust docs", {...priorityKeys, paid_fallback: true}), {code: "HTTP_ERROR"});
-  assert.deepEqual(calls, ["api.parallel.ai", "api.parallel.ai", "ydc-index.io", "api.exa.ai", "api.tavily.com"]);
-  await assert.rejects(dispatch({type:"tool", name:"web_fetch", config:{fetch_provider:"http"},
-    arguments:{url:"https://example.com", provider:"firecrawl"}}), {code:"INVALID_ARGUMENT"});
-});
-
-test("auto timeout advances to next backend without starting requests concurrently", async () => {
-  let calls = 0, aborted = false;
-  const keepAlive = setTimeout(() => {}, 3000);
-  try {
-    global.fetch = async (url, {signal}) => {
-      calls++;
-      if (new URL(url).hostname === "api.parallel.ai") {
-        return new Promise((_resolve, reject) => signal.addEventListener("abort", () => {
-          aborted = true; reject(signal.reason);
-        }, {once: true}));
-      }
-      assert.equal(aborted, true);
-      return priorityResponse(new URL(url).hostname);
-    };
-    const result = JSON.parse(await search("timeout", {...priorityKeys, search_attempt_timeout_ms: 500, timeout_ms: 2000}));
-    assert.equal(result.provider, "you");
-    assert.equal(result.attempts[0].code, "TIMEOUT");
-    assert.equal(calls, 2);
-  } finally { clearTimeout(keepAlive); }
-});
-
-test("auto shares one total deadline and does not call providers after budget exhaustion", async () => {
-  const now = Date.now;
-  let clock = now(), calls = 0;
-  Date.now = () => clock;
-  try {
-    global.fetch = async () => { calls++; clock += 2000; throw Error("unreachable"); };
-    await assert.rejects(search("timeout", {...priorityKeys, timeout_ms: 2000}), error => {
-      assert.equal(error.code, "TIMEOUT");
-      assert.deepEqual(error.attempts.map(x => x.provider), ["parallel"]);
-      return true;
-    });
-    assert.equal(calls, 1);
-  } finally { Date.now = now; }
-});
-
-test("auto retains all diagnostics when every configured provider fails", async () => {
-  let calls = 0;
-  global.fetch = async () => { calls++; return new Response(null, {status: 503}); };
-  await assert.rejects(search("timeout", priorityKeys), error => {
-    assert.equal(error.code, "HTTP_ERROR");
-    assert.deepEqual(error.attempts.map(x => x.provider), ["parallel", "you", "exa", "tavily"]);
-    return true;
-  });
-  assert.equal(calls, 4);
-});
-
-test("default auto attempt cap is eight seconds and the next request receives only remaining total budget", async () => {
-  const now = Date.now, timeout = AbortSignal.timeout;
-  let clock = now(), calls = 0;
-  const budgets = [];
-  Date.now = () => clock;
-  AbortSignal.timeout = ms => { budgets.push(ms); return timeout(ms); };
-  try {
-    global.fetch = async url => {
-      calls++;
-      if (calls === 1) { clock += 8000; throw Error("unreachable"); }
-      return priorityResponse(new URL(url).hostname);
-    };
-    const result = JSON.parse(await search("timeout", priorityKeys));
-    assert.equal(result.provider, "you");
-    assert.deepEqual(budgets, [8000, 7000]);
-    assert.equal(calls, 2);
-  } finally { Date.now = now; AbortSignal.timeout = timeout; }
-});
-
-const freeHtml = '<a class="result__a" href="https://nodejs.org/api/globals.html?utm_source=ddg">Node globals</a><a class="result__snippet">AbortSignal <b>timeout</b> source</a>';
-const freeLite = '<tr><td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fnodejs.org%2Fapi%2Fglobals.html" class="result-link">Node &amp; globals</a></td></tr><tr><td class="result-snippet">Original <b>timeout</b> text.</td></tr>';
-const freeRss = '<rss><channel><item><title>Node globals</title><link>https://nodejs.org/api/globals.html</link><description>AbortSignal timeout source</description></item></channel></rss>';
-const freeMwmbl = JSON.stringify([{url: "https://nodejs.org/api/globals.html",
-  title: [{value: "Node ", is_bold: false}, {value: "globals", is_bold: true}],
-  extract: [{value: "AbortSignal ", is_bold: false}, {value: "timeout", is_bold: true}, {value: " source", is_bold: false}]}]);
-const emptyMwmbl = JSON.stringify([]);
-
-test("Mwmbl joins split title/extract spans and rejects a non-array document", async () => {
-  global.fetch = async url => {
-    const target = new URL(url);
-    assert.equal(target.hostname, "api.mwmbl.org");
-    assert.equal(target.searchParams.get("s"), "timeout");
-    return mock(freeMwmbl, "application/json");
-  };
-  const ok = JSON.parse(await search("timeout", {provider: "mwmbl"}));
-  assert.deepEqual(ok.results, [{title: "Node globals", url: "https://nodejs.org/api/globals.html", snippet: "AbortSignal timeout source"}]);
-  global.fetch = async () => mock('{"results":[]}', "application/json");
-  await assert.rejects(search("timeout", {provider: "mwmbl"}), {code: "INVALID_RESPONSE"});
-});
-
-test("no-key auto prefers the real free API and warns about its limited corpus", async () => {
-  process.env.EXA_API_KEY = "";
-  const calls = [];
-  global.fetch = async url => {
-    calls.push(new URL(url).hostname);
-    assert.doesNotMatch(JSON.stringify(url), /api.key|authorization|subscription.token/i);
-    return mock(freeMwmbl, "application/json");
-  };
-  const result = JSON.parse(await search("Node globals", {provider: "auto"}));
-  assert.deepEqual(calls, ["api.mwmbl.org"]);
-  assert.equal(result.mode, "free");
-  assert.equal(result.provider, "mwmbl");
-  assert.match(result.warning, /small community corpus/);
-  assert.deepEqual(result.attempts, []);
-});
-
-test("free ignores configured and environment API keys and never calls paid hosts", async () => {
-  process.env.EXA_API_KEY = "fake-env-paid-key";
-  const calls = [];
-  global.fetch = async (url, options) => {
-    calls.push(new URL(url).hostname);
-    assert.doesNotMatch(JSON.stringify(options), /fake-env-paid-key|fake-[pyet]/);
-    const first = calls.length === 1;
-    return first ? mock(emptyMwmbl, "application/json") : mock(freeHtml);
-  };
-  try {
-    const result = JSON.parse(await dispatch({type: "tool", name: "web_search",
-      config: {...priorityKeys, provider: "free"}, arguments: {query: "test"}}));
-    assert.equal(result.provider, "duckduckgo");
-    assert.equal(result.mode, "free");
-    assert.deepEqual(calls, ["api.mwmbl.org", "html.duckduckgo.com"]);
-  } finally { process.env.EXA_API_KEY = ""; }
-});
-
-test("DDG Lite parser preserves source snippets, entities and redirects, and cannot take the next snippet", () => {
-  const results = parseDDG(freeLite + '<a class="result-link" href="https://example.org/second">Second</a>', 10, true);
-  assert.deepEqual(results, [
-    {title: "Node & globals", url: "https://nodejs.org/api/globals.html", snippet: "Original timeout text."},
-    {title: "Second", url: "https://example.org/second", snippet: ""}
-  ]);
-});
-
-test("free walks Mwmbl -> DuckDuckGo -> Lite -> Bing on empty/network/markup failures", async () => {
-  const calls = [];
-  global.fetch = async url => {
-    const host = new URL(url).hostname; calls.push(host);
-    if (host === "api.mwmbl.org") return mock(emptyMwmbl, "application/json");
-    if (host === "html.duckduckgo.com") throw Error("offline");
-    if (host === "lite.duckduckgo.com") return mock('<p class="no-results">No results found</p>');
-    return mock(freeRss, "application/rss+xml");
-  };
-  const result = JSON.parse(await search("timeout site:nodejs.org", {provider: "free"}));
-  assert.equal(result.provider, "bing");
-  assert.match(result.warning, /generic popular pages/);
-  // An unreachable DDG edge skips the sibling Lite host to protect the budget.
-  assert.deepEqual(calls, ["api.mwmbl.org", "html.duckduckgo.com", "www.bing.com"]);
-  assert.deepEqual(result.attempts.map(x => x.code), ["NO_RESULTS", "NETWORK_ERROR"]);
-  calls.length = 0;
-  global.fetch = async url => {
-    const host = new URL(url).hostname; calls.push(host);
-    if (host === "api.mwmbl.org") return mock(emptyMwmbl, "application/json");
-    if (host === "html.duckduckgo.com") return new Response(null, {status: 500});
-    return host === "lite.duckduckgo.com" ? mock(freeLite) : mock(freeRss, "application/rss+xml");
-  };
-  const viaLite = JSON.parse(await search("timeout", {provider: "free"}));
-  // A redesign or server error can still be worked around by the sibling host.
-  assert.equal(viaLite.provider, "duckduckgo_lite");
-  assert.deepEqual(calls, ["api.mwmbl.org", "html.duckduckgo.com", "lite.duckduckgo.com"]);
-  global.fetch = async url => {
-    const host = new URL(url).hostname, mwmbl = host === "api.mwmbl.org";
-    return mock(mwmbl ? "changed markup" : freeLite, mwmbl ? "application/json" : "text/html");
-  };
-  const lite = JSON.parse(await search("timeout", {provider: "free"}));
-  assert.equal(lite.provider, "duckduckgo_lite");
-  assert.equal(lite.attempts[0].code, "INVALID_RESPONSE");
-  assert.equal(lite.results[0].snippet, "Original timeout text.");
-});
-
-test("CAPTCHA/403/429 or an unreachable DDG edge skips the same-vendor Lite host", async () => {
-  const blocked = [() => mock('<form id="challenge-form" action="/anomaly.js"><a class="result__a" href="https://evil.test">Not evidence</a></form>'),
-    () => new Response(null, {status: 403}), () => new Response(null, {status: 429}), () => { throw Error("offline"); }];
-  for (const fail of blocked) {
-    const calls = [];
-    global.fetch = async url => {
-      const host = new URL(url).hostname; calls.push(host);
-      if (host === "api.mwmbl.org") return mock(emptyMwmbl, "application/json");
-      return host === "html.duckduckgo.com" ? fail() : mock(freeRss, "application/rss+xml");
-    };
-    const result = JSON.parse(await search("timeout", {provider: "free"}));
-    assert.equal(result.provider, "bing");
-    assert.deepEqual(calls, ["api.mwmbl.org", "html.duckduckgo.com", "www.bing.com"]);
-    assert.equal(result.attempts.length, 2);
-  }
-});
-
-test("free prefers a configured SearXNG and degrades to Mwmbl, never to an unconfigured public instance", async () => {
-  const calls = [];
-  global.fetch = async url => {
-    const host = new URL(url).hostname; calls.push(host);
-    return host === "search.example.org" ? mock('{"results":[]}', "application/json") : mock(freeMwmbl, "application/json");
-  };
-  const result = JSON.parse(await search("timeout", {provider: "free", searxng_url: "https://search.example.org", ...priorityKeys}));
-  assert.equal(result.provider, "mwmbl");
-  assert.deepEqual(calls, ["search.example.org", "api.mwmbl.org"]);
-  assert.equal(result.attempts[0].provider, "searxng");
-});
-
-test("free enforces hard domain filters on every fallback and reports exhaustion without inventing results", async () => {
-  let calls = 0;
-  global.fetch = async url => {
-    calls++;
-    const host = new URL(url).hostname;
-    if (host === "api.mwmbl.org") return mock(freeMwmbl, "application/json");
-    if (host === "html.duckduckgo.com") return mock(freeHtml);
-    if (host === "lite.duckduckgo.com") return mock(freeLite);
-    return mock(freeRss, "application/rss+xml");
-  };
-  await assert.rejects(search("timeout -site:nodejs.org", {provider: "free", ...priorityKeys}), error => {
-    assert.equal(error.code, "NO_RESULTS");
-    assert.deepEqual(error.attempts.map(x => x.provider), ["mwmbl", "duckduckgo", "duckduckgo_lite", "bing"]);
-    return true;
-  });
-  assert.equal(calls, 4);
-});
-
-test("free obeys the total deadline and explicit engines never gain automatic failover", async () => {
-  const now = Date.now;
-  let clock = now(), calls = 0;
-  Date.now = () => clock;
-  try {
-    global.fetch = async () => { calls++; clock += 2000; throw Error("offline"); };
-    await assert.rejects(search("timeout", {provider: "free", timeout_ms: 2000}), error => {
-      assert.equal(error.code, "TIMEOUT");
-      assert.equal(error.attempts.length, 1);
-      return true;
-    });
-    assert.equal(calls, 1);
-  } finally { Date.now = now; }
-  calls = 0;
-  global.fetch = async () => { calls++; return mock(emptyMwmbl, "application/json"); };
-  await assert.rejects(search("test", {provider: "mwmbl"}), error => {
-    assert.equal(error.code, "NO_RESULTS");
-    assert.equal(error.attempts, undefined);
-    return true;
-  });
+  const first = JSON.parse(await search("same question", {provider: "searxng", searxng_url: "https://searx.example.org"}, 2));
+  const second = JSON.parse(await search("same question", {provider: "searxng", searxng_url: "https://searx.example.org"}, 2));
+  assert.equal(first.cached, undefined);
+  assert.equal(second.cached, true);
   assert.equal(calls, 1);
+  await search("same question", {provider: "searxng", searxng_url: "https://searx.example.org"}, 3);
+  assert.equal(calls, 2, "a different result count is a different question");
 });
 
-test("paid auto retains its priority order and does not silently spill into keyless search", async () => {
+test("section returns only the requested chapter", async () => {
+  const body = "<html><body><main><h1>Docs</h1><p>" + "intro ".repeat(200) + "</p><h2>Install</h2><p>" +
+    "install ".repeat(300) + "</p><h2>Usage</h2><p>" + "usage ".repeat(300) + "</p></main></body></html>";
+  global.fetch = async () => html(body);
+  const page = JSON.parse(await fetchPage("https://sections.example/doc", {}, 500, 0, null, "install"));
+  assert.equal(page.section, "Install", "the heading name is echoed in its original casing");
+  assert.match(page.text, /^## Install/);
+  assert.ok(!page.text.includes("usage"), "the next chapter stays out");
+  assert.equal(page.truncated, true);
+  const rest = JSON.parse(await fetchPage("https://sections.example/doc", {}, 900, page.next_start));
+  assert.ok(!rest.text.includes("Usage"), "continuation stops at the section end");
+  await assert.rejects(fetchPage("https://sections.example/doc", {}, 500, 0, null, "Nope"),
+    error => error.code === "SECTION_NOT_FOUND" && error.message.includes("Install"));
+});
+
+test("search results keep the publication date when a backend reports one", async () => {
+  global.fetch = async url => {
+    if (String(url).includes("searx")) {
+      return json({results: [{title: "A", url: "https://example.org/a", content: "s", publishedDate: "2025-03-04T00:00:00"}]});
+    }
+    if (String(url).includes("serper")) {
+      return json({organic: [{title: "B", link: "https://example.org/b", snippet: "s", date: "Mar 4, 2025"}]});
+    }
+    if (String(url).includes("mwmbl")) {
+      return json([{url: "https://example.org/c", title: [{value: "C"}], extract: [{value: "s"}]}]);
+    }
+    throw new Error("unexpected " + url);
+  };
+  const searx = JSON.parse(await search("date q", {provider: "searxng", searxng_url: "https://searx.example.org"}, 2));
+  assert.equal(searx.results[0].published, "2025-03-04T00:00:00");
+  const serper = JSON.parse(await search("date q2", {provider: "serper", serper_api_key: "k"}, 2));
+  assert.equal(serper.results[0].published, "Mar 4, 2025");
+  const mwmbl = JSON.parse(await search("date q3", {provider: "mwmbl"}, 2));
+  assert.equal(mwmbl.results[0].published, undefined, "no invented date");
+});
+
+test("the keyless Exa search keeps its published line and drops placeholders", async () => {
+  global.fetch = exaStub(body => {
+    if (body.method === "initialize") return sse({jsonrpc: "2.0", id: body.id, result: {}}, "s1");
+    const text = ["Title: Fresh", "URL: https://a.example/fresh", "Published: 2025-02-01T00:00:00.000Z", "Highlights:", "h"].join(String.fromCharCode(10));
+    return sse({jsonrpc: "2.0", id: body.id, result: {content: [{type: "text", text}]}});
+  });
+  const dated = JSON.parse(await search("fresh q", {provider: "exa_public"}, 2));
+  assert.equal(dated.results[0].published, "2025-02-01T00:00:00.000Z");
+  global.fetch = exaStub(body => body.method === "initialize" ? sse({jsonrpc: "2.0", id: body.id, result: {}}, "s2")
+    : sse({jsonrpc: "2.0", id: body.id, result: {content: [{type: "text", text: exaSearchText}]}}));
+  const plain = JSON.parse(await search("plain q", {provider: "exa_public"}, 2));
+  assert.equal(plain.results[0].published, undefined, "\"Published: N/A\" is not a date");
+});
+
+test("find and section cannot be combined", async () => {
+  global.fetch = async () => html("<html><body><main><h2>A</h2><p>" + "x ".repeat(60) + "</p></main></body></html>");
+  await assert.rejects(fetchPage("https://both.example/a", {}, 500, 0, "x", "A"), {code: "INVALID_ARGUMENT"});
+});
+
+test("Search1API week is reported as ignored, day is applied", async () => {
+  global.fetch = async () => json({results: [{title: "S", link: "https://example.org/s", snippet: "s"}]});
+  const week = JSON.parse(await search("q1", {provider: "search1api", search1api_api_key: "k"}, 2, "week"));
+  assert.equal(week.time_range, undefined);
+  assert.equal(week.time_range_ignored, true);
+  const day = JSON.parse(await search("q2", {provider: "search1api", search1api_api_key: "k"}, 2, "day"));
+  assert.equal(day.time_range, "day");
+});
+
+test("a page with more than forty headings says so", async () => {
+  let body = "<html><body><main>";
+  for (let i = 0; i < 45; i++) body += "<h2>Part " + i + "</h2><p>" + "text ".repeat(30) + "</p>";
+  global.fetch = async () => html(body + "</main></body></html>");
+  const page = JSON.parse(await fetchPage("https://many.example/doc", {}, 800));
+  assert.equal(page.headings.length, 40);
+  assert.equal(page.headings_truncated, true, "the cap is disclosed");
+});
+
+test("a full batch of ten pages stays readable afterwards", async () => {
+  const urls = Array.from({length: 10}, (_, i) => "https://batch.example/" + i);
+  global.fetch = async () => html("<html><body><main><p>" + "word ".repeat(400) + "</p></main></body></html>");
+  const batch = JSON.parse(await fetchMany(urls, {}, 200));
+  assert.equal(batch.results.filter(item => item.code).length, 0);
+  const more = JSON.parse(await fetchPage(urls[0], {}, 200, 200));
+  assert.equal(more.start_char, 200, "the first page was not evicted by the other nine");
+});
+
+test("a free search with a date filter starts at the backend that supports it", async () => {
   const calls = [];
-  global.fetch = async url => { calls.push(new URL(url).hostname); return new Response(null, {status: 503}); };
-  await assert.rejects(search("timeout", priorityKeys), {code: "HTTP_ERROR"});
-  assert.deepEqual(calls, ["api.parallel.ai", "ydc-index.io", "api.exa.ai", "api.tavily.com"]);
+  global.fetch = async url => {
+    calls.push(String(url));
+    return json({results: [{title: "X", url: "https://example.org/x", content: "s"}]});
+  };
+  const result = JSON.parse(await search("dated free", {provider: "free", searxng_url: "https://searx.example.org"}, 2, "day"));
+  assert.match(calls[0], /searx\.example\.org/, "SearXNG ranks before the date-blind keyless Exa");
+  assert.equal(result.provider, "searxng");
+  assert.equal(result.time_range, "day");
 });

@@ -1,5 +1,16 @@
 # Kroma TRC/APEC four-way experiment — delegated task
 
+> **历史存档 — 不得作为任务指令执行。** 本文是一份针对某个已结束的代理运行的祈使句任务书，
+> 不是给当前读者的指令，也不代表现行架构策略。文中引用的文件已移除或改变：
+> `src/compression.rs` 不存在，`KROMA_FUSION_EXPERIMENT` 已废弃（旧脚本仍设置它，不会生效），
+> 文中出现的私有网关域名也不属于本项目。现行基准见
+> [基准档案索引](README.md) 与[性能测量指南](../docs/performance.md)。
+>
+> **Archived brief — do not execute.** This imperative task text belonged to a finished agent
+> run. The files it names were removed (`src/compression.rs` no longer exists) and the retired
+> `KROMA_FUSION_EXPERIMENT` switch does nothing; the private gateway host it mentions is not part
+> of this project.
+
 You are Pi Coding Agent running on the Kroma server, model **cobblemon/gpt-6.1-sol**, thinking **high**. Execute this task to completion in the current invocation. Do not merely write a plan.
 
 ## Goal

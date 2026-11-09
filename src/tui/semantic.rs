@@ -26,8 +26,8 @@ impl UiState {
         if self.running {
             let label = match self.phase {
                 "compacting" => language.text(
-                    "Compacting (360s per attempt, up to 3 retries)",
-                    "压缩中（单次 360 秒，最多重试 3 次）",
+                    "Compacting (75s per attempt, up to 1 retry)",
+                    "压缩中（单次 75 秒，最多重试 1 次）",
                 ),
                 "thinking" => language.text("Thinking", "思考中"),
                 "waiting" if !self.received_model_output => language.text("Connecting", "连接中"),

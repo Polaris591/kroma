@@ -26,11 +26,12 @@ ASSETS = ROOT / 'benchmarks/prompt_philosophy'
 ARMS = ('A', 'B', 'C')
 TASKS = ('fix_arithmetic', 'implement_records', 'cross_file_fix',
          'diagnose_large_log', 'python_complex')
+EXTRA_TASKS = ('reuse_existing', 'complete_change')
 SEED = 20261106
 MODEL = 'deepseek-v4.1-flash'
 GUARD = ('\nWork only in this isolated project. Do not access credentials, change '
          'model configuration, use network operations, or make commits. Do not '
-         'delete or weaken supplied tests. Use python for Python commands; '
+         'edit supplied test files; put additional tests in new files. Use python for Python commands; '
          'it is configured on PATH. Finish with what changed and what you verified.')
 DEFAULT_ADDITIONS = 'additions: vec![EXECUTION_GUIDANCE.to_owned(), V7_GUIDANCE.to_owned()],'
 EXPERIMENT_ADDITIONS = '''additions: match std::env::var("KROMA_ABLATION_GUIDANCE_FILE") {
@@ -79,6 +80,24 @@ def extract_baseline(text):
     return json.loads(execution[1]) + ''.join(json.loads(x) for x in re.findall(literal, v7[1]))
 
 
+def quality_variants(baseline, directory, arms):
+    paragraphs = [line for line in baseline.splitlines()
+                  if line.startswith('Prefer the simplest correct implementation')]
+    if len(paragraphs) != 1:
+        raise RuntimeError('expected exactly one production quality paragraph')
+    quality = paragraphs[0]
+    variants = {}
+    for arm in arms:
+        replacement = (directory / f'{arm}.txt').read_text(encoding='utf-8').strip()
+        if not replacement or any(char in replacement for char in (chr(10), chr(13))):
+            raise RuntimeError('quality variants must be nonempty single paragraphs')
+        variants[arm] = baseline.replace(quality, replacement, 1)
+    native = [arm for arm, guidance in variants.items() if guidance == baseline]
+    if len(native) != 1:
+        raise RuntimeError('exactly one quality variant must equal production guidance')
+    return variants, native[0]
+
+
 def make_plan(tasks, repeats, seed=SEED, arms=ARMS):
     rng = random.Random(seed)
     rotations = {}
@@ -98,13 +117,11 @@ def inspect_profile(config_path, name):
         raise RuntimeError(f'profile model is not the requested {MODEL}')
     if profile.get('api_protocol', 'chat') != 'chat':
         raise RuntimeError('this experiment expects the configured chat protocol')
-    if profile.get('reasoning_effort') != 'high' or profile.get('deepseek_thinking') != 'high':
-        raise RuntimeError('freeze both configured thinking settings at high before setup')
     if not profile.get('api_key') and not os.environ.get(profile.get('api_key_env', '')):
         raise RuntimeError('provider credential is not configured')
     # Never return credentials or persist the full provider profile.
     keys = ('model', 'api_protocol', 'reasoning_effort', 'deepseek_thinking',
-            'context_window', 'max_output_tokens', 'catalog_model')
+            'context_window', 'max_output_tokens', 'catalog_model', 'api_key_env')
     from urllib.parse import urlsplit
     return {**{key: profile.get(key) for key in keys},
             'endpoint_host': urlsplit(profile['base_url']).netloc,
@@ -122,7 +139,13 @@ def setup(args):
     arms = tuple(arms.split(',')) if isinstance(arms, str) else tuple(arms)
     if arms not in (('A', 'B'), ARMS):
         raise RuntimeError('supported arms are A,B or A,B,C')
+    tasks = tuple(getattr(args, 'tasks', None) or TASKS)
+    if len(tasks) != len(set(tasks)) or not set(tasks) <= set(TASKS + EXTRA_TASKS):
+        raise RuntimeError('tasks must be distinct supported task IDs')
+    quality_dir = getattr(args, 'quality_variants', None)
     append_path = getattr(args, 'append_guidance', None)
+    if quality_dir is not None and append_path is not None:
+        raise RuntimeError('quality-variants and append-guidance are mutually exclusive')
     if append_path is not None and arms != ('A', 'B'):
         raise RuntimeError('append-guidance requires exactly A,B')
     append_text = append_path.read_text(encoding='utf-8').strip() if append_path else None
@@ -134,7 +157,7 @@ def setup(args):
     runtime = lab / 'runtime'
     runtime.mkdir()
     commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
-    tracked = subprocess.check_output(['git', 'ls-files', '-z', 'src', 'Cargo.toml',
+    tracked = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard', 'src', 'Cargo.toml',
                                        'Cargo.lock', 'build.rs', 'README.md', '.cargo'], cwd=ROOT).decode().split('\0')
     original_hashes = {}
     for relative in filter(None, tracked):
@@ -146,6 +169,8 @@ def setup(args):
     prompt_path = runtime / 'src/prompt.rs'
     original = prompt_path.read_text(encoding='utf-8')
     baseline = extract_baseline(original)
+    quality_prompts, native_arm = (quality_variants(baseline, quality_dir, arms)
+                                  if quality_dir is not None else ({}, 'A'))
     for anchor in (DEFAULT_ADDITIONS, PROMPT_ANCHOR):
         if original.count(anchor) != 1:
             raise RuntimeError('prompt instrumentation anchor drift')
@@ -158,15 +183,20 @@ def setup(args):
     agent_path.write_text(original_agent.replace(AUDIT_ANCHOR, AUDIT_REPLACEMENT), encoding='utf-8')
     (lab / 'prompts').mkdir()
     (lab / 'prompts/A.txt').write_text(baseline, encoding='utf-8', newline='\n')
-    for arm in arms[1:]:
-        if append_text is not None:
+    for arm in arms if quality_dir is not None else arms[1:]:
+        if quality_dir is not None:
+            guidance = quality_prompts[arm]
+        elif append_text is not None:
             guidance = baseline + '\n' + append_text
         else:
             guidance = '\n' + (ASSETS / f'{arm}.txt').read_text(encoding='utf-8').strip()
         (lab / f'prompts/{arm}.txt').write_text(guidance, encoding='utf-8', newline='\n')
     oracles = lab / 'oracles'
     oracles.mkdir()
-    for name in ('agent_task_suite.py', 'pi_kroma_complexity_matrix.py'):
+    oracle_names = ['agent_task_suite.py', 'pi_kroma_complexity_matrix.py']
+    if set(tasks) & set(EXTRA_TASKS):
+        oracle_names.append('ponytail_tasks.py')
+    for name in oracle_names:
         shutil.copy2(ROOT / 'benchmarks' / name, oracles / name)
     (lab / 'home/.kroma/plugins').mkdir(parents=True)
     (lab / 'home/.kroma/plugins.toml').write_text('enabled = []\n', encoding='utf-8')
@@ -185,9 +215,10 @@ def setup(args):
     metadata = dict(schema=1, created_utc=datetime.now(timezone.utc).isoformat(),
                     source_commit=commit, source_root=str(ROOT), source_file_hashes=original_hashes,
                     profile=profile, config_file=str(config_path), profile_name=args.profile,
-                    seed=SEED, repeats=args.repeats, tasks=list(TASKS), arms=list(arms), prompts=prompts,
+                    seed=SEED, repeats=args.repeats, tasks=list(tasks), arms=list(arms), prompts=prompts,
+                    native_arm=native_arm,
                     plugins='disabled equally; core-prompt experiment, not plugin ablation',
-                    controls='same binary, schemas, endpoint, High settings, fixtures, working paths; sequential',
+                    controls='same binary, schemas, endpoint, frozen profile settings, fixtures, working paths; sequential',
                     timeout_s=args.timeout, task_token_quota=None,
                     pricing=None, cache='observed shared endpoint cache; no cold-cache claim',
                     variants={'A': 'exact production default guidance',
@@ -209,18 +240,27 @@ def setup(args):
             'Shared endpoint cache is observed, not independently cleared.',
             'No plugin or long-context compaction tasks in this round.']
         (lab / 'append-guidance.txt').write_text(append_text, encoding='utf-8')
+    if quality_dir is not None:
+        metadata['variants'] = {arm: f'quality paragraph {arm}' for arm in arms}
+        metadata['quality_variants'] = True
+        metadata['limitations'] = [
+            'Nested quality-paragraph ablation; wording and length change together.',
+            'Synthetic Python/log tasks; no general Rust, UI, plugin or long-context claim.',
+            'Configured proxy model identity is not independently attested.',
+            'Shared endpoint cache is observed, not independently cleared.',
+            'No proxy billing tariff supplied; actual monetary cost unknown.']
     shutil.copy2(Path(__file__), lab / 'runner.py')
     metadata['runner_sha256'] = sha((lab / 'runner.py').read_bytes())
     metadata['oracle_hashes'] = {p.name: sha(p.read_bytes()) for p in oracles.glob('*.py')}
     metadata['instrumented_hashes'] = {name: sha((runtime / name).read_bytes())
                                      for name in ('src/prompt.rs', 'src/agent.rs')}
-    plan = make_plan(TASKS, args.repeats, arms=arms)
+    plan = make_plan(tasks, args.repeats, arms=arms)
     atomic_json(lab / 'plan.json', plan)
     metadata['plan_sha256'] = sha((lab / 'plan.json').read_bytes())
     atomic_json(lab / 'metadata.json', metadata)
 
     atomic_json(lab / 'results.json', {'status': 'prepared', 'calibration': [], 'trials': []})
-    print('SETUP_OK', lab, 'scored_trials', len(TASKS) * args.repeats * len(arms), flush=True)
+    print('SETUP_OK', lab, 'scored_trials', len(tasks) * args.repeats * len(arms), flush=True)
 
 
 def child_env(lab, metadata, arm=None, trial=None):
@@ -231,16 +271,24 @@ def child_env(lab, metadata, arm=None, trial=None):
                PATH=str(lab / 'python-bin') + os.pathsep + os.environ['PATH'],
                KROMA_CONFIG_FILE=metadata['config_file'],
                KROMA_PROVIDER_PROFILE=metadata['profile_name'],
-               KROMA_MODEL=MODEL, KROMA_REASONING_EFFORT='high', KROMA_DEEPSEEK_THINKING='high',
+               KROMA_MODEL=MODEL,
                KROMA_NO_MCP='1', KROMA_PROFILE='1', KROMA_NO_COLOR='1',
                KROMA_PLUGIN_DIR=str(lab / 'home/.kroma/plugins'))
+    for field, variable in (('reasoning_effort', 'KROMA_REASONING_EFFORT'),
+                            ('deepseek_thinking', 'KROMA_DEEPSEEK_THINKING')):
+        value = metadata.get('profile', {}).get(field)
+        if value is not None:
+            env[variable] = str(value)
+    credential_env = metadata.get('profile', {}).get('api_key_env')
+    if credential_env and credential_env in os.environ:
+        env[credential_env] = os.environ[credential_env]
     env.pop('PYTHONHOME', None)
     if arm is not None:
         env.update(KROMA_WORKDIR=str(lab / 'work'),
                    KROMA_SESSION_FILE=str(trial / 'session.json'),
                    KROMA_ABLATION_TOOLS_FILE=str(trial / 'tools.json'),
                    KROMA_ABLATION_SYSTEM_FILE=str(trial / 'system.txt'))
-        if arm != 'A':
+        if arm != metadata.get('native_arm', 'A'):
             env['KROMA_ABLATION_GUIDANCE_FILE'] = str(lab / f'prompts/{arm}.txt')
     return env
 
@@ -275,8 +323,11 @@ def modules(lab):
                 constants[name] = ast.literal_eval(statement.value)
     if len(constants) != 3:
         raise RuntimeError('complex fixture constants changed')
-    return (load_module('philosophy_suite', lab / 'oracles/agent_task_suite.py'),
-            SimpleNamespace(**constants))
+    suite = load_module('philosophy_suite', lab / 'oracles/agent_task_suite.py')
+    ponytail_path = lab / 'oracles/ponytail_tasks.py'
+    if ponytail_path.exists():
+        suite.ponytail_tasks = load_module('ponytail_tasks', ponytail_path)
+    return suite, SimpleNamespace(**constants)
 
 
 def prepare(work, task, suite, complex_tasks):
@@ -284,6 +335,8 @@ def prepare(work, task, suite, complex_tasks):
     if task == 'calibration':
         (work / 'fixture.txt').write_text('MARKER=PHILOSOPHY_CAL_OK\n', encoding='utf-8')
         return 'Use shell to read fixture.txt and report the exact MARKER value. Do not edit files.' + GUARD
+    if task in EXTRA_TASKS:
+        return suite.ponytail_tasks.create_fixture(work, task) + GUARD
     if task == 'python_complex':
         for relative, text in complex_tasks.FILES.items():
             path = work / relative
@@ -298,6 +351,8 @@ def prepare(work, task, suite, complex_tasks):
 def oracle(work, task, answer, suite, complex_tasks):
     if task == 'calibration':
         return 'PHILOSOPHY_CAL_OK' in answer
+    if task in EXTRA_TASKS:
+        return suite.ponytail_tasks.verify(work, task)
     if task == 'python_complex':
         code = 'import sys; sys.path.insert(0, sys.argv[1]);\n' + complex_tasks.HIDDEN_CHECK
         proc = subprocess.run([sys.executable, '-I', '-B', '-c', code, str(work)], cwd=work,
@@ -452,6 +507,8 @@ def run(lab):
     build_info = json.loads((lab / 'build.json').read_text(encoding='utf-8'))
     if sha(Path(build_info['binary']).read_bytes()) != build_info['sha256']:
         raise RuntimeError('experimental binary changed')
+    if sha((lab / 'runner.py').read_bytes()) != metadata['runner_sha256']:
+        raise RuntimeError('frozen runner changed')
     for arm in arms:
         if sha((lab / f'prompts/{arm}.txt').read_bytes()) != metadata['prompts'][arm]['sha256']:
             raise RuntimeError('frozen prompts changed')
@@ -508,6 +565,10 @@ def main():
     parser.add_argument('--profile', default='deepseek')
     parser.add_argument('--repeats', type=int, default=3)
     parser.add_argument('--arms', choices=('A,B', 'A,B,C'), default='A,B,C')
+    parser.add_argument('--tasks', nargs='+', choices=TASKS + EXTRA_TASKS,
+                        help='task IDs to freeze; defaults to the original five tasks')
+    parser.add_argument('--quality-variants', type=Path,
+                        help='directory of A/B[/C].txt quality paragraphs; one must match production')
     parser.add_argument('--append-guidance', type=Path,
                         help='append only this text to A to form B; requires --arms A,B')
     parser.add_argument('--timeout', type=int, default=None,

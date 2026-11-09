@@ -360,6 +360,7 @@ mod tests {
                     workdir: &dir,
                     archive: &path,
                     on_output: None,
+                    ask: None,
                 },
             )
             .await;
@@ -392,6 +393,7 @@ mod tests {
                     workdir: &dir,
                     archive: &path,
                     on_output: None,
+                    ask: None,
                 },
             )
             .await;
@@ -422,6 +424,7 @@ mod tests {
                     workdir: &dir,
                     archive: &path,
                     on_output: None,
+                    ask: None,
                 },
             )
             .await;
@@ -506,6 +509,7 @@ mod tests {
                     workdir: &dir,
                     archive: &path,
                     on_output: None,
+                    ask: None,
                 },
             )
             .await;
@@ -537,6 +541,7 @@ mod tests {
                     workdir: &dir,
                     archive: &path,
                     on_output: None,
+                    ask: None,
                 },
             )
             .await;

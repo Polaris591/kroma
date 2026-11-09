@@ -8,6 +8,10 @@ use unicode_width::UnicodeWidthStr;
 /// Single private-use scalar per attachment. It behaves like one character
 /// to the caret/backspace, but renders as a readable inline chip.
 pub const ATTACHMENT_START: u32 = 0xE000;
+/// Largest single clipboard paste kept in the draft. Larger pastes belong in an
+/// attachment: the editor rescans its text for every frame and keeps undo
+/// snapshots of it.
+const MAX_PASTE_CHARS: usize = 200_000;
 pub const ATTACHMENT_END: u32 = 0xF8FF;
 
 #[derive(Clone, Default)]
@@ -234,6 +238,15 @@ impl Editor {
                 }
             })
             .collect::<String>();
+        let clean = if clean.chars().count() > MAX_PASTE_CHARS {
+            // One multi-megabyte paste would make every later frame O(n); keep
+            // the draft bounded and say so instead of silently freezing.
+            let mut bounded = clean.chars().take(MAX_PASTE_CHARS).collect::<String>();
+            bounded.push_str("\n[paste truncated: use a file attachment for the full text]");
+            bounded
+        } else {
+            clean
+        };
         let (a, b) = selection.unwrap_or((self.caret, self.caret));
         self.replace_range(a, b, &clean);
     }

@@ -12,6 +12,7 @@
 | `kroma config ...` | Manage saved profiles |
 | `kroma plugins ...` | Manage process plugins |
 | `kroma diagnostics ...` | Write a local diagnostics bundle |
+| `kroma update [--check] [--channel CHANNEL]` | Check for, or apply an npm update (`CHANNEL` is `latest` or `next`) |
 | `kroma trust-project [--revoke]` | Approve/revoke this project's MCP file |
 | `kroma recover-context [id]` | Reset unavailable custom context memory |
 | `kroma help [COMMAND]` | Help; unknown topics print the main usage |
@@ -41,8 +42,8 @@
 
 Rules:
 
-- The first token `config`, `plugins`, `setup`, `diagnostics`, `trust-project`,
-  `recover-context`, `help`, `version` is a subcommand.
+- The first token `update`, `config`, `plugins`, `setup`, `diagnostics`,
+  `trust-project`, `recover-context`, `help`, `version` is a subcommand.
 - Recognised options may appear before or after the prompt: `kroma hello --json`.
 - Unknown options are a usage error (exit 2); they are never sent to the model.
 - `--` makes everything after it prompt text, including leading dashes.

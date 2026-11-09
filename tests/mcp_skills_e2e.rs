@@ -97,6 +97,7 @@ for line in sys.stdin:
                 workdir: &dir,
                 archive: Path::new("/tmp/test.json"),
                 on_output: None,
+                ask: None,
             },
         )
         .await;
@@ -237,6 +238,7 @@ async fn http_integration(version: &str, sse: bool) -> Result<()> {
                 workdir: &dir,
                 archive: Path::new("/tmp/test.json"),
                 on_output: None,
+                ask: None,
             },
         )
         .await;
@@ -358,6 +360,7 @@ async fn skills_expose_metadata_and_load_on_demand() -> Result<()> {
                 workdir: &dir,
                 archive: Path::new("/tmp/test.json"),
                 on_output: None,
+                ask: None,
             },
         )
         .await;
@@ -540,6 +543,7 @@ async fn lazy_mcp_search_and_call_share_one_connection() -> Result<()> {
         workdir: &dir,
         archive: Path::new("/tmp/test.json"),
         on_output: None,
+        ask: None,
     };
     let found = tools.execute(&invoke("mcp_search", "{}"), context()).await;
     let found: Value = serde_json::from_str(&found.content)?;

@@ -39,6 +39,37 @@ impl ToolResult {
     }
 }
 
+/// One interactive choice request: a question plus the options a host can
+/// render. The shape lives here because only the host draws the list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskRequest {
+    pub question: String,
+    pub options: Vec<String>,
+    pub multiple: bool,
+}
+
+/// What the person actually did with an open question.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AskAnswer {
+    /// Chosen options and/or the answer typed instead of choosing.
+    Answered {
+        picked: Vec<String>,
+        typed: Option<String>,
+    },
+    /// Closed without answering. This is not consent and must never be
+    /// reported back to the model as an approval.
+    Dismissed,
+}
+
+/// Host-provided way to ask the person a question and wait for the answer.
+/// `None` means the running host has no interactive surface for this run.
+pub trait Asker: Send + Sync {
+    fn ask<'a>(
+        &'a self,
+        request: AskRequest,
+    ) -> Pin<Box<dyn Future<Output = Option<AskAnswer>> + Send + 'a>>;
+}
+
 #[derive(Clone, Copy)]
 pub struct ToolContext<'a> {
     pub model_connection: Option<&'a crate::model::ModelConnection>,
@@ -54,6 +85,8 @@ pub struct ToolContext<'a> {
     pub workdir: &'a Path,
     pub archive: &'a Path,
     pub on_output: Option<&'a shell::OutputCallback<'a>>,
+    /// Present only when this run can show an interactive question.
+    pub ask: Option<&'a dyn Asker>,
 }
 
 pub trait Tool: Send + Sync {
@@ -67,6 +100,11 @@ pub trait Tool: Send + Sync {
     /// ephemeral context packs. Plugins declare this in their manifest; the
     /// core does not need to know a particular plugin's tool name.
     fn invalidates_model_context(&self) -> bool {
+        false
+    }
+    /// A tool that waits for a person is not a stuck tool: the idle watchdog
+    /// that guards silent commands must not abort it.
+    fn waits_for_user(&self) -> bool {
         false
     }
     fn execute<'a>(&'a self, call: &'a ToolCall, ctx: ToolContext<'a>) -> ToolFuture<'a>;
@@ -113,6 +151,7 @@ pub trait ToolInterceptor: Send + Sync {
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
     interceptors: Vec<Arc<dyn ToolInterceptor>>,
+    capture_facts: bool,
 }
 
 impl ToolRegistry {
@@ -124,6 +163,7 @@ impl ToolRegistry {
         Self {
             tools: vec![Arc::new(BuiltinShell)],
             interceptors: Vec::new(),
+            capture_facts: false,
         }
     }
 
@@ -165,6 +205,10 @@ impl ToolRegistry {
         Ok(())
     }
 
+    pub(crate) fn capture_execution_facts(&mut self, enabled: bool) {
+        self.capture_facts = enabled;
+    }
+
     pub fn register_interceptor(&mut self, interceptor: Arc<dyn ToolInterceptor>) {
         self.interceptors.push(interceptor);
     }
@@ -185,6 +229,12 @@ impl ToolRegistry {
             .any(|tool| tool.name() == name && tool.requires_user_attachments())
     }
 
+    pub(crate) fn waits_for_user(&self, name: &str) -> bool {
+        self.tools
+            .iter()
+            .any(|tool| tool.name() == name && tool.waits_for_user())
+    }
+
     pub fn is_builtin_only(&self) -> bool {
         self.tools.len() == 1
             && self.tools[0].name() == "shell"
@@ -193,29 +243,31 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, call: &ToolCall, ctx: ToolContext<'_>) -> ToolResult {
-        let (result, warnings) = self.execute_with_warnings(call, ctx).await;
-        for warning in warnings {
+        let execution = self.execute_with_warnings(call, ctx).await;
+        for warning in execution.warnings {
             crate::runtime_log!("[tool] {warning}");
         }
-        result
+        execution.result
     }
 
     /// Execute a tool while keeping interceptor diagnostics separate from the
     /// real outcome. A failing after hook must not turn a completed side effect
     /// into an error result, because that invites the model to repeat it.
+    /// Execute one call and keep the raw facts that a hook may later rewrite.
     pub(crate) async fn execute_with_warnings(
         &self,
         call: &ToolCall,
         ctx: ToolContext<'_>,
-    ) -> (ToolResult, Vec<String>) {
+    ) -> ToolExecution {
         if call.kind != "function" {
-            return (
-                ToolResult::error(
+            return ToolExecution {
+                result: ToolResult::error(
                     json!({"error": format!("unsupported tool: {}", call.function.name)})
                         .to_string(),
                 ),
-                Vec::new(),
-            );
+                warnings: Vec::new(),
+                raw: RawExecution::default(),
+            };
         }
         // The default (no-hook) execution path performs no ToolCall clone,
         // allocation or extra IPC. Plugins only pay for their own hooks.
@@ -231,24 +283,42 @@ impl ToolRegistry {
                         .to_string(),
                 ),
             };
-            return (result, Vec::new());
+            let raw = if self.capture_facts {
+                raw_execution(
+                    &call.function.name,
+                    &call.function.arguments,
+                    &result,
+                    result.is_error,
+                )
+            } else {
+                RawExecution::default()
+            };
+            return ToolExecution {
+                result,
+                warnings: Vec::new(),
+                raw,
+            };
         }
         let mut effective = call.clone();
         for hook in &self.interceptors {
             if let Err(error) = hook.before_with_context(&mut effective, ctx).await {
-                return (
-                    ToolResult::error(format!("before_tool_call failed: {error:#}")),
-                    Vec::new(),
-                );
+                return ToolExecution {
+                    result: ToolResult::error(format!("before_tool_call failed: {error:#}")),
+                    warnings: Vec::new(),
+                    raw: RawExecution::default(),
+                };
             }
             if effective.id != call.id
                 || effective.kind != call.kind
                 || effective.function.name != call.function.name
             {
-                return (
-                    ToolResult::error("tool interceptor cannot change call id, kind or name"),
-                    Vec::new(),
-                );
+                return ToolExecution {
+                    result: ToolResult::error(
+                        "tool interceptor cannot change call id, kind or name",
+                    ),
+                    warnings: Vec::new(),
+                    raw: RawExecution::default(),
+                };
             }
         }
         let mut result = match self
@@ -265,6 +335,18 @@ impl ToolRegistry {
         if effective.function.arguments != call.function.arguments {
             result.executed_arguments = Some(effective.function.arguments.clone());
         }
+        // Capture facts before the after hook: a rewritten result must never
+        // manufacture a passing check.
+        let raw = if self.capture_facts {
+            raw_execution(
+                &effective.function.name,
+                &effective.function.arguments,
+                &result,
+                result.is_error,
+            )
+        } else {
+            RawExecution::default()
+        };
         let mut warnings = Vec::new();
         for hook in &self.interceptors {
             // Hooks receive &mut and may patch the result before failing. Keep
@@ -278,8 +360,75 @@ impl ToolRegistry {
                 break;
             }
         }
-        (result, warnings)
+        ToolExecution {
+            result,
+            warnings,
+            raw,
+        }
     }
+}
+
+/// Raw execution facts captured before any `after_tool_result` hook can rewrite
+/// the result. Host-private: not part of [`ToolResult`] or the [`Tool`] trait, so
+/// third-party tools keep the existing contract.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RawExecution {
+    pub is_error: bool,
+    pub command: Option<String>,
+    pub exit_code: Option<i32>,
+}
+
+pub(crate) struct ToolExecution {
+    pub result: ToolResult,
+    pub warnings: Vec<String>,
+    pub raw: RawExecution,
+}
+
+/// The built-in shell reports its own decoded command and exit status in its
+/// structured envelope. Unknown or absent values stay `None`, never 0.
+/// A tool that produced nothing for a whole idle window is indistinguishable
+/// from a stuck one. Stop waiting and hand the model a failure it can act on;
+/// the child process is killed when the dropped future releases it.
+pub(crate) fn idle_timeout(
+    name: &str,
+    limit: std::time::Duration,
+    arguments: &str,
+) -> ToolExecution {
+    let content = format!(
+        "[no output] tool '{name}' produced no output for {}s and was stopped. \
+The command may be waiting for interactive input, looping forever, or a test may never finish. \
+Inspect the command and the test before retrying; set KROMA_TOOL_IDLE_SECS=0 to disable this guard.",
+        limit.as_secs()
+    );
+    let result = ToolResult::error(content);
+    ToolExecution {
+        raw: raw_execution(name, arguments, &result, true),
+        result,
+        warnings: Vec::new(),
+    }
+}
+
+fn raw_execution(name: &str, arguments: &str, result: &ToolResult, is_error: bool) -> RawExecution {
+    let mut raw = RawExecution {
+        is_error,
+        ..RawExecution::default()
+    };
+    if name != "shell" {
+        return raw;
+    }
+    raw.command = serde_json::from_str::<Value>(arguments)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("command")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+    raw.exit_code = serde_json::from_str::<Value>(&result.content)
+        .ok()
+        .and_then(|value| value.get("exit_code").and_then(Value::as_i64))
+        .and_then(|code| i32::try_from(code).ok());
+    raw
 }
 
 pub struct BuiltinShell;
@@ -324,6 +473,7 @@ pub async fn execute(call: &ToolCall, workdir: &Path, archive: &Path) -> ToolRes
                 workdir,
                 archive,
                 on_output: None,
+                ask: None,
             },
         )
         .await
@@ -364,6 +514,8 @@ async fn execute_inner(
     archive: &Path,
     on_output: Option<&shell::OutputCallback<'_>>,
 ) -> Result<ShellExecution> {
+    // The registry dispatches by name, but `execute` is also called directly
+    // by hosts, so the name is checked here rather than trusted.
     if call.kind != "function" || call.function.name != "shell" {
         bail!("unsupported tool: {}", call.function.name);
     }
@@ -390,6 +542,147 @@ async fn execute_inner(
         content: payload.to_string(),
         failed,
     })
+}
+
+/// The host-side tool behind a plugin that declares `host = "ask_user"`.
+/// The plugin supplies the name and the model-facing description; the argument
+/// shape, the wait and the answer wording stay here because they depend on what
+/// this host can actually render.
+pub struct AskTool {
+    name: String,
+    description: String,
+}
+
+impl AskTool {
+    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+        }
+    }
+
+    /// The only declared copy of the argument shape. A manifest may not
+    /// declare its own, so the list the model fills is the list we draw.
+    pub fn parameters() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["question", "options"],
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "One question, addressed to the person who will answer it."
+                },
+                "options": {
+                    "type": "array",
+                    "minItems": 2,
+                    "items": {"type": "string"},
+                    "description": "Two or more concrete choices. A free-text choice is always appended, so never add one."
+                },
+                "multiple": {
+                    "type": "boolean",
+                    "description": "True when more than one choice may apply."
+                }
+            }
+        })
+    }
+}
+
+impl Tool for AskTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn definition(&self) -> Value {
+        json!({"type": "function", "function": {
+            "name": self.name,
+            "description": self.description,
+            "parameters": Self::parameters()
+        }})
+    }
+
+    fn waits_for_user(&self) -> bool {
+        true
+    }
+
+    fn execute<'a>(&'a self, call: &'a ToolCall, ctx: ToolContext<'a>) -> ToolFuture<'a> {
+        Box::pin(async move {
+            let request = match parse_ask(&call.function.arguments) {
+                Ok(request) => request,
+                Err(error) => return ToolResult::error(format!("invalid ask call: {error:#}")),
+            };
+            let Some(asker) = ctx.ask else {
+                return ToolResult::error(
+                    "This interface cannot show a question. Decide from what you already know and say what you chose.",
+                );
+            };
+            match asker.ask(request).await {
+                Some(AskAnswer::Answered { picked, typed }) => {
+                    ToolResult::ok(format_answer(&picked, typed.as_deref()))
+                }
+                Some(AskAnswer::Dismissed) => {
+                    ToolResult::error("User dismissed the question without answering")
+                }
+                None => ToolResult::error(
+                    "The question could not be shown. Decide from what you already know and say what you chose.",
+                ),
+            }
+        })
+    }
+}
+
+fn parse_ask(arguments: &str) -> Result<AskRequest> {
+    #[derive(Deserialize)]
+    struct Args {
+        question: String,
+        options: Vec<String>,
+        #[serde(default)]
+        multiple: bool,
+    }
+    let args: Args = serde_json::from_str(arguments)?;
+    let question = args.question.trim();
+    if question.is_empty() {
+        bail!("question must not be empty");
+    }
+    let mut options: Vec<String> = Vec::new();
+    for option in args.options {
+        let option = option.trim();
+        if option.is_empty() {
+            bail!("options must not contain empty strings");
+        }
+        if options.iter().any(|existing| existing == option) {
+            bail!("options must be distinct; '{option}' appears twice");
+        }
+        options.push(option.to_owned());
+    }
+    if options.len() < 2 {
+        bail!("options needs at least two choices; ask an open question in plain text instead");
+    }
+    Ok(AskRequest {
+        question: question.to_owned(),
+        options,
+        multiple: args.multiple,
+    })
+}
+
+/// The answer is scoped to the one question that was asked. It never claims
+/// approval of anything else, and a typed answer replaces the choice.
+fn format_answer(picked: &[String], typed: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    if !picked.is_empty() {
+        parts.push(format!("User selected: {}", picked.join(", ")));
+    }
+    if let Some(text) = typed.map(str::trim).filter(|text| !text.is_empty()) {
+        parts.push(format!("User typed: {text}"));
+    }
+    if parts.is_empty() {
+        "User answered without choosing an option".to_owned()
+    } else {
+        parts.join(
+            "
+",
+        )
+    }
 }
 
 #[cfg(test)]
@@ -422,6 +715,7 @@ mod tests {
             workdir: &workdir,
             archive: &archive,
             on_output: None,
+            ask: None,
         };
         let call = test_call("echo_hook", r#"{"value":"sample"}"#);
         let mut samples = [Vec::new(), Vec::new(), Vec::new()];
@@ -489,6 +783,7 @@ mod tests {
             workdir: Path::new("."),
             archive: Path::new("session.json"),
             on_output: None,
+            ask: None,
         }
     }
 
@@ -643,6 +938,7 @@ mod tests {
                     workdir: Path::new("."),
                     archive: Path::new("session.json"),
                     on_output: None,
+                    ask: None,
                 },
             )
             .await;
@@ -751,9 +1047,11 @@ mod tests {
             runs: later_runs.clone(),
         }));
 
-        let (result, warnings) = registry
+        let execution = registry
             .execute_with_warnings(&test_call("counted", "{}"), test_context())
             .await;
+        let result = execution.result;
+        let warnings = execution.warnings;
 
         assert_eq!(
             executions.load(Ordering::SeqCst),
@@ -793,9 +1091,11 @@ mod tests {
             runs: Arc::new(AtomicUsize::new(0)),
         }));
 
-        let (result, warnings) = registry
+        let execution = registry
             .execute_with_warnings(&test_call("failing", "{}"), test_context())
             .await;
+        let result = execution.result;
+        let warnings = execution.warnings;
 
         assert_eq!(executions.load(Ordering::SeqCst), 1);
         assert!(result.is_error);
@@ -810,9 +1110,11 @@ mod tests {
         registry.register_interceptor(Arc::new(LegacyHook));
         registry.register_interceptor(Arc::new(LegacyPatchAfter));
 
-        let (result, warnings) = registry
+        let execution = registry
             .execute_with_warnings(&test_call("echo_hook", "{}"), test_context())
             .await;
+        let result = execution.result;
+        let warnings = execution.warnings;
 
         assert!(warnings.is_empty());
         assert!(!result.is_error);
@@ -836,9 +1138,11 @@ mod tests {
             .unwrap();
         registry.register_interceptor(Arc::new(RejectBefore));
 
-        let (result, warnings) = registry
+        let execution = registry
             .execute_with_warnings(&test_call("guarded", "{}"), test_context())
             .await;
+        let result = execution.result;
+        let warnings = execution.warnings;
 
         assert_eq!(executions.load(Ordering::SeqCst), 0);
         assert!(result.is_error);
@@ -861,9 +1165,11 @@ mod tests {
             }))
             .unwrap();
 
-        let (result, warnings) = registry
+        let execution = registry
             .execute_with_warnings(&test_call("plain", "{}"), test_context())
             .await;
+        let result = execution.result;
+        let warnings = execution.warnings;
 
         assert_eq!(executions.load(Ordering::SeqCst), 1);
         assert!(!result.is_error);
@@ -885,5 +1191,157 @@ mod tests {
         assert_eq!(data["exit_code"], 7);
         assert!(data.get("stdout_bytes").is_none());
         assert!(data.get("stderr_bytes").is_none());
+    }
+}
+
+#[cfg(test)]
+mod ask_tests {
+    use super::*;
+    use crate::protocol::FunctionCall;
+    use std::sync::Mutex;
+
+    fn call(arguments: &str) -> ToolCall {
+        ToolCall {
+            id: "call-ask".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "ask".into(),
+                arguments: arguments.into(),
+            },
+        }
+    }
+
+    /// Records the request it was given and answers with a fixed result.
+    struct Fixed {
+        seen: Mutex<Option<AskRequest>>,
+        answer: Option<AskAnswer>,
+    }
+
+    impl Asker for Fixed {
+        fn ask<'a>(
+            &'a self,
+            request: AskRequest,
+        ) -> Pin<Box<dyn Future<Output = Option<AskAnswer>> + Send + 'a>> {
+            if let Ok(mut seen) = self.seen.lock() {
+                *seen = Some(request);
+            }
+            let answer = self.answer.clone();
+            Box::pin(async move { answer })
+        }
+    }
+
+    fn context<'a>(ask: Option<&'a dyn Asker>) -> ToolContext<'a> {
+        ToolContext {
+            model_connection: None,
+            user_message: None,
+            user_turn: None,
+            user_images: None,
+            previous_user_images: None,
+            workdir: Path::new("."),
+            archive: Path::new("kroma-ask-test.json"),
+            on_output: None,
+            ask,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_single_choice_reports_the_label_without_claiming_approval() {
+        let asker = Fixed {
+            seen: Mutex::new(None),
+            answer: Some(AskAnswer::Answered {
+                picked: vec!["Postgres 16".into()],
+                typed: None,
+            }),
+        };
+        let tool = AskTool::new("ask", "Ask the user to choose");
+        let result = tool
+            .execute(
+                &call(r#"{"question":"Which database?","options":["Postgres 16","SQLite"]}"#),
+                context(Some(&asker)),
+            )
+            .await;
+        assert!(!result.is_error);
+        assert_eq!(result.content, "User selected: Postgres 16");
+        let seen = asker.seen.lock().unwrap().clone().unwrap();
+        assert_eq!(seen.options.len(), 2);
+        assert!(!seen.multiple);
+    }
+
+    #[tokio::test]
+    async fn multiple_choices_keep_option_order_and_carry_typed_text() {
+        let asker = Fixed {
+            seen: Mutex::new(None),
+            answer: Some(AskAnswer::Answered {
+                picked: vec!["A".into(), "C".into()],
+                typed: Some(" plus a read replica".into()),
+            }),
+        };
+        let tool = AskTool::new("ask", "Ask the user to choose");
+        let result = tool
+            .execute(
+                &call(r#"{"question":"Which ones?","options":["A","B","C"],"multiple":true}"#),
+                context(Some(&asker)),
+            )
+            .await;
+        assert_eq!(
+            result.content,
+            "User selected: A, C\nUser typed: plus a read replica"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dismissed_question_is_an_error_and_a_typed_answer_is_not() {
+        let dismissed = Fixed {
+            seen: Mutex::new(None),
+            answer: Some(AskAnswer::Dismissed),
+        };
+        let typed = Fixed {
+            seen: Mutex::new(None),
+            answer: Some(AskAnswer::Answered {
+                picked: Vec::new(),
+                typed: Some("use the staging replica".into()),
+            }),
+        };
+        let tool = AskTool::new("ask", "Ask the user to choose");
+        let arguments = r#"{"question":"Which database?","options":["Postgres","SQLite"]}"#;
+        let closed = tool
+            .execute(&call(arguments), context(Some(&dismissed)))
+            .await;
+        assert!(closed.is_error);
+        assert!(closed.content.contains("dismissed"));
+        let answered = tool.execute(&call(arguments), context(Some(&typed))).await;
+        assert!(!answered.is_error);
+        assert_eq!(answered.content, "User typed: use the staging replica");
+    }
+
+    #[tokio::test]
+    async fn a_host_without_an_interface_fails_at_once_instead_of_waiting() {
+        let tool = AskTool::new("ask", "Ask the user to choose");
+        let result = tool
+            .execute(
+                &call(r#"{"question":"Which database?","options":["Postgres","SQLite"]}"#),
+                context(None),
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("cannot show a question"));
+        assert!(
+            tool.waits_for_user(),
+            "a person's answer is not a stuck tool"
+        );
+    }
+
+    #[test]
+    fn arguments_must_offer_distinct_real_choices() {
+        assert!(parse_ask(r#"{"question":"Pick","options":["a","b"]}"#).is_ok());
+        assert!(parse_ask(r#"{"question":"  ","options":["a","b"]}"#).is_err());
+        assert!(parse_ask(r#"{"question":"Pick","options":["a"]}"#).is_err());
+        assert!(parse_ask(r#"{"question":"Pick","options":["a","a"]}"#).is_err());
+        assert!(parse_ask(r#"{"question":"Pick","options":["a"," "]}"#).is_err());
+        let parsed =
+            parse_ask(r#"{"question":" Pick ","options":[" a ","b"],"multiple":true}"#).unwrap();
+        assert_eq!(parsed.question, "Pick");
+        assert_eq!(parsed.options, vec!["a".to_owned(), "b".to_owned()]);
+        assert!(parsed.multiple);
     }
 }

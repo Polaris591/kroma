@@ -31,6 +31,12 @@ function createHandler({run = dispatch, write = frame => process.stdout.write(JS
 `});
       }
     };
+    // A child can think for minutes without a progress line. Empty deltas keep
+    // the host's silent-tool guard from treating a working child as hung.
+    const heartbeat = streaming ? setInterval(() => {
+      write({...base, event: "output_delta", stream: "stdout", delta: ""});
+    }, 30000) : null;
+    heartbeat?.unref();
     try {
       const outcome = await run(request, {onProgress: emit});
       const content = outcome?.content ?? "";
@@ -42,6 +48,8 @@ function createHandler({run = dispatch, write = frame => process.stdout.write(JS
       if (streaming && error?.fatal) write({...base, event: "error", message: content});
       else if (streaming) write({...base, event: "complete", result: {content, is_error: true}});
       else write({...base, content, is_error: true});
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
     }
   }
 

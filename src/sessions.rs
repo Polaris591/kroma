@@ -44,6 +44,23 @@ pub struct SessionEntry {
     pub name: Option<String>,
 }
 
+/// Read-only, bounded local search. Never index provider reasoning or tool
+/// results, and never modify a session while another process owns it.
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionTextMatch {
+    pub id: String,
+    pub snippet: String,
+}
+
+/// Back up per-session display/model metadata beside the archived history.
+/// Existing archives without this file still restore their transcripts.
+#[derive(Default, Serialize, Deserialize)]
+struct TrashedSessionMetadata {
+    name: Option<String>,
+    model: Option<SessionModel>,
+    usage: Option<SessionUsage>,
+}
+
 impl SessionCatalog {
     /// Derive a sidecar from the default snapshot path. `.json` snapshots keep
     /// their historical `main.names.json` companions. For a custom suffix such
@@ -344,6 +361,142 @@ impl SessionCatalog {
         Ok(path)
     }
 
+    /// Move a saved conversation and its durable journal out of the catalog.
+    /// Keep a recoverable local copy instead of permanently destroying a
+    /// user's history. Acquire the same OS lock as an Agent first, so another
+    /// running Kroma process cannot have this session open.
+    pub fn trash_session(&self, id: &str) -> Result<()> {
+        let path = self.resolve(id)?;
+        // The caller must have released any live Agent lock before deleting.
+        let _lock = SessionStore::open_at(path.clone(), Path::new("."))?;
+        let parent = path.parent().context("session directory is missing")?;
+        let trash_dir = parent.join(".deleted");
+        fs::create_dir_all(&trash_dir)?;
+        let original_name = path
+            .file_name()
+            .context("missing session file name")?
+            .to_string_lossy();
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let destination = trash_dir.join(format!("{stamp}-{original_name}"));
+        let metadata_path = destination.with_extension("meta.json");
+        let metadata = TrashedSessionMetadata {
+            name: self.names()?.get(id).cloned(),
+            model: self.models()?.get(id).cloned(),
+            usage: self.usage_map()?.get(id).cloned(),
+        };
+        fs::write(&metadata_path, serde_json::to_vec(&metadata)?)
+            .context("saving recoverable session metadata")?;
+        // Moving the snapshot first makes the session disappear from lists.
+        if let Err(error) = fs::rename(&path, &destination) {
+            let _ = fs::remove_file(&metadata_path);
+            return Err(error).with_context(|| format!("could not trash session {id}"));
+        }
+        let journal = crate::session::journal_path(&path);
+        if journal.exists() {
+            let dest_journal = crate::session::journal_path(&destination);
+            if let Err(error) = fs::rename(&journal, &dest_journal) {
+                // Restore the checkpoint so an incomplete deletion cannot
+                // strand an existing WAL without its matching snapshot.
+                let _ = fs::rename(&destination, &path);
+                let _ = fs::remove_file(&metadata_path);
+                return Err(error).context("could not move session journal");
+            }
+        }
+        // The durable archive is now outside the active catalog. Remove
+        // obsolete metadata too, but never report a false deletion failure
+        // if an optional display sidecar cannot be rewritten.
+        let cleanup = (|| -> Result<()> {
+            crate::catalog_file::update(&self.default, &self.names_path(), || {
+                let mut names = self.names()?;
+                names.remove(id);
+                Ok(names)
+            })?;
+            crate::catalog_file::update(&self.default, &self.models_path(), || {
+                let mut models = self.models()?;
+                models.remove(id);
+                Ok(models)
+            })?;
+            crate::catalog_file::update(&self.default, &self.usage_path(), || {
+                let mut usage = self.usage_map()?;
+                usage.remove(id);
+                Ok(usage)
+            })
+        })();
+        if let Err(error) = cleanup {
+            crate::runtime_log!("[session] unable to clean trashed session metadata: {error:#}");
+        }
+        Ok(())
+    }
+
+    /// Undo a Desktop deletion by moving the most recent archived snapshot
+    /// and its journal back to their original names. Refuse to overwrite any
+    /// live session or journal; earlier archives remain available on disk.
+    pub fn restore_session(&self, id: &str) -> Result<()> {
+        let path = self.path_for(id)?;
+        let journal = crate::session::journal_path(&path);
+        if path.exists() || journal.exists() {
+            bail!("cannot restore: a session with this ID already exists");
+        }
+        let filename = path
+            .file_name()
+            .context("missing session filename")?
+            .to_string_lossy();
+        let suffix = format!("-{filename}");
+        let trash = path
+            .parent()
+            .context("missing session directory")?
+            .join(".deleted");
+        let archived = fs::read_dir(&trash)?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let prefix = name.strip_suffix(&suffix)?;
+                let stamp = prefix.parse::<u128>().ok()?;
+                entry
+                    .file_type()
+                    .ok()?
+                    .is_file()
+                    .then_some((stamp, entry.path()))
+            })
+            .max_by_key(|(stamp, _)| *stamp)
+            .map(|(_, path)| path)
+            .context("no recoverable archive for this session")?;
+        let archived_journal = crate::session::journal_path(&archived);
+        let metadata_path = archived.with_extension("meta.json");
+        let metadata = fs::read(&metadata_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<TrashedSessionMetadata>(&bytes).ok());
+        fs::rename(&archived, &path).context("restoring session snapshot")?;
+        if archived_journal.exists() {
+            if let Err(error) = fs::rename(&archived_journal, &journal) {
+                let _ = fs::rename(&path, &archived);
+                return Err(error).context("restoring session journal");
+            }
+        }
+        if let Some(metadata) = metadata {
+            let restore_metadata = (|| -> Result<()> {
+                if let Some(name) = metadata.name {
+                    self.name_session(id, &name)?;
+                }
+                if let Some(model) = metadata.model {
+                    self.set_model_choice(id, model)?;
+                }
+                if let Some(usage) = metadata.usage {
+                    self.set_usage(id, usage)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = restore_metadata {
+                crate::runtime_log!(
+                    "[session] recovered history but metadata needs review: {error:#}"
+                );
+            } else {
+                let _ = fs::remove_file(metadata_path);
+            }
+        }
+        Ok(())
+    }
+
     pub fn new_path(&self) -> Result<(String, PathBuf)> {
         for _ in 0..10 {
             let nanos = SystemTime::now()
@@ -358,6 +511,86 @@ impl SessionCatalog {
             }
         }
         bail!("unable to allocate a unique session ID")
+    }
+
+    /// Look for a phrase in user-authored messages of the most recent
+    /// conversations. Snapshot + WAL replay is read-only. Very large archives
+    /// are skipped so typing in the Desktop search box stays responsive.
+    pub fn search_user_messages(
+        &self,
+        query: &str,
+        max_sessions: usize,
+        max_hits: usize,
+    ) -> Result<Vec<SessionTextMatch>> {
+        const MAX_ARCHIVE_BYTES: u64 = 12 * 1024 * 1024;
+        let term = query.trim().to_lowercase();
+        if term.chars().count() < 2 || term.chars().count() > 120 || max_hits == 0 {
+            return Ok(Vec::new());
+        }
+        let mut matches = Vec::new();
+        for entry in self.list()?.into_iter().take(max_sessions.min(40)) {
+            let path = self.path_for(&entry.id)?;
+            let journal = crate::session::journal_path(&path);
+            let size = fs::metadata(&path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0)
+                + fs::metadata(&journal)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+            if size > MAX_ARCHIVE_BYTES {
+                continue;
+            }
+            let messages = match crate::session::read_archive_messages(&path) {
+                Ok(messages) => messages,
+                Err(error) => {
+                    crate::runtime_log!("[session-search] ignoring unreadable archive: {error:#}");
+                    continue;
+                }
+            };
+            for message in messages.iter().rev() {
+                if message.role != "user" {
+                    continue;
+                }
+                let Some(content) = message.content.as_deref() else {
+                    continue;
+                };
+                if content.len() > 512_000 {
+                    continue;
+                }
+                let lower = content.to_lowercase();
+                let Some(index) = lower.find(&term) else {
+                    continue;
+                };
+                // Count Unicode scalar values rather than byte offsets so
+                // Chinese project/task names can be centered in the preview.
+                let position = lower[..index].chars().count();
+                let start = position.saturating_sub(32);
+                let snippet = content
+                    .chars()
+                    .skip(start)
+                    .take(145)
+                    .collect::<String>()
+                    .replace(['\r', '\n'], " ");
+                matches.push(SessionTextMatch {
+                    id: entry.id.clone(),
+                    snippet: format!(
+                        "{}{}{}",
+                        if start > 0 { "…" } else { "" },
+                        snippet,
+                        if content.chars().count() > start + 145 {
+                            "…"
+                        } else {
+                            ""
+                        }
+                    ),
+                });
+                break;
+            }
+            if matches.len() >= max_hits.min(30) {
+                break;
+            }
+        }
+        Ok(matches)
     }
 
     pub fn list(&self) -> Result<Vec<SessionEntry>> {
@@ -409,6 +642,102 @@ fn valid_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_only_user_messages_in_recent_archives() -> Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "kroma-session-search-{}-{}",
+            std::process::id(),
+            NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root)?;
+        let catalog = SessionCatalog::from_default(root.join("main.json"))?;
+        let (id, path) = catalog.new_path()?;
+        let store = SessionStore::open_at(path, &root)?;
+        store.save(
+            &[
+                crate::protocol::Message::new("system", "instructions"),
+                crate::protocol::Message::new("user", "请帮我部署 Kroma Desktop"),
+                crate::protocol::Message::new("tool", "PRIVATE-TOOL-OUTPUT"),
+                crate::protocol::Message::new("assistant", "已经完成"),
+            ],
+            &crate::context_state::CompactionState::default(),
+        )?;
+        drop(store);
+        let hits = catalog.search_user_messages("desktop", 5, 10)?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, id);
+        assert!(hits[0].snippet.contains("Desktop"));
+        assert!(catalog
+            .search_user_messages("PRIVATE-TOOL-OUTPUT", 5, 10)?
+            .is_empty());
+        assert!(catalog.search_user_messages("deploy", 5, 10)?.is_empty());
+        assert!(catalog.search_user_messages("", 5, 10)?.is_empty());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn trash_saved_session_is_recoverable_and_refuses_live_locks() -> Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "kroma-trash-session-{}-{}",
+            std::process::id(),
+            NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root)?;
+        let catalog = SessionCatalog::from_default(root.join("main.json"))?;
+        let (id, path) = catalog.new_path()?;
+        let store = SessionStore::open_at(path.clone(), &root)?;
+        store.save(
+            &[crate::protocol::Message::new("system", "instructions")],
+            &crate::context_state::CompactionState::default(),
+        )?;
+        catalog.name_session(&id, "To be deleted")?;
+        catalog.set_model_choice(
+            &id,
+            SessionModel {
+                profile: "test-provider".into(),
+                thinking: Some("high".into()),
+            },
+        )?;
+        catalog.set_usage(
+            &id,
+            SessionUsage {
+                context_input: Some(1234),
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(catalog.list()?.len(), 1);
+        assert!(
+            catalog.trash_session(&id).is_err(),
+            "a live lock must prevent deletion"
+        );
+        assert!(path.exists());
+        drop(store);
+        catalog.trash_session(&id)?;
+        assert!(catalog.list()?.is_empty());
+        assert!(!catalog.names()?.contains_key(&id));
+        assert!(!path.exists());
+        let trash = root.join(".deleted");
+        let archived = fs::read_dir(trash)?
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert!(archived
+            .iter()
+            .any(|item| item.extension().is_some_and(|ext| ext == "json")));
+        catalog.restore_session(&id)?;
+        assert!(path.exists(), "undo must restore the original session ID");
+        assert_eq!(catalog.list()?.len(), 1);
+        assert_eq!(catalog.list()?[0].name.as_deref(), Some("To be deleted"));
+        assert_eq!(catalog.model_choice(&id)?.unwrap().profile, "test-provider");
+        assert_eq!(catalog.usage(&id)?.context_input, Some(1234));
+        assert!(
+            catalog.restore_session(&id).is_err(),
+            "never overwrite a live session"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn corrupt_display_sidecars_do_not_block_transcript_or_new_metrics() -> Result<()> {

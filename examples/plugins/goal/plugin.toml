@@ -1,0 +1,140 @@
+api_version = 2
+id = "goal"
+name = "Goal"
+version = "0.2.0"
+description = "Keep working toward the user’s goal; record progress and real checks, pause when blocked"
+command = "node"
+args = ["main.js"]
+capabilities = ["task_control"]
+prompt = """
+仅在宿主提供活动目标时使用 Goal 规则；普通任务不自行建立目标。
+直接理解和执行目标，不要求先填验收表或登记检查计划。
+只在重要进展、完成或受阻时调用 goal_checkpoint；检查结果是执行记录，不是独立正确性证明。
+用户新指令和停止优先；区分已执行检查、模型判断与未验证部分。
+"""
+
+[[commands]]
+name = "/goal"
+description = "启动、查看、暂停、继续或取消当前目标"
+
+[[tools]]
+name = "goal_checkpoint"
+description = "记录进展、完成或阻塞。只需 summary 和 claim；验收点、检查命令和证据均可选，省略列表表示继承，空数组表示清空。检查可在执行后登记，宿主核实执行事实。来源引用可选；提供时必须真实。用户原始要求与最新修改始终优先于模型整理的列表。"
+invalidates_context = true
+
+[tools.parameters]
+type = "object"
+additionalProperties = false
+required = ["summary", "claim"]
+[tools.parameters.properties.revision]
+type = "integer"
+minimum = 1
+description = "当前用户修订号，必须与宿主 control_context.revision 完全一致；模型不能改写。"
+[tools.parameters.properties.summary]
+type = "string"
+minLength = 1
+maxLength = 2048
+description = "最近进展的紧凑摘要，不替换原始用户输入。"
+[tools.parameters.properties.claim]
+type = "string"
+enum = ["working", "done", "blocked"]
+description = "working 记录进展；done 请求交付；blocked 暂停并说明原因。填写验收点时，done 要求这些点已满足。"
+[tools.parameters.properties.next_step]
+type = "string"
+maxLength = 1024
+description = "尚未完成时的具体下一步。"
+[tools.parameters.properties.block_reason]
+type = "string"
+maxLength = 1024
+description = "真正受阻的原因与用户需要提供什么。"
+[tools.parameters.properties.unverified]
+type = "array"
+description = "无法机器验证或需要用户确认的部分，原样进入最终报告。"
+[tools.parameters.properties.unverified.items]
+type = "string"
+maxLength = 200
+[tools.parameters.properties.criteria]
+type = "array"
+description = "可选验收点。可细化或修正模型自己的理解，不替代用户原文。"
+[tools.parameters.properties.criteria.items]
+type = "object"
+additionalProperties = false
+required = ["id", "text"]
+[tools.parameters.properties.criteria.items.properties.id]
+type = "string"
+description = "1–32 位字母、数字、下划线或短横线，当前列表内唯一。"
+[tools.parameters.properties.criteria.items.properties.text]
+type = "string"
+description = "该项要求。"
+[tools.parameters.properties.criteria.items.properties.source]
+type = "string"
+enum = ["user", "derived"]
+[tools.parameters.properties.criteria.items.properties.source_ref]
+type = "object"
+additionalProperties = false
+required = ["message_index", "quote"]
+description = "可选来源：引用宿主投影给出的用户消息编号与连续原文。"
+[tools.parameters.properties.criteria.items.properties.source_ref.properties.message_index]
+type = "integer"
+minimum = 0
+[tools.parameters.properties.criteria.items.properties.source_ref.properties.quote]
+type = "string"
+maxLength = 500
+[tools.parameters.properties.criteria.items.properties.kind]
+type = "string"
+enum = ["command", "deliverable", "judgement"]
+[tools.parameters.properties.criteria.items.properties.assessment]
+type = "string"
+enum = ["pending", "satisfied", "blocked"]
+[tools.parameters.properties.criteria.items.properties.check_ids]
+type = "array"
+description = "可选关联检查编号。"
+[tools.parameters.properties.criteria.items.properties.check_ids.items]
+type = "string"
+[tools.parameters.properties.criteria.items.properties.evidence]
+type = "array"
+description = "已完成的调用 ID 或本轮最终交付引用，不能伪造。"
+[tools.parameters.properties.criteria.items.properties.evidence.items]
+type = "object"
+additionalProperties = false
+required = ["kind"]
+description = "kind=tool 时填 call_id（宿主会核对真实执行）；kind=final_answer 表示本轮待交付内容。"
+[tools.parameters.properties.criteria.items.properties.evidence.items.properties.kind]
+type = "string"
+enum = ["tool", "final_answer"]
+[tools.parameters.properties.criteria.items.properties.evidence.items.properties.call_id]
+type = "string"
+description = "真实执行的 tool call id；kind=tool 时必填。"
+[tools.parameters.properties.criteria.items.properties.notes]
+type = "string"
+maxLength = 1024
+description = "可选说明；这是模型判断，不是独立机器证明。"
+[tools.parameters.properties.checks]
+type = "array"
+description = "可选检查命令。省略表示继承，空数组清空。允许补记已经执行的命令。"
+[tools.parameters.properties.checks.items]
+type = "object"
+additionalProperties = false
+required = ["id", "command"]
+[tools.parameters.properties.checks.items.properties.id]
+type = "string"
+[tools.parameters.properties.checks.items.properties.command]
+type = "string"
+description = "完整检查命令，宿主匹配真实执行记录，不解释 shell 语法。"
+[tools.parameters.properties.checks.items.properties.source]
+type = "string"
+enum = ["user", "derived"]
+[tools.parameters.properties.checks.items.properties.source_ref]
+type = "object"
+additionalProperties = false
+required = ["message_index", "quote"]
+[tools.parameters.properties.checks.items.properties.source_ref.properties.message_index]
+type = "integer"
+minimum = 0
+[tools.parameters.properties.checks.items.properties.source_ref.properties.quote]
+type = "string"
+maxLength = 500
+[tools.parameters.properties.checks.items.properties.rationale]
+type = "string"
+maxLength = 1024
+description = "可选的检查选择或调整说明。"

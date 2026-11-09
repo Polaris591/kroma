@@ -97,6 +97,18 @@ pub enum RuntimeEvent<'a> {
     Warning {
         message: &'a str,
     },
+    /// One committed task-control state, never a per-token update. Emitted
+    /// only after the control record is durable; recovery still reads the WAL,
+    /// so a dropped event can only lose presentation, never an outcome.
+    TaskControlChanged {
+        command: &'a str,
+        owner: &'a str,
+        id: &'a str,
+        revision: u64,
+        status: &'a str,
+        reason: &'a str,
+        summary: &'a str,
+    },
     /// Final foreground task notification. For `completed`, the assistant
     /// turn is durable and any required checkpoint has already completed; for
     /// `failed`/`cancelled`, the durable interruption/cancel records were

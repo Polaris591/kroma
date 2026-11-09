@@ -14,23 +14,21 @@ record API spend from the provider dashboard (this plugin does not estimate cost
 Summarize hits/20, readable relevant sources/20, median/p95 search latency and
 actual billed spend. Do not count snippets as successfully read source pages.
 
-## Keyless control run (2026-10-31)
+## Keyless control run (2026-11-09)
 
-One network, no credentials, `provider: "free"`, `timeout_ms: 15000`. The chain
-returned `SEARCH_BLOCKED`/connection failures for DuckDuckGo, `NO_RESULTS` or
-`INVALID_RESPONSE` for Bing RSS on `site:` queries, and never produced a usable
-answer for the four `site:`-restricted queries. A later run with Mwmbl added:
+Newer runs must use the current plugin: no credential means the free Mwmbl
+index only, `provider: "free"`. Measured on one network:
 
 | Query | Provider | Result |
 |---|---|---|
 | `postgres index only scan` | mwmbl | 6 relevant, ~0.9 s |
 | `rust tokio select cancellation` | mwmbl | 3 relevant, ~0.3 s |
-| `欧盟 AI 法案 生效时间` | bing | 6 generic pages, ~6.6 s |
-| `Node.js AbortSignal timeout site:nodejs.org` | none | Bing RSS empty channel |
+| `欧盟 AI 法案 生效时间` | mwmbl | `NO_RESULTS`, ~1 s |
 
-Conclusion: keyless search is a degraded fallback on this network, not a
-substitute for a keyed API. Repeat this run before claiming any keyless provider
-as a reliable default elsewhere.
+Conclusion: keyless search is a degraded fallback, not a substitute for a keyed
+API, but it fails in about a second instead of spending the budget on blocked
+scraped search pages. Repeat before claiming any keyless provider as a reliable
+default elsewhere.
 
 | # | Exact query | Expected evidence/source |
 |---|---|---|
@@ -64,23 +62,24 @@ These are separate from search relevance scoring:
 - Read a table and code example with a sufficiently large output budget. Check
   section, table headers, units and code indentation; fetch surrounding chunks
   when necessary. Merged-cell semantic expansion is not supported.
-- With no configured backends, expect `CONFIG_ERROR` and zero network calls;
-  with multiple backends and `auto`, verify priority order and missing-key skips.
+- With no credential and no SearXNG, expect a Mwmbl response marked
+  `mode: "free"` with a warning; with several keys, `auto` must use the first in
+  the documented order and make exactly one request. An explicit provider
+  without its key returns `CONFIG_ERROR` and makes no request.
 - A missing/expired continuation must return `CACHE_MISS`; start from zero.
-- Explicit backends must fail without a second provider call. In auto, network
-  errors/timeouts/429/5xx may advance in priority order within the total deadline;
-  auth/config/query errors, no results and invalid responses must stop. Check
-  returned `attempts` on success and failure. Use local tests for deterministic
-  failures rather than deliberately hitting provider limits.
+- A configured provider must fail without a second provider call. Only the free
+  chain (SearXNG, then Mwmbl) advances. Check `attempts` on failure. Use local
+  tests for deterministic failures rather than deliberately hitting provider
+  limits.
 
 ## Current evidence
 
-Live smoke checks with migrated local credentials: Parallel, You.com, Exa, Tavily
-and Firecrawl each returned two results for `Node.js AbortSignal timeout
-site:nodejs.org`, all on nodejs.org or its subdomains. Firecrawl also retrieved
-`https://example.com/` as Markdown. This confirms connectivity/authentication and
+Live smoke checks with local credentials: Parallel, You.com, Exa and Tavily each
+returned two results for `Node.js AbortSignal timeout site:nodejs.org`, all on
+nodejs.org or its subdomains. This confirms connectivity/authentication and
 request compatibility only, not comparative relevance or billed cost.
 
-The imported loopback proxy refused connections; it was preserved but explicitly
-disabled after direct networking succeeded. Brave had no key in the Pi config,
-so its coverage remains mocked. Full 20-query relevance/cost evaluation: **not run**.
+The free chain was measured on one network in 2026-11-09: Mwmbl answers English
+technical queries in about a second and returns `NO_RESULTS` for a Chinese
+query. Brave had no key in that environment, so its coverage remains mocked.
+Full 20-query relevance/cost evaluation: **not run**.

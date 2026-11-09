@@ -60,9 +60,12 @@ function parseHTML(html) {
 
 function omitted(node) {
   const a = node.attrs;
-  return OMIT.has(node.tag) || Object.hasOwn(a, "hidden") || a["aria-hidden"] === "true"
-    || /^(navigation|complementary|banner)$/.test(a.role ?? "")
-    || /(?:^|[\s_-])(sidebar|toc|breadcrumb|breadcrumbs|cookie-banner|pagination)(?:$|[\s_-])/i.test(`${a.id ?? ""} ${a.class ?? ""}`);
+  if (OMIT.has(node.tag) || Object.hasOwn(a, "hidden") || a["aria-hidden"] === "true"
+    || /^(navigation|complementary|banner)$/.test(a.role ?? "")) return true;
+  // Structure elements decide what is readable; a class name alone must not
+  // discard a whole page (mdBook sets class="sidebar-visible" on <html>).
+  if (["html", "body", "main", "article"].includes(node.tag)) return false;
+  return /(?:^|[\s_-])(sidebar|toc|breadcrumb|breadcrumbs|cookie-banner|pagination)(?:$|[\s_-])/i.test(`${a.id ?? ""} ${a.class ?? ""}`);
 }
 
 function rawText(node) {

@@ -68,10 +68,19 @@ variable. Never put a key in a shell command or conversation.
 | `KROMA_MCP_SERVERS` | Comma-separated MCP server allowlist |
 | `KROMA_MCP_CONFIG` | Alternate MCP JSON file (treated as user config) |
 | `KROMA_MCP_STDERR` | Set to `inherit` to show server logs |
-| `KROMA_NO_CHECKPOINTS` | Disable automatic file snapshots |
 | `KROMA_PLUGIN_DIR` | User plugin directory |
 | `KROMA_PLUGIN_TRY` | Load one plugin directory for this run |
 | `KROMA_PROFILE` | Set to `1` for task profiling output |
+| `KROMA_SHELL` | Windows only: force the shell by executable name — `bash` (must be an existing file), `powershell`/`pwsh`, or `cmd`; unset auto-detects Git Bash, then PowerShell, then `cmd` |
+| `KROMA_SHELL_TIMEOUT_SECS` | Optional per-command wall-clock limit in seconds; unset or `0` means no artificial timeout, and an unparsable value is logged and ignored |
+| `KROMA_TOOL_IDLE_SECS` | Seconds a running tool call may produce no output before the host stops it; default `300`, `0` disables the guard |
+| `KROMA_CACHE_TRACE` | Set to `1` to append per-request cache diagnostics to `<session>.cache-trace.jsonl`; off by default, and it never records prompts, tool arguments or credentials |
+| `KROMA_PLUGIN_ISOLATE_ENV` | Set to `1` (or `true`) so plugin processes do not inherit credential-shaped variables; off by default, so plugins see the host environment |
+| `KROMA_PLUGIN_TOOL_TIMEOUT_SECS` | Whole-call deadline in seconds for plugin tools; unset or `0` means unlimited, a smaller `[[tools]] timeout_secs` still wins, and hooks plus other non-tool calls keep their fixed 120-second timeout |
+| `KROMA_NO_SUBAGENT_DELIVERY` | Any value stops the TUI from starting the delivery turn that hands finished subagent answers back to the model; an unset value allows at most two such turns between user messages, and the answers stay in their evidence directories |
+| `KROMA_PROFILE_FRAMES` | Any value logs TUI draws over 16 ms and event-loop gaps over 250 ms to the runtime log |
+| `KROMA_SNAPSHOT_DIR` | Test-only: output directory for the ignored `redesign_snapshot_matrix` golden-image test; the runtime never reads it |
+| `KROMA_TUI_STYLE` | Removed and ignored: A / Plain is the only TUI style, so the variable has no effect |
 
 ## MCP configuration
 

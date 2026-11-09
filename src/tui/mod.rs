@@ -1,5 +1,6 @@
 //! Default Kroma terminal UI. A thin host of the same Agent used by the CLI.
 //! Themes and optional plugin key bindings are TOML data, with no second Agent loop.
+mod ask;
 mod attachments;
 mod command_catalog;
 mod editor;
@@ -30,6 +31,7 @@ use crate::{
     config::Config,
     diagnostics::TuiLogGuard,
     model::ModelBackend,
+    plugins::{control_arguments, running_control, RunningControl},
     steering::TaskInput,
 };
 use anyhow::{Context, Result};
@@ -790,6 +792,11 @@ fn input_event(
         },
         event => event,
     };
+    // An open question is modal: it takes every key (and a real paste) except
+    // the run-wide stop, which still falls through below.
+    if state.ask_event(&event) {
+        return InputAction::None;
+    }
     // Copy an existing selection before interpreting Ctrl+C as cancel,
     // clear-draft or quit. A copied history selection must never discard an
     // unrelated unsent draft or terminate the agent.
@@ -1245,15 +1252,113 @@ fn show_local_command(state: &mut UiState, input: &str, model: &dyn ModelBackend
     false
 }
 
+/// One line of authoritative control state, never a completion percentage.
+fn goal_status_line(snapshot: &crate::task_control::TaskControlSnapshot) -> String {
+    let mut line = format!(
+        "{} {} · {} · rev {}",
+        snapshot.owner,
+        snapshot.id,
+        snapshot.status.as_str(),
+        snapshot.revision
+    );
+    if !snapshot.checks.is_empty() {
+        line.push_str(&format!(" · checks {}", snapshot.checks.len()));
+    }
+    if let Some(reason) = snapshot
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+    {
+        line.push_str(&format!(" · {reason}"));
+    }
+    line
+}
+
+/// Opt-in frame timing. `KROMA_PROFILE_FRAMES=1` logs every draw a user could
+/// feel plus event-loop gaps, so a slow session is measured instead of guessed.
+fn draw_profiled(screen: &mut TerminalScreen, state: &mut UiState) -> Result<()> {
+    if std::env::var_os("KROMA_PROFILE_FRAMES").is_none() {
+        return screen.draw(state);
+    }
+    let started = std::time::Instant::now();
+    let result = screen.draw(state);
+    let elapsed = started.elapsed();
+    if elapsed >= std::time::Duration::from_millis(16) {
+        crate::runtime_log!("[frame] draw {:.1}ms", elapsed.as_secs_f64() * 1_000.0,);
+    }
+    result
+}
+/// A running turn either keeps the input as steering or stops. Only the user
+/// stop path pauses a goal; the controller is never asked to approve it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunningInput {
+    Continue,
+    Pause,
+    Cancel,
+}
+
+/// Both the welcome screen and a controller need a real archive generation.
+fn ensure_session(
+    agent: &mut Agent,
+    state: &mut UiState,
+    model: &dyn ModelBackend,
+) -> Result<bool> {
+    if !state.is_home() {
+        return Ok(false);
+    }
+    agent.new_session()?;
+    // Exit the transient welcome state before persisting this conversation's model.
+    state.load_history(agent.messages());
+    state.session = agent.session_id().to_owned();
+    state.refresh_session_title();
+    save_model_choice(state, model);
+    Ok(true)
+}
+
 fn running_input(
     state: &mut UiState,
     task: &TaskInput,
     input: String,
     model: &dyn ModelBackend,
     follow_up: bool,
-) {
+    control: Option<&crate::plugins::TaskControlHost>,
+    control_command: Option<&str>,
+) -> RunningInput {
+    if let Some(command) = control_command {
+        if let Some(action) = running_control(command, &input) {
+            match action {
+                RunningControl::Status => match control.and_then(|host| host.snapshot()) {
+                    Some(snapshot) => state.note(goal_status_line(&snapshot)),
+                    None => state.note(
+                        state
+                            .preferences
+                            .language
+                            .text("No goal is active", "当前没有活动目标"),
+                    ),
+                },
+                RunningControl::Pause => state.note(state.preferences.language.text(
+                    "Stopping this turn and pausing the goal · completed edits are kept",
+                    "正在停止本轮并暂停目标 · 已完成的修改会保留",
+                )),
+                RunningControl::Cancel => state.note(state.preferences.language.text(
+                    "Stopping this turn and cancelling the goal · completed edits are kept",
+                    "正在停止本轮并取消目标 · 已完成的修改会保留",
+                )),
+                RunningControl::Start => state.note(state.preferences.language.text(
+                    "A goal is running: use /goal pause or /goal cancel before starting another",
+                    "目标正在运行：开始新目标前请先 /goal pause 或 /goal cancel",
+                )),
+            }
+            return match action {
+                RunningControl::Pause => RunningInput::Pause,
+                RunningControl::Cancel => RunningInput::Cancel,
+                RunningControl::Status | RunningControl::Start => RunningInput::Continue,
+            };
+        }
+    }
     if show_local_command(state, &input, model) {
-        return;
+        return RunningInput::Continue;
     }
     if input == "/pending" || input == "/queue list" {
         state.info("QUEUE", crate::commands::pending_text(task));
@@ -1261,6 +1366,11 @@ fn running_input(
         let cleared = task.clear_followups();
         state.queued.clear();
         state.note(format!("Cleared {cleared} follow-up task(s)"));
+    } else if input == "/queue run" {
+        state.note(state.preferences.language.text(
+            "Already running; queued tasks run after this one",
+            "当前任务仍在运行；队列会在它结束后自动执行",
+        ));
     } else if let Some(queued) = input.strip_prefix("/queue ") {
         match task.queue_followup(queued) {
             Ok(position) => {
@@ -1338,6 +1448,7 @@ fn running_input(
             ),
         }
     }
+    RunningInput::Continue
 }
 
 /// Task completion can win the select race while ModelFinished events are
@@ -1355,6 +1466,7 @@ fn drain_final_usage(state: &mut UiState, rx: &mut EventReceiver) {
                 | UiEvent::ActualInput(_)
                 | UiEvent::Context { .. }
                 | UiEvent::SessionTitleUpdated(_)
+                | UiEvent::ControlStatus { .. }
         ) {
             state.event(event);
         }
@@ -1397,12 +1509,18 @@ async fn execute_task(
     state.add_user(prompt);
     let git_baseline = state.begin_git_turn();
     state.finish_attachment_send();
-    screen.draw(state)?;
+    draw_profiled(screen, state)?;
     let task_input = agent.task_input();
+    // Cloned before the run future borrows the Agent: host state is the only
+    // goal status that stays readable while a turn is executing.
+    let control = agent.task_control().cloned();
+    let control_command = agent.task_control_command_name();
     let mut ignore_text = |_: &str| {}; // TextDelta arrives through the EventSink.
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(40));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut dirty = false;
+    let mut last_tick = std::time::Instant::now();
+    let mut cancel_goal = false;
     let result = {
         let items = attachments.iter().map(Attachment::item).collect::<Vec<_>>();
         let mut future = Box::pin(agent.run_with_attachments(prompt, &items, &mut ignore_text));
@@ -1420,12 +1538,26 @@ async fn execute_task(
                                 Event::Mouse(mouse)
                                     if matches!(mouse.kind, MouseEventKind::Down(_))
                             ) {
-                                screen.draw(state)?;
+                                draw_profiled(screen, state)?;
                             }
                             match input_event(state,event,true,model,workdir) {
                                 InputAction::Cancel => break None,
-                                InputAction::Submit(text) => running_input(state,&task_input,text,model,false),
-                                InputAction::Queue(text) => running_input(state,&task_input,text,model,true),
+                                InputAction::Submit(text) => match running_input(state,&task_input,text,model,false,control.as_deref(),control_command.as_deref()) {
+                                    RunningInput::Continue => {}
+                                    RunningInput::Pause => break None,
+                                    RunningInput::Cancel => {
+                                        cancel_goal = true;
+                                        break None;
+                                    }
+                                },
+                                InputAction::Queue(text) => match running_input(state,&task_input,text,model,true,control.as_deref(),control_command.as_deref()) {
+                                    RunningInput::Continue => {}
+                                    RunningInput::Pause => break None,
+                                    RunningInput::Cancel => {
+                                        cancel_goal = true;
+                                        break None;
+                                    }
+                                },
                                 _ => {},
                             }
                         }
@@ -1443,19 +1575,35 @@ async fn execute_task(
                     dirty=true;
                 },
                 _=ticker.tick() => {
+                    // A late tick means the loop itself was blocked, which is
+                    // what a frozen compaction looks like from the inside.
+                    if std::env::var_os("KROMA_PROFILE_FRAMES").is_some() {
+                        let gap = last_tick.elapsed();
+                        if gap >= std::time::Duration::from_millis(250) {
+                            crate::runtime_log!(
+                                "[frame] event loop gap {:.0}ms",
+                                gap.as_secs_f64() * 1_000.0
+                            );
+                        }
+                    }
+                    last_tick = std::time::Instant::now();
                     if state.auto_scroll_selection() { dirty=true; }
                     if state.tick_activity() { dirty=true; }
+                    if state.pull_ask() { dirty=true; }
                     if dirty {
-                        screen.draw(state)?;
+                        draw_profiled(screen, state)?;
                         dirty=false;
                     }
                 }
             }
         }
     };
+    // The turn is over: a question nobody can answer any more is dropped, and
+    // its waiting tool reports that the person was never asked.
+    state.clear_ask();
     let mut task_notice = None;
     let completed = match result {
-        Some(Ok(_)) => true,
+        Some(Ok(_)) => !agent.task_control().is_some_and(|host| host.is_active()),
         Some(Err(error)) => {
             let message = format!(
                 "{}: {error:#}",
@@ -1468,7 +1616,11 @@ async fn execute_task(
         None => {
             // A cancel that cannot be persisted must not become a hard exit:
             // the turn still finishes and the storage failure is shown here.
-            match agent.cancel() {
+            match if cancel_goal {
+                agent.cancel_goal()
+            } else {
+                agent.cancel()
+            } {
                 Ok(()) => {
                     let message = state.preferences.language.text(
                         "Task cancelled; unconfirmed commands are not replayed",
@@ -1522,7 +1674,7 @@ async fn execute_task(
     }
     state.finish_git_turn(git_baseline);
     state.restore_reading_position(reading_position);
-    screen.draw(state)?;
+    draw_profiled(screen, state)?;
     Ok(completed)
 }
 
@@ -1555,7 +1707,7 @@ async fn execute_local_shell(
         "Shell running · Esc / Ctrl+C cancels",
         "正在执行 Shell · Esc / Ctrl+C 取消",
     ));
-    screen.draw(state)?;
+    draw_profiled(screen, state)?;
     let result = {
         let mut future = Box::pin(crate::shell::execute_for_session(command, workdir, archive));
         loop {
@@ -1580,7 +1732,7 @@ async fn execute_local_shell(
             "Shell 已取消；已经产生的操作不会撤销",
         )),
     }
-    screen.draw(state)?;
+    draw_profiled(screen, state)?;
     Ok(())
 }
 
@@ -1703,6 +1855,13 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
             agent.resume_session(target)?;
         }
     }
+    // One process-wide controller. Recovery records are adopted here, before
+    // the first turn can add work to an interrupted goal.
+    if let Some(control) = runtime.plugins.task_control() {
+        if let Err(error) = agent.attach_task_control(control) {
+            plugin_warnings.push(format!("Task control: {error:#}"));
+        }
+    }
     let (themes, theme_warning) = match ThemeStore::load() {
         Ok(themes) => (themes, None),
         Err(error) => (
@@ -1719,6 +1878,9 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
         agent.messages(),
     );
     state.set_link_workdir(&workdir);
+    // One interactive surface per process: a tool that asks the person waits
+    // through this handle, and nothing else in the core knows about it.
+    agent.set_asker(state.asker());
     state.ui_sender = Some(tx.clone());
     state.refresh_git();
     state.plugin_commands = runtime.plugins.command_descriptions();
@@ -1751,6 +1913,9 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
         }
     };
     state.preferences_path = preferences::Preferences::path();
+    // Hot plugging: installing, enabling or editing a plugin applies to the next
+    // message. The check is a handful of stats, not a reload per keystroke.
+    let mut plugin_fingerprint = crate::plugins::PluginCatalog::source_fingerprint(&workdir);
     match preferences::Preferences::load_at(state.preferences_path.as_deref()) {
         Ok(prefs) => state.apply_preferences(prefs),
         Err(error) => state.note_with_level(
@@ -1769,6 +1934,13 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
     state.model_catalog = Some(catalog);
     if !show_home {
         state.restore_usage()?;
+        // Show the basis the next request is planned with, not only the last
+        // measurement taken before the session was closed.
+        if let Some(estimate) = agent.pending_context_estimate() {
+            state.event(UiEvent::Context {
+                estimated: estimate,
+            });
+        }
     }
     state.refresh_session_title();
     state.model_profile = initial_profile;
@@ -1865,7 +2037,13 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                 }
             }
             InputAction::Submit(text) => {
-                if text == "/plugins reload" {
+                let forced_reload = text == "/plugins reload";
+                // A plugin installed, enabled or edited since the last message
+                // applies now: no restart and no command to remember.
+                let changed = !forced_reload
+                    && plugin_fingerprint
+                        != crate::plugins::PluginCatalog::source_fingerprint(&workdir);
+                if forced_reload || changed {
                     // The outer UI event loop only receives commands while
                     // no Agent task is executing. Prepare everything before
                     // swapping the active registry, so failures leave it intact.
@@ -1921,6 +2099,17 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                         )) => {
                             agent.reload_extensions(tools, prompt, events);
                             runtime.plugins = next;
+                            // A reload replaces the owner worker, so the
+                            // agent must never keep answering through the old
+                            // one. No active goal is adopted by a new owner.
+                            match runtime.plugins.task_control() {
+                                Some(control) => {
+                                    if let Err(error) = agent.attach_task_control(control) {
+                                        state.note(format!("Task control: {error:#}"));
+                                    }
+                                }
+                                None => agent.detach_task_control(),
+                            }
                             commands = next_commands;
                             plugin_shortcuts = shortcuts;
                             state.plugin_commands = runtime.plugins.command_descriptions();
@@ -1938,7 +2127,13 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                             format!("Plugin reload: {error:#}"),
                         ),
                     }
-                    continue;
+                    // Record the state we just tried, so a failing reload is not
+                    // retried on every message; the user still sees one error.
+                    plugin_fingerprint =
+                        crate::plugins::PluginCatalog::source_fingerprint(&workdir);
+                    if forced_reload {
+                        continue;
+                    }
                 }
                 if text == "/editor" {
                     if let Err(error) = screen.edit_prompt(&mut state) {
@@ -2073,6 +2268,71 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                 if show_local_command(&mut state, &text, model.as_ref()) {
                     continue;
                 }
+                // The controller owns its command. The generic registry only
+                // refuses it, because a prepared task must start one real run.
+                let mut control_task = false;
+                if let Some(command) = agent.task_control_command_name() {
+                    if let Some(arguments) = control_arguments(&command, &text) {
+                        if let Err(error) = ensure_session(&mut agent, &mut state, model.as_ref()) {
+                            state.note(format!(
+                                "{}: {error:#}",
+                                state
+                                    .preferences
+                                    .language
+                                    .text("Unable to create session", "无法创建会话")
+                            ));
+                            continue;
+                        }
+                        match agent.task_control_command(&text, arguments).await {
+                            Ok(Some(crate::plugins::ControlCommand::Text(reply))) => {
+                                state.info("GOAL", reply);
+                                continue;
+                            }
+                            Ok(Some(crate::plugins::ControlCommand::HostAction(action))) => {
+                                match agent.control_host_action(action) {
+                                    Ok(reply) => state.info("GOAL", reply),
+                                    Err(error) => state.note_with_level(
+                                        view::NoticeLevel::Error,
+                                        format!(
+                                            "{}: {error:#}",
+                                            state.preferences.language.text("Goal", "目标")
+                                        ),
+                                    ),
+                                }
+                                continue;
+                            }
+                            Ok(Some(crate::plugins::ControlCommand::Prepared(task))) => {
+                                if !task.output.is_empty() {
+                                    state.info("GOAL", task.output.as_str());
+                                }
+                                match agent.stage_prepared_task(task) {
+                                    Ok(_) => control_task = true,
+                                    Err(error) => {
+                                        state.note_with_level(
+                                            view::NoticeLevel::Error,
+                                            format!(
+                                                "{}: {error:#}",
+                                                state.preferences.language.text("Goal", "目标")
+                                            ),
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                state.note_with_level(
+                                    view::NoticeLevel::Error,
+                                    format!(
+                                        "{}: {error:#}",
+                                        state.preferences.language.text("Goal", "目标")
+                                    ),
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                }
                 if let Some(id) = text.strip_prefix("/plugins view ") {
                     let id = id.trim();
                     if id.is_empty() || id.split_whitespace().count() != 1 {
@@ -2119,7 +2379,10 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                 }
                 let mut command_tick = tokio::time::interval(std::time::Duration::from_millis(40));
                 command_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                let command_result = {
+                let command_result = if control_task {
+                    // The controller already produced the one prepared start.
+                    Some(Ok(None))
+                } else {
                     let command = commands.execute_async(&text, &mut agent, &task_input);
                     tokio::pin!(command);
                     loop {
@@ -2274,6 +2537,11 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                             if let Err(error) = state.restore_usage() {
                                 state.note(format!("Unable to restore session usage: {error:#}"));
                             }
+                            if let Some(estimate) = agent.pending_context_estimate() {
+                                state.event(UiEvent::Context {
+                                    estimated: estimate,
+                                });
+                            }
                         }
                         if !reply.output.is_empty() {
                             let label = if text.split_whitespace().next() == Some("/diff") {
@@ -2291,24 +2559,17 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                         }
                     }
                     Ok(None) => {
-                        if text.starts_with('/') {
+                        if text.starts_with('/') && !control_task {
                             state.note(state.preferences.language.text(
                                 "Unknown command · type / for the index",
                                 "未知命令 · 输入 / 查看命令索引",
                             ));
                             continue;
                         }
-                        let first_prompt = if state.is_home() {
-                            match agent.new_session() {
-                                Ok(_) => {
-                                    // Exit the transient welcome state before
-                                    // persisting this conversation's model.
-                                    state.load_history(agent.messages());
-                                    state.session = agent.session_id().to_owned();
-                                    state.refresh_session_title();
-                                    save_model_choice(&mut state, model.as_ref());
-                                    Some(text.clone())
-                                }
+                        let first_prompt =
+                            match ensure_session(&mut agent, &mut state, model.as_ref()) {
+                                Ok(true) => Some(text.clone()),
+                                Ok(false) => None,
                                 Err(error) => {
                                     state.note(format!(
                                         "{}: {error:#}",
@@ -2319,10 +2580,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                                     ));
                                     continue;
                                 }
-                            }
-                        } else {
-                            None
-                        };
+                            };
                         let attachments = std::mem::take(&mut state.attachments);
                         run_followups = execute_task(
                             &mut agent,
@@ -2945,10 +3203,26 @@ mod tests {
         let (mut ui, model) = setup();
         let input = TaskInput::default();
         let active = input.start().unwrap();
-        running_input(&mut ui, &input, "inspect this error".into(), &model, false);
+        running_input(
+            &mut ui,
+            &input,
+            "inspect this error".into(),
+            &model,
+            false,
+            None,
+            None,
+        );
         assert_eq!(input.pending_steering(), 1);
         assert!(input.queued().is_empty());
-        running_input(&mut ui, &input, "add tests later".into(), &model, true);
+        running_input(
+            &mut ui,
+            &input,
+            "add tests later".into(),
+            &model,
+            true,
+            None,
+            None,
+        );
         assert_eq!(input.pending_steering(), 1);
         assert_eq!(input.queued(), ["add tests later"]);
         running_input(
@@ -2957,6 +3231,8 @@ mod tests {
             "/queue another follow-up".into(),
             &model,
             false,
+            None,
+            None,
         );
         assert_eq!(input.queued(), ["add tests later", "another follow-up"]);
         drop(active);
@@ -3671,5 +3947,86 @@ mod tests {
         assert!(matches!(action, InputAction::None));
         assert!(!ui.has_plugin_panel());
         assert_eq!(ui.editor.text(), "unsent draft");
+    }
+
+    #[test]
+    fn controller_lines_are_recognized_without_swallowing_other_slashes() {
+        assert_eq!(
+            running_control("/goal", "/goal"),
+            Some(RunningControl::Status)
+        );
+        assert_eq!(
+            running_control("/goal", "/goal status"),
+            Some(RunningControl::Status)
+        );
+        assert_eq!(
+            running_control("/goal", "/goal   pause"),
+            Some(RunningControl::Pause)
+        );
+        assert_eq!(
+            running_control("/goal", "/goal cancel"),
+            Some(RunningControl::Cancel)
+        );
+        assert_eq!(
+            running_control("/goal", "/goal 修复登录失败"),
+            Some(RunningControl::Start)
+        );
+        assert_eq!(running_control("/goal", "/goals"), None);
+        assert_eq!(running_control("/goal", "goal"), None);
+        assert_eq!(running_control("/goal", "/compact"), None);
+        assert_eq!(control_arguments("/goal", "/goal"), Some(""));
+        assert_eq!(control_arguments("/goal", "/goals"), None);
+    }
+
+    #[test]
+    fn goal_status_line_reports_state_reason_and_checks_without_a_percentage() {
+        let snapshot = crate::task_control::TaskControlSnapshot::from_item(&serde_json::json!({
+            "type": "kroma_task_control",
+            "version": 1,
+            "owner": "goal",
+            "id": "goal-1",
+            "revision": 3,
+            "seq": 7,
+            "scope": {"archive_key": "sessions/a.json", "generation": 2},
+            "status": "paused",
+            "reason": "user_stop",
+            "run_id": "run-1",
+            "checks": [{"id": "T1", "command": "echo ok"}],
+        }))
+        .expect("valid snapshot");
+        let line = goal_status_line(&snapshot);
+        assert_eq!(line, "goal goal-1 · paused · rev 3 · checks 1 · user_stop");
+        assert!(!line.contains('%'));
+    }
+
+    #[test]
+    fn a_controller_line_never_leaks_into_the_steering_lane() {
+        let (mut ui, model) = setup();
+        let input = TaskInput::default();
+        let active = input.start().unwrap();
+        let decision = running_input(
+            &mut ui,
+            &input,
+            "/goal pause".into(),
+            &model,
+            false,
+            None,
+            Some("/goal"),
+        );
+        assert_eq!(decision, RunningInput::Pause);
+        assert_eq!(input.pending_steering(), 0, "pause is not a steer");
+        assert!(input.queued().is_empty());
+        let decision = running_input(
+            &mut ui,
+            &input,
+            "/goal 新目标".into(),
+            &model,
+            false,
+            None,
+            Some("/goal"),
+        );
+        assert_eq!(decision, RunningInput::Continue);
+        assert_eq!(input.pending_steering(), 0, "no silent goal overwrite");
+        drop(active);
     }
 }

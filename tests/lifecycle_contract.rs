@@ -10,13 +10,16 @@ use kroma::{
     context_state::PersistedContext,
     events::{EventSink, RuntimeEvent},
     model::{Completion, ModelBackend, ModelFuture, StreamFuture, TextResult},
-    protocol::Message,
-    tools::ToolRegistry,
+    plugins::PluginCatalog,
+    prompt::PromptComposer,
+    protocol::{FunctionCall, Message, ToolCall},
+    tools::{ToolContext, ToolRegistry},
 };
 use serde_json::Value;
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicUsize, Ordering},
         mpsc, Arc, Mutex,
@@ -92,6 +95,9 @@ impl EventSink for RecordingEvents {
                 };
                 self.durable(marker);
                 format!("task-end-{status}")
+            }
+            RuntimeEvent::TaskControlChanged { status, .. } => {
+                format!("task-control-{status}")
             }
             _ => return,
         };
@@ -266,6 +272,7 @@ impl EventSink for OrderEvents {
             | RuntimeEvent::SessionCleared { .. }
             | RuntimeEvent::SessionForked { .. }
             | RuntimeEvent::SessionRewound { .. } => return,
+            RuntimeEvent::TaskControlChanged { status, .. } => format!("task-control-{status}"),
         };
         self.0.lock().unwrap().push(label);
     }
@@ -504,5 +511,79 @@ async fn short_lived_host_can_flush_post_wal_notifications_before_shutdown() -> 
     );
     drop(agent);
     fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+/// A subagent child is driven by a parent model, so its user-role text is
+/// machine-written. It must never be offered to a plugin as a trusted human
+/// quote that a memory write could promote into a durable rule.
+#[tokio::test]
+async fn child_tasks_never_offer_a_trusted_user_quote() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let dir = isolated_dir("trusted-user")?;
+    let plugin = dir.join("plugins").join("audit");
+    fs::create_dir_all(&plugin)?;
+    fs::write(
+        plugin.join("plugin.toml"),
+        "id='audit'\nname='Audit'\ncommand='node'\nargs=['main.js']\n[[tools]]\nname='audit_write'\ndescription='write an audit entry'\nrequires_user_context=true\n",
+    )?;
+    fs::write(
+        plugin.join("main.js"),
+        r#"const fs=require("node:fs");
+require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
+ const req=JSON.parse(line);
+ fs.appendFileSync("seen.log",JSON.stringify(req.trusted_user_context??null)+"\n");
+ process.stdout.write(JSON.stringify({protocol_version:1,request_id:req.request_id,content:"ok"})+"\n");
+});"#,
+    )?;
+    let state = dir.join("plugins.toml");
+    PluginCatalog::discover_at(dir.join("plugins"), state.clone(), &dir)?
+        .set_enabled("audit", true)?;
+    let catalog = PluginCatalog::discover_at(dir.join("plugins"), state, &dir)?;
+    let mut tools = ToolRegistry::builtin();
+    assert!(catalog
+        .contribute(&mut tools, &mut PromptComposer::default())
+        .is_empty());
+    let call = ToolCall {
+        id: "audit-1".into(),
+        kind: "function".into(),
+        function: FunctionCall {
+            name: "audit_write".into(),
+            arguments: "{}".into(),
+        },
+    };
+    let context = || ToolContext {
+        model_connection: None,
+        user_message: Some("Always use pnpm in this repository"),
+        user_turn: Some(1),
+        user_images: None,
+        previous_user_images: None,
+        workdir: &dir,
+        archive: &dir,
+        on_output: None,
+        ask: None,
+    };
+    std::env::remove_var("KROMA_CHILD_SKIP_TASK_SUMMARY");
+    assert!(!tools.execute(&call, context()).await.is_error);
+    let seen = fs::read_to_string(plugin.join("seen.log"))?;
+    assert!(
+        seen.contains("\"message\":\"Always use pnpm in this repository\""),
+        "a foreground turn may carry a trusted human quote: {seen}"
+    );
+    std::env::set_var("KROMA_CHILD_SKIP_TASK_SUMMARY", "1");
+    let child = tools.execute(&call, context()).await;
+    std::env::remove_var("KROMA_CHILD_SKIP_TASK_SUMMARY");
+    assert!(!child.is_error, "{}", child.content);
+    let seen = fs::read_to_string(plugin.join("seen.log"))?;
+    let last = seen.lines().last().unwrap_or_default();
+    assert_eq!(
+        last, "null",
+        "a child task must not turn model-written text into a trusted quote"
+    );
+    drop(tools);
+    // A live plugin process keeps its directory busy on Windows.
+    let _ = fs::remove_dir_all(dir);
     Ok(())
 }

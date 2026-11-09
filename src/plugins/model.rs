@@ -363,12 +363,14 @@ impl ModelBackend for ProcessModelBackend {
         })
     }
 
-    fn complete_with_reasoning<'a>(
+    fn complete_with_activity<'a>(
         &'a self,
         messages: &'a [Message],
         tools: &'a [Value],
+        _images: &'a TaskImageCache,
         on_text: &'a mut (dyn FnMut(&str) + Send),
         on_reasoning: &'a mut (dyn FnMut(&str) + Send),
+        _on_activity: &'a mut (dyn FnMut(crate::model::NativeActivity) + Send),
     ) -> StreamFuture<'a, Completion> {
         Box::pin(async move {
             if self.streaming {
@@ -440,10 +442,20 @@ struct Pack {
     paths: Vec<String>,
 }
 
-/// Host policy for V2 project memory; see docs/project-memory-v2-contract.md.
-const PACK_MAX_BLOCKS: usize = 6;
-const PACK_MAX_TEXT_CHARS: usize = 1200;
-const PACK_MAX_TOKENS: usize = 1024;
+/// Host policy for V2 project memory; see docs/project-memory.md. Block count
+/// bounds one plugin frame; the token budget is the sole spending authority.
+const PACK_MAX_BLOCKS: usize = 16;
+/// One durable memory record is at most 4000 characters, so the host admits a
+/// whole record instead of truncating or rejecting it.
+const PACK_MAX_TEXT_CHARS: usize = 4000;
+/// Default memory budget for one request, used only when the plugin declares
+/// no `context_tokens` setting. A user raises it through that setting; the host
+/// never shrinks it by model window size.
+const PACK_DEFAULT_TOKENS: usize = 2048;
+/// The contract's single byte ceiling. A token estimate used to be layered on
+/// top of it, but the clamp below 1024 tokens always resolved to this floor,
+/// so the host spends bytes and nothing else (docs/project-memory.md).
+const PACK_BUDGET_BYTES: usize = 8192;
 const PACK_MAX_IDENT_CHARS: usize = 64;
 const PACK_MAX_PATHS: usize = 8;
 const INTENT_MAX_CHARS: usize = 2000;
@@ -452,6 +464,28 @@ const SUMMARY_MAX_USER_CHARS: usize = 2000;
 const SUMMARY_MAX_BYTES: usize = 8192;
 /// Bounded cache of stable packs, keyed by archive and boundary user digest.
 const PACK_CACHE_ENTRIES: usize = 8;
+
+/// Host-authoritative memory budget: the user's `context_tokens` setting
+/// (default `PACK_DEFAULT_TOKENS`) clamped only to the input capacity this
+/// request really has.
+/// It is one shared budget for every context provider, never a per-window
+/// fraction, so a rule that fits the model capacity does not vanish because the
+/// window happens to be small.
+fn pack_budget_tokens(configured: Option<u64>, available_input: usize) -> usize {
+    let configured = configured.unwrap_or(PACK_DEFAULT_TOKENS as u64).max(1);
+    configured.min(available_input.max(1) as u64) as usize
+}
+
+/// Diagnostics for an optional memory call. The plugin id and failure class are
+/// enough to explain a missing pack; reply text can quote the user, so it is
+/// deliberately never logged.
+fn log_recall_failure(capability: &CapabilityWorker, reason: &str) {
+    crate::runtime_log!(
+        "[plugin] {} {} skipped ({reason}); continuing without its memory",
+        capability.source,
+        capability.operation
+    );
+}
 
 fn pack_identifier(value: &str) -> bool {
     !value.is_empty()
@@ -553,6 +587,29 @@ fn render_packs(packs: &[Pack]) -> String {
     rendered
 }
 
+/// Rendered packs plus one compact host-authored line naming every block the
+/// budget or frame bound omitted. Ids are validated identifiers, so the notice
+/// cannot smuggle content, and nothing is dropped silently.
+fn render_packs_with_omitted(packs: &[Pack], omitted: &[Pack]) -> String {
+    let mut rendered = render_packs(packs);
+    if omitted.is_empty() || packs.is_empty() {
+        return rendered;
+    }
+    let ids = omitted
+        .iter()
+        .map(|pack| pack.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let notice = format!(
+        "\n- [host] {} memory block(s) omitted by the context budget: {ids}",
+        omitted.len()
+    );
+    if let Some(index) = rendered.rfind("\n</plugin-context>") {
+        rendered.insert_str(index, &notice);
+    }
+    rendered
+}
+
 pub(super) struct CapabilityWorker {
     pub worker: Arc<PluginWorker>,
     pub operation: &'static str,
@@ -565,7 +622,7 @@ pub(super) struct CapabilityWorker {
 fn last_user_task(messages: &[Message]) -> Option<(String, usize, String)> {
     let index = messages
         .iter()
-        .rposition(|message| message.role == "user")?;
+        .rposition(crate::task_control::is_actual_user_message)?;
     let content = messages[index].content.as_deref().unwrap_or("").trim();
     if content.is_empty() {
         return None;
@@ -574,19 +631,21 @@ fn last_user_task(messages: &[Message]) -> Option<(String, usize, String)> {
     Some((intent, index, pack_digest(&["user", content])))
 }
 
-/// Append host packs to the last user message of the projection only.
-fn with_packs(messages: &[Message], packs: &[Pack]) -> Vec<Message> {
+/// Append rendered host packs to the last actual user message of the
+/// projection only. A host control note is transport, not the user turn, so a
+/// projection without a real user message gets no pack at all.
+fn with_packs(messages: &[Message], rendered: &str) -> Option<Vec<Message>> {
     let mut view = messages.to_vec();
-    let rendered = render_packs(packs);
-    if let Some(message) = view.iter_mut().rev().find(|message| message.role == "user") {
-        message.content = Some(match message.content.as_deref() {
-            Some(existing) if !existing.trim().is_empty() => {
-                format!("{existing}\n\n{rendered}")
-            }
-            _ => rendered,
-        });
-    }
-    view
+    let message = view
+        .iter_mut()
+        .rfind(|message| crate::task_control::is_actual_user_message(message))?;
+    message.content = Some(match message.content.as_deref() {
+        Some(existing) if !existing.trim().is_empty() => {
+            format!("{existing}\n\n{rendered}")
+        }
+        _ => rendered.to_owned(),
+    });
+    Some(view)
 }
 
 fn recent_users(messages: &[Message]) -> Vec<String> {
@@ -595,7 +654,7 @@ fn recent_users(messages: &[Message]) -> Vec<String> {
     for message in messages
         .iter()
         .rev()
-        .filter(|message| message.role == "user")
+        .filter(|message| crate::task_control::is_actual_user_message(message))
     {
         if recent.len() >= SUMMARY_MAX_USERS {
             break;
@@ -615,18 +674,26 @@ fn recent_users(messages: &[Message]) -> Vec<String> {
     recent
 }
 
+/// One recall answer for a stable task boundary: the admitted packs and the
+/// blocks the host had to omit.
+#[derive(Clone, Default)]
+struct Recalled {
+    packs: Vec<Pack>,
+    omitted: Vec<Pack>,
+}
+
 #[derive(Default)]
 struct PackCache {
-    entries: HashMap<(PathBuf, String), Vec<Pack>>,
+    entries: HashMap<(PathBuf, String), Recalled>,
     order: VecDeque<(PathBuf, String)>,
 }
 
 impl PackCache {
-    fn get(&self, key: &(PathBuf, String)) -> Option<Vec<Pack>> {
+    fn get(&self, key: &(PathBuf, String)) -> Option<Recalled> {
         self.entries.get(key).cloned()
     }
 
-    fn remember(&mut self, key: (PathBuf, String), packs: Vec<Pack>) {
+    fn remember(&mut self, key: (PathBuf, String), packs: Recalled) {
         if self.entries.insert(key.clone(), packs).is_none() {
             self.order.push_back(key);
         }
@@ -720,86 +787,144 @@ impl PluginModelHooks {
         self.budget.validate_final_request(&planned, tools)
     }
 
+    /// Memory budget for one request: the plugin's own `context_tokens`
+    /// setting (default 1024), clamped only to real model input capacity.
+    fn pack_budget_tokens(&self) -> usize {
+        let configured = self
+            .context_workers
+            .iter()
+            .filter_map(|capability| {
+                capability
+                    .worker
+                    .settings
+                    .get("context_tokens")
+                    .and_then(Value::as_u64)
+            })
+            .max();
+        pack_budget_tokens(configured, self.budget.available_input())
+    }
+
     /// Ask each `request_context` plugin once per (archive, boundary digest).
     /// Timeouts, errors and malformed answers mean "no memory", never a failed
-    /// model request, and an empty answer is cached too.
-    async fn request_packs(&self, messages: &[Message]) -> Vec<Pack> {
+    /// model request. A degraded answer is never cached as an empty success, so
+    /// a transient failure cannot silence memory for the rest of the task.
+    async fn request_packs(&self, messages: &[Message]) -> Recalled {
         let (session_id, archive) = self.session_fields();
         let Some(archive) = archive else {
-            return Vec::new();
+            return Recalled::default();
         };
         let Some((intent, index, digest)) = last_user_task(messages) else {
-            return Vec::new();
+            return Recalled::default();
         };
         let key = (archive.clone(), format!("{index}:{digest}"));
         if let Some(cached) = self.packs.lock().ok().and_then(|cache| cache.get(&key)) {
             return cached;
         }
-        let max_tokens = (self.budget.available_input() / 100).clamp(1, PACK_MAX_TOKENS);
+        let max_tokens = self.pack_budget_tokens();
         let project = self.project_fields();
         let session = json!({"id": session_id, "archive": archive.to_string_lossy()});
-        let mut packs: Vec<Pack> = Vec::new();
-        let mut used = 0usize;
+        let mut recalled = Recalled::default();
+        let mut degraded = false;
         for capability in &self.context_workers {
-            if packs.len() >= PACK_MAX_BLOCKS {
-                break;
-            }
             let request = json!({
                 "type": capability.operation, "name": capability.operation,
                 "arguments": {
                     "intent": intent,
                     "budget": {
+                        // Advisory for the plugin: the host below is the sole
+                        // spending authority and admits whole blocks only.
                         "max_tokens": max_tokens,
-                        "max_bytes": max_tokens.saturating_mul(3),
+                        "max_bytes": PACK_BUDGET_BYTES,
                     },
                     "project": project,
                     "session": session,
                 }
             });
-            let Ok(reply) = capability
+            let reply = match capability
                 .worker
                 .invoke_async_timeout(request, super::PLUGIN_MEMORY_CALL_TIMEOUT)
                 .await
-            else {
-                continue;
+            {
+                Ok(reply) => reply,
+                Err(_) => {
+                    degraded = true;
+                    log_recall_failure(capability, "timeout or transport error");
+                    continue;
+                }
             };
             if reply.is_error {
+                degraded = true;
+                log_recall_failure(capability, "plugin error reply");
                 continue;
             }
             let Ok(answer) = serde_json::from_str::<Value>(&reply.content) else {
+                degraded = true;
+                log_recall_failure(capability, "reply is not JSON");
                 continue;
             };
             let Some(blocks) = answer.get("blocks").and_then(Value::as_array) else {
+                degraded = true;
+                log_recall_failure(capability, "reply has no blocks array");
                 continue;
             };
             for block in blocks {
-                if packs.len() >= PACK_MAX_BLOCKS {
+                if recalled.packs.len() >= PACK_MAX_BLOCKS {
+                    crate::runtime_log!(
+                        "[plugin] {} {} block limit ({PACK_MAX_BLOCKS}) reached; later blocks ignored",
+                        capability.source,
+                        capability.operation
+                    );
                     break;
                 }
                 let Some(pack) = pack_block(block, &capability.source) else {
+                    // Malformed or oversized candidates are dropped whole and
+                    // never stop a later valid one from being tried.
+                    crate::runtime_log!(
+                        "[plugin] {} dropped a malformed or oversized memory block",
+                        capability.source
+                    );
                     continue;
                 };
-                if packs
+                if recalled
+                    .packs
                     .iter()
+                    .chain(recalled.omitted.iter())
                     .any(|known| known.source == pack.source && known.id == pack.id)
                 {
                     continue;
                 }
-                // Whole entries only: never split a block to fit the budget.
-                let cost = crate::token_estimate::bytes_to_tokens(
-                    render_packs(std::slice::from_ref(&pack)).len(),
-                );
-                if used.saturating_add(cost) > max_tokens {
-                    break;
+                // Whole entries only: one shared budget across every provider,
+                // measured on the rendered block. A block that no longer fits is
+                // omitted instead of stopping the loop, so a later smaller rule
+                // still gets a chance.
+                recalled.packs.push(pack);
+                if crate::token_estimate::content_tokens(render_packs(&recalled.packs).as_bytes())
+                    > max_tokens
+                {
+                    if let Some(omitted) = recalled.packs.pop() {
+                        recalled.omitted.push(omitted);
+                    }
                 }
-                used = used.saturating_add(cost);
-                packs.push(pack);
             }
         }
-        if let Ok(mut cache) = self.packs.lock() {
-            cache.remember(key, packs.clone());
+        if !recalled.omitted.is_empty() {
+            crate::runtime_log!(
+                "[plugin] memory budget {max_tokens} omitted {} block(s): {}",
+                recalled.omitted.len(),
+                recalled
+                    .omitted
+                    .iter()
+                    .map(|pack| pack.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
         }
-        packs
+        if !degraded {
+            if let Ok(mut cache) = self.packs.lock() {
+                cache.remember(key, recalled.clone());
+            }
+        }
+        recalled
     }
 
     /// Best-effort completion notice. The plugin owns idempotency; a slow or
@@ -844,13 +969,13 @@ impl PluginModelHooks {
         &self,
         messages: &'a [Message],
         tools: &'a [Value],
-    ) -> Result<(Vec<Message>, Cow<'a, [Value]>)> {
+    ) -> Result<(Cow<'a, [Message]>, Cow<'a, [Value]>)> {
         // Model request Hooks operate on ephemeral provider input, never the
-        // durable transcript or ToolRegistry. No extra history copies when a
-        // Hook leaves the request unchanged.
+        // durable transcript or ToolRegistry. The unchanged request stays
+        // borrowed, so a context-only path pays no extra history copy.
         self.usage_matches_projection
             .store(false, Ordering::Relaxed);
-        let mut view = messages.to_vec();
+        let mut view: Cow<'a, [Message]> = Cow::Borrowed(messages);
         let mut schemas: Cow<'_, [Value]> = Cow::Borrowed(tools);
         // Only a V1 request rewrite makes provider-reported usage a poor
         // calibration source; a host memory pack keeps the existing contract.
@@ -861,7 +986,7 @@ impl PluginModelHooks {
                 .invoke_async(json!({
                     "type":"hook", "name":"before_model_request",
                     "session_id":session_id,"archive":archive,
-                    "arguments":{"messages":view,"tools":schemas.as_ref()}
+                    "arguments":{"messages":view.as_ref(),"tools":schemas.as_ref()}
                 }))
                 .await?;
             if reply.is_error {
@@ -873,8 +998,10 @@ impl PluginModelHooks {
                 .as_object_mut()
                 .context("model request hook must return an object")?;
             if let Some(messages) = fields.remove("messages") {
-                view = serde_json::from_value(messages)
-                    .context("invalid replacement model messages")?;
+                view = Cow::Owned(
+                    serde_json::from_value(messages)
+                        .context("invalid replacement model messages")?,
+                );
                 rewritten = true;
             }
             if let Some(tools) = fields.remove("tools") {
@@ -884,22 +1011,29 @@ impl PluginModelHooks {
                 rewritten = true;
             }
         }
-        let packs = self.request_packs(messages).await;
-        if !packs.is_empty() {
-            let packed = with_packs(&view, &packs);
-            match self.validate_view(&packed, schemas.as_ref()) {
-                Ok(_) => {
-                    view = packed;
-                }
+        let recalled = self.request_packs(messages).await;
+        let packed = if recalled.packs.is_empty() {
+            None
+        } else {
+            with_packs(
+                view.as_ref(),
+                &render_packs_with_omitted(&recalled.packs, &recalled.omitted),
+            )
+        };
+        match packed {
+            Some(packed) => match self.validate_view(&packed, schemas.as_ref()) {
+                Ok(_) => view = Cow::Owned(packed),
                 // A pack that no longer fits must not fail the task: drop it
                 // and retry the final validation exactly once.
                 Err(_) => {
-                    self.validate_view(&view, schemas.as_ref())?;
+                    self.validate_view(view.as_ref(), schemas.as_ref())?;
                 }
-            }
-        } else if rewritten {
+            },
             // Rewritten requests cannot reuse the Agent's calibrated budget.
-            self.validate_view(&view, schemas.as_ref())?;
+            None if rewritten => {
+                self.validate_view(view.as_ref(), schemas.as_ref())?;
+            }
+            None => {}
         }
         self.usage_matches_projection
             .store(!rewritten, Ordering::Relaxed);
@@ -974,42 +1108,7 @@ impl ModelBackend for PluginModelHooks {
             let (view, schemas) = self.projection(messages, tools).await?;
             let result = self
                 .inner
-                .complete(&view, schemas.as_ref(), on_text)
-                .await?;
-            Ok(result)
-        })
-    }
-
-    fn complete_with_reasoning<'a>(
-        &'a self,
-        messages: &'a [Message],
-        tools: &'a [Value],
-        on_text: &'a mut (dyn FnMut(&str) + Send),
-        on_reasoning: &'a mut (dyn FnMut(&str) + Send),
-    ) -> StreamFuture<'a, Completion> {
-        Box::pin(async move {
-            let (view, schemas) = self.projection(messages, tools).await?;
-            let result = self
-                .inner
-                .complete_with_reasoning(&view, schemas.as_ref(), on_text, on_reasoning)
-                .await?;
-            Ok(result)
-        })
-    }
-
-    fn complete_with_task_images<'a>(
-        &'a self,
-        messages: &'a [Message],
-        tools: &'a [Value],
-        images: &'a TaskImageCache,
-        on_text: &'a mut (dyn FnMut(&str) + Send),
-        on_reasoning: &'a mut (dyn FnMut(&str) + Send),
-    ) -> StreamFuture<'a, Completion> {
-        Box::pin(async move {
-            let (view, schemas) = self.projection(messages, tools).await?;
-            let result = self
-                .inner
-                .complete_with_task_images(&view, schemas.as_ref(), images, on_text, on_reasoning)
+                .complete(view.as_ref(), schemas.as_ref(), on_text)
                 .await?;
             Ok(result)
         })
@@ -1028,7 +1127,7 @@ impl ModelBackend for PluginModelHooks {
             let (view, schemas) = self.projection(messages, tools).await?;
             self.inner
                 .complete_with_activity(
-                    &view,
+                    view.as_ref(),
                     schemas.as_ref(),
                     images,
                     on_text,
@@ -1129,5 +1228,87 @@ mod tests {
             &"x".repeat(MAX_STREAM_TEXT_BYTES - 1),
             "yy"
         ));
+    }
+    #[test]
+    fn the_byte_budget_is_the_contract_floor() {
+        assert_eq!(
+            PACK_BUDGET_BYTES, 8192,
+            "the V2 contract promises 8192 bytes"
+        );
+    }
+
+    fn control_note(text: &str) -> Message {
+        let mut note = Message::new("user", text);
+        note.provider_items = Some(vec![json!({
+            "type": crate::task_control::CONTROL_NOTE_ITEM_TYPE,
+            "source": "host"
+        })]);
+        note
+    }
+
+    #[test]
+    fn memory_budget_uses_the_default_and_clamps_only_to_model_capacity() {
+        // A small window must not scale the user's memory budget down to a
+        // fraction: available_input/100 used to make one Chinese rule vanish.
+        assert_eq!(pack_budget_tokens(None, 32_768), PACK_DEFAULT_TOKENS);
+        assert_eq!(pack_budget_tokens(None, 131_072), PACK_DEFAULT_TOKENS);
+        // A user setting is honored, only bounded by real input capacity.
+        assert_eq!(pack_budget_tokens(Some(4096), 131_072), 4096);
+        assert_eq!(pack_budget_tokens(Some(4096), 2048), 2048);
+        assert_eq!(pack_budget_tokens(Some(0), 131_072), 1);
+    }
+
+    #[test]
+    fn a_host_control_reference_is_never_the_recall_boundary_or_the_user_turn() {
+        let history = vec![
+            Message::new("system", "system"),
+            Message::new("user", "把答案翻译成中文"),
+            Message::new("assistant", "ok"),
+            control_note("[任务控制参考] 目标 memory · 状态 running"),
+        ];
+        let (intent, index, _) = last_user_task(&history).expect("real user turn");
+        assert_eq!(intent, "把答案翻译成中文");
+        assert_eq!(index, 1, "the boundary stays on the human message");
+        let packed = with_packs(&history, "<plugin-context/>").expect("user turn");
+        assert_eq!(
+            packed[1].content.as_deref(),
+            Some("把答案翻译成中文\n\n<plugin-context/>")
+        );
+        assert_eq!(
+            packed[3].content.as_deref(),
+            Some("[任务控制参考] 目标 memory · 状态 running"),
+            "a host note must not receive the pack"
+        );
+        assert_eq!(recent_users(&history), vec!["把答案翻译成中文".to_owned()]);
+        assert!(
+            with_packs(&history[..1], "<plugin-context/>").is_none(),
+            "a projection without a real user message gets no pack"
+        );
+    }
+
+    #[test]
+    fn a_whole_4000_character_record_is_admitted_and_budget_omissions_are_named() {
+        let full = "规".repeat(4000);
+        let pack = pack_block(
+            &json!({"id":"rule-cn","kind":"preference","text":full}),
+            "memory",
+        )
+        .expect("a full 4000-character record is admitted whole");
+        assert_eq!(pack.text.chars().count(), 4000);
+        assert!(pack_block(
+            &json!({"id":"too-big","kind":"preference","text":"x".repeat(4001)}),
+            "memory"
+        )
+        .is_none());
+        let omitted = pack_block(
+            &json!({"id":"rule-2","kind":"decision","text":"second"}),
+            "memory",
+        )
+        .expect("valid block");
+        let rendered = render_packs_with_omitted(std::slice::from_ref(&pack), &[omitted]);
+        assert!(rendered.contains("1 memory block(s) omitted"));
+        assert!(rendered.contains("rule-2"));
+        assert!(rendered.ends_with("\n</plugin-context>"));
+        assert!(!render_packs_with_omitted(&[pack], &[]).contains("omitted"));
     }
 }

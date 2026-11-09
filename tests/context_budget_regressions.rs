@@ -132,8 +132,25 @@ impl ContextCommit for Reject {
     }
 }
 
+/// Mirrors `kroma::token_estimate`: ASCII at 3.5 bytes per token, one token per
+/// CJK character, one per other non-ASCII character, plus the fixed request
+/// overhead. Kept here as a canary for budget accounting, not as a tokenizer.
 fn estimate(messages: &[Message]) -> usize {
-    serde_json::to_vec(messages).unwrap().len().div_ceil(3) + 256
+    let text = serde_json::to_string(messages).unwrap();
+    let (mut ascii, mut cjk, mut other) = (0usize, 0usize, 0usize);
+    for character in text.chars() {
+        match character as u32 {
+            code if code < 0x80 => ascii += 1,
+            0x3040..=0x30ff
+            | 0x3400..=0x4dbf
+            | 0x4e00..=0x9fff
+            | 0xf900..=0xfaff
+            | 0xff00..=0xffef
+            | 0x20000..=0x3ffff => cjk += 1,
+            _ => other += 1,
+        }
+    }
+    ascii.saturating_mul(2).div_ceil(7) + cjk.saturating_mul(13).div_ceil(10) + other + 256
 }
 fn turns() -> Vec<Message> {
     let mut history = vec![Message::new("system", "system")];
@@ -194,13 +211,26 @@ async fn escaped_prompt_growth_reaches_compaction_before_the_final_guard() -> Re
     for _ in 0..4 {
         agent.run(&"x".repeat(2_100), &mut |_| {}).await?;
     }
-    // Text length grows by 4000 chars, JSON escaping grows by ~8000 bytes.
-    let prompt = PromptComposer::default().with_extra("\"".repeat(4_000))?;
     let mut projected = agent.messages().to_vec();
     projected.push(Message::new("user", "continue"));
-    let planned = estimate(&projected) + prompt.extra_estimated_tokens(&projected[0]) + 1;
-    prompt.apply(&mut projected);
-    let escaped = estimate(&projected) + 1;
+    // Find an escaping-heavy fixture within the original budget window even
+    // when built-in guidance grows: text fits, escaped wire data needs compaction.
+    let (prompt, planned, escaped) = (1_000..8_192)
+        .step_by(16)
+        .find_map(|count| {
+            let prompt = PromptComposer::default()
+                .with_extra('"'.to_string().repeat(count))
+                .ok()?;
+            let planned = estimate(&projected) + prompt.extra_estimated_tokens(&projected[0]) + 1;
+            let mut actual = projected.clone();
+            prompt.apply(&mut actual);
+            let escaped = estimate(&actual) + 1;
+            (planned < budget.soft_limit()
+                && escaped > budget.hard_limit()
+                && escaped < budget.available_input())
+            .then_some((prompt, planned, escaped))
+        })
+        .expect("an escaping-heavy fixture must fit the regression budget window");
     eprintln!(
         "planned={planned} soft={} escaped={escaped} hard={}",
         budget.soft_limit(),

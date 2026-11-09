@@ -1,5 +1,16 @@
 # Benchmark and experiment archive
 
+**Reproducibility.** Evidence for these comparisons was written to
+`D:/Kroma/experiments/...`, outside this repository (the repository root is
+`D:/Kroma/kroma`). Those directories — `trials/`, logs, `metadata.json`,
+`plan.json` and `summary.json` — are not committed, so a clone cannot recompute
+the numbers quoted below; only a fresh experiment can be generated, with the
+commands in each subdirectory README. The harnesses are standard-library Python
+3.12 invoked as `uv run --no-project --python 3.12 python ...`, and the Rust side
+uses this repository's own toolchain (`cargo build --locked`). No uv version is
+recorded. Treat every number here as a historical record, not a result this
+repository can re-derive.
+
 This directory contains Kroma experiments, benchmark harnesses, local probes and
 reports from different stages of development. Many depend on particular model
 endpoints, private configurations, platform tools or now-superseded code. Treat

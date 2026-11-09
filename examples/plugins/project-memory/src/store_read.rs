@@ -11,21 +11,24 @@
 //!
 //! The literal stage uses `instr`, so `%` and `_` are ordinary characters and
 //! LIKE wildcard escaping is unnecessary; quotes, `NEAR`, `*` and `-` are plain
-//! text. Its cost is bounded by the store's `MAX_ROWS` cap and it stops once
-//! the result limit is filled.
+//! text. It stops once the result limit is filled.
 //!
-//! Path hints on a memory are historical navigation data: neither `read` nor
-//! `search` touches the filesystem or treats a hint as an access grant.
+//! Reads never take a write lock: the full-text index is verified when the
+//! store is opened, and review evidence is measured on demand instead of being
+//! cached in a table. Path hints on a memory are historical navigation data:
+//! neither `read` nor `search` touches the filesystem or treats a hint as an
+//! access grant.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use anyhow::{bail, Result};
-use rusqlite::{params, OptionalExtension, Row};
+use rusqlite::{params, Row};
 
-use crate::model::{validate_paths, Memory, SearchHit, Settings, Stats};
+use crate::model::{validate_paths, Memory, SearchHit, Settings, Stats, MAX_TEXT_CHARS};
 use crate::store::{
-    load_memory, memory_from_row, now_ts, read_settings, Store, COLUMNS, MAX_ROWS, STATE_ACCEPTED,
-    STATE_CANDIDATE, STATE_FORGOTTEN, STATE_PENDING, STATE_PURGED,
+    load_memory, memory_from_row, now_ts, read_settings, review_is_stale, Store, COLUMNS,
+    STATE_ACCEPTED, STATE_CANDIDATE, STATE_FORGOTTEN, STATE_PENDING, STATE_PURGED,
 };
 
 /// Largest batch `read` will accept from the model.
@@ -33,7 +36,9 @@ const MAX_READ_IDS: usize = 8;
 const MAX_SEARCH_HITS: usize = 20;
 const MAX_LIST_LIMIT: usize = 20;
 const MAX_RECALL: usize = 6;
-const MAX_QUERY_CHARS: usize = 256;
+/// One bound for every query string the store accepts, matching the host's own
+/// command and tool limits.
+const MAX_QUERY_CHARS: usize = 512;
 const MAX_QUERY_TOKENS: usize = 8;
 const MAX_ID_CHARS: usize = 128;
 const MAX_SUMMARY_CHARS: usize = 160;
@@ -41,48 +46,21 @@ const MAX_SUMMARY_CHARS: usize = 160;
 const MAX_PATH_FILTERS: usize = 8;
 
 /// ?1 query, ?2 state, ?3 path-filter flag, ?4..?11 padded hints, ?12 limit,
-/// ?13 now, ?14 this worktree.
+/// ?13 now.
 /// Padding uses the empty string, which `validate_paths` never produces, so
 /// unused slots cannot match a stored hint.
 const ACTIVE_ROW: &str = "(m.expires_at IS NULL OR m.expires_at > ?13)";
 
-/// Review evidence this worktree can no longer verify stays out of recall, but
-/// a sibling worktree keeps its own verdict for the same shared memory.
-const STALE_FILTER: &str = "AND NOT EXISTS (SELECT 1 FROM memory_stale s \
-     WHERE s.memory_id = m.id AND s.root = ?14)";
-
 const PATH_FILTER: &str = "AND (?3 = 0 OR EXISTS (SELECT 1 FROM json_each(m.paths) hp \
      WHERE hp.value IN (?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)))";
 
-const FTS_SCHEMA: &str = r#"
-CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(text, tokenize='unicode61');
-CREATE TRIGGER IF NOT EXISTS memories_fts_insert AFTER INSERT ON memories
-WHEN new.state = 'accepted' BEGIN
-    INSERT INTO memories_fts(rowid, text) VALUES (new.rowid, new.text);
-END;
-CREATE TRIGGER IF NOT EXISTS memories_fts_update AFTER UPDATE ON memories BEGIN
-    DELETE FROM memories_fts WHERE rowid = old.rowid;
-    INSERT INTO memories_fts(rowid, text) SELECT new.rowid, new.text WHERE new.state = 'accepted';
-END;
-CREATE TRIGGER IF NOT EXISTS memories_fts_delete AFTER DELETE ON memories BEGIN
-    DELETE FROM memories_fts WHERE rowid = old.rowid;
-END;
-"#;
-
 impl Store {
     pub fn is_core(&self, id: &str) -> Result<bool> {
-        let present: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT 1 FROM core_memories WHERE memory_id=?1",
-                params![id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(present.is_some())
+        crate::store::is_core_row(&self.conn, id)
     }
-    /// Only explicit, user-anchored core rules bypass task-keyword matching.
-    /// Review notes and general memories never enter this always-on pack.
+
+    /// Only explicit, user-pinned rules bypass task-keyword matching. Review
+    /// notes and general memories never enter this always-on pack.
     pub fn core_memories(&self) -> Result<Vec<Memory>> {
         if !read_settings(&self.conn)?.use_enabled {
             return Ok(Vec::new());
@@ -90,7 +68,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT m.id FROM memories m JOIN core_memories c ON m.id=c.memory_id
              WHERE m.state=?1 AND (m.expires_at IS NULL OR m.expires_at>?2)
-             ORDER BY m.created_at ASC LIMIT 4",
+             ORDER BY m.created_at ASC",
         )?;
         let ids = stmt
             .query_map(params![STATE_ACCEPTED, now_ts()], |r| r.get::<_, String>(0))?
@@ -103,8 +81,9 @@ impl Store {
         }
         Ok(result)
     }
-    /// Admin lookup: accepted and pending candidates are visible, tombstones
-    /// are not. This is the only read that may return a candidate body.
+
+    /// Admin lookup: active records and candidates are visible, tombstones are
+    /// not. This is the only read that may return a candidate body.
     pub fn get(&self, id: &str) -> Result<Memory> {
         let id = check_id(id)?;
         let memory =
@@ -117,12 +96,12 @@ impl Store {
         }
     }
 
-    /// Model-facing read of accepted memories only. Disabled `use` returns
-    /// nothing; an unknown, candidate or tombstoned id fails the whole batch so
-    /// a request can never be answered partially.
-    pub fn read(&self, ids: &[String]) -> Result<Vec<Memory>> {
+    /// Model-facing read. Every requested id that is still active is returned;
+    /// ids that are unknown, deleted or no longer active are reported instead of
+    /// failing the batch, so one stale citation cannot blank a whole answer.
+    pub fn read_partial(&self, ids: &[String]) -> Result<(Vec<Memory>, Vec<String>)> {
         if !read_settings(&self.conn)?.use_enabled {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         if ids.len() > MAX_READ_IDS {
             bail!("At most {MAX_READ_IDS} memories can be read in one request");
@@ -136,20 +115,20 @@ impl Store {
             }
         }
         let now = now_ts();
-        let stale = self.stale_ids()?;
         let mut memories = Vec::with_capacity(unique.len());
+        let mut missing = Vec::new();
         for id in unique {
-            let memory =
-                load_memory(&self.conn, id)?.ok_or_else(|| anyhow::anyhow!("Memory not found"))?;
-            if !is_active(&memory, now) {
-                bail!("Only active memories can be read");
+            match load_memory(&self.conn, id)? {
+                Some(memory) if is_active(&memory, now) => memories.push(memory),
+                _ => missing.push(id.to_string()),
             }
-            if stale.contains(&memory.id) {
-                bail!("Memory evidence changed in this worktree; it is no longer active");
-            }
-            memories.push(memory);
         }
-        Ok(memories)
+        Ok((memories, missing))
+    }
+
+    /// Model-facing read of the active memories in one batch.
+    pub fn read(&self, ids: &[String]) -> Result<Vec<Memory>> {
+        Ok(self.read_partial(ids)?.0)
     }
 
     /// Search accepted memories. Disabled `use` returns nothing. Path hints are
@@ -168,7 +147,6 @@ impl Store {
         }
         validate_paths(paths)?;
         let limit = limit.clamp(1, MAX_SEARCH_HITS);
-        self.ensure_index()?;
 
         let mut hits: Vec<SearchHit> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
@@ -192,6 +170,74 @@ impl Store {
         Ok(hits)
     }
 
+    /// Recall for `request_context`: only evidence relevant to this intent.
+    /// Never fill an otherwise empty pack with unrelated recent notes: those
+    /// would pollute every user task and invalidate the plugin's promise that a
+    /// non-match is byte-identical to no plugin.
+    ///
+    /// The whole bounded intent is scored, not its first words, and an intent
+    /// made only of instruction words recalls nothing.
+    pub fn recall(&self, intent: &str, limit: usize) -> Result<Vec<Memory>> {
+        if !read_settings(&self.conn)?.use_enabled {
+            return Ok(Vec::new());
+        }
+        let limit = limit.clamp(1, MAX_RECALL);
+        let now = now_ts();
+        let query: String = intent.chars().take(MAX_TEXT_CHARS).collect();
+        let mut memories: Vec<Memory> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for hit in self.fuzzy_hits(&query, &[], limit)? {
+            if memories.len() >= limit {
+                break;
+            }
+            if let Some(memory) = load_memory(&self.conn, &hit.id)? {
+                if is_active(&memory, now) && seen.insert(memory.id.clone()) {
+                    memories.push(memory);
+                }
+            }
+        }
+        Ok(memories)
+    }
+
+    /// Recall by the distinctive terms of the whole bounded query. The ASCII arm
+    /// is one ranked FTS query over every kept term (prefix-matched, so `merge`
+    /// still finds `merging`), the CJK arm is one literal scan over the query's
+    /// bigrams, and the merged result is truncated to a single global limit.
+    pub fn fuzzy_hits(
+        &self,
+        query: &str,
+        paths: &[String],
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        let limit = limit.clamp(1, MAX_SEARCH_HITS);
+        let terms = recall_terms(query);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        validate_paths(paths)?;
+        let mut hits: Vec<SearchHit> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        if let Some(expression) = prefix_expression(&terms.ascii) {
+            for hit in self.ranked_hits(&expression, paths, limit)? {
+                if seen.insert(hit.id.clone()) {
+                    hits.push(hit);
+                }
+            }
+        }
+        if hits.len() < limit {
+            for hit in self.bigram_hits(&terms.cjk, paths, limit)? {
+                if hits.len() >= limit {
+                    break;
+                }
+                if seen.insert(hit.id.clone()) {
+                    hits.push(hit);
+                }
+            }
+        }
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
     /// Admin listing of live states, newest first. Any other state (including
     /// tombstones) is rejected instead of being filtered after the limit.
     pub fn list(&self, state: &str, limit: usize, offset: usize) -> Result<Vec<Memory>> {
@@ -199,7 +245,7 @@ impl Store {
             bail!("List state must be accepted, candidate or pending");
         }
         let limit = limit.clamp(1, MAX_LIST_LIMIT) as i64;
-        let offset = offset.min(MAX_ROWS as usize) as i64;
+        let offset = i64::try_from(offset).unwrap_or(i64::MAX);
         let sql = format!(
             "SELECT {COLUMNS} FROM memories WHERE state=?1 \
              ORDER BY updated_at DESC, id DESC LIMIT ?2 OFFSET ?3"
@@ -207,98 +253,6 @@ impl Store {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![state, limit, offset], memory_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
-    /// Recall for `request_context`: only evidence relevant to this intent.
-    /// Never fill an otherwise empty pack with unrelated recent notes: those
-    /// would pollute every user task and invalidate the zero-maintenance
-    /// plugin's promise that a non-match is byte-identical to no plugin.
-    pub fn recall(&self, intent: &str, limit: usize) -> Result<Vec<Memory>> {
-        if !read_settings(&self.conn)?.use_enabled {
-            return Ok(Vec::new());
-        }
-        let limit = limit.clamp(1, MAX_RECALL);
-        let now = now_ts();
-        let query: String = intent.chars().take(MAX_QUERY_CHARS).collect();
-        let mut memories: Vec<Memory> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        for hit in self.search(&query, &[], limit)? {
-            if let Some(memory) = load_memory(&self.conn, &hit.id)? {
-                if is_active(&memory, now) && seen.insert(memory.id.clone()) {
-                    memories.push(memory);
-                }
-            }
-        }
-        // A new task often contains surrounding words absent from the stored
-        // rule ("pnpm dependency" vs "use pnpm for packages"). Exact multi-
-        // token FTS requires *all* words. Retry distinctive single terms,
-        // never the unrelated latest-N fallback, and bound the work per task.
-        // Ignore generic instruction words that would recall nearly anything.
-        if memories.len() < limit {
-            let mut terms = Vec::new();
-            for word in query.split(|ch: char| !ch.is_alphanumeric()) {
-                let word = word.to_lowercase();
-                // Three-letter tooling tokens such as bun, npm, git and SQL
-                // can be decisive; do not discard them as generic noise.
-                if word.chars().count() < 3
-                    || matches!(
-                        word.as_str(),
-                        "the"
-                            | "and"
-                            | "for"
-                            | "not"
-                            | "use"
-                            | "are"
-                            | "was"
-                            | "how"
-                            | "can"
-                            | "now"
-                            | "this"
-                            | "that"
-                            | "with"
-                            | "from"
-                            | "have"
-                            | "using"
-                            | "please"
-                            | "make"
-                            | "change"
-                            | "configure"
-                            | "project"
-                            | "about"
-                            | "should"
-                            | "would"
-                            | "could"
-                    )
-                {
-                    continue;
-                }
-                if !terms.contains(&word) {
-                    terms.push(word);
-                }
-                if terms.len() == MAX_QUERY_TOKENS {
-                    break;
-                }
-            }
-            for term in terms {
-                for hit in self.search(&term, &[], limit)? {
-                    if memories.len() >= limit {
-                        break;
-                    }
-                    if seen.contains(&hit.id) {
-                        continue;
-                    }
-                    if let Some(memory) = load_memory(&self.conn, &hit.id)? {
-                        if is_active(&memory, now) && seen.insert(memory.id.clone()) {
-                            memories.push(memory);
-                        }
-                    }
-                }
-                if memories.len() >= limit {
-                    break;
-                }
-            }
-        }
-        Ok(memories)
     }
 
     pub fn settings(&self) -> Result<Settings> {
@@ -339,27 +293,19 @@ impl Store {
         })
     }
 
-    /// Create the FTS table, its triggers and the initial index. Idempotent, so
-    /// it is safe on every search and on a store written before the first one.
-    fn ensure_index(&self) -> Result<()> {
-        let existing: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memories_fts'",
-            [],
-            |row| row.get(0),
-        )?;
-        self.conn.execute_batch(FTS_SCHEMA)?;
-        if existing == 0 {
-            self.conn.execute(
-                "INSERT INTO memories_fts (rowid, text)
-                 SELECT m.rowid, m.text FROM memories m
-                  WHERE m.state = ?1
-                    AND (m.expires_at IS NULL OR m.expires_at > ?3)
-                    AND NOT EXISTS (SELECT 1 FROM memories_fts f WHERE f.rowid = m.rowid)
-                  ORDER BY m.rowid LIMIT ?2",
-                params![STATE_ACCEPTED, MAX_ROWS, now_ts()],
-            )?;
+    /// Whether this worktree can still vouch for a review note's evidence. The
+    /// verdict is computed from this worktree's recorded baselines on demand, so
+    /// no refresh pass is needed before a read, and a changed file only marks
+    /// the note as needing a re-check: it never hides the note from search, read
+    /// or recall.
+    pub fn is_stale(&self, id: &str) -> Result<bool> {
+        let Some(memory) = load_memory(&self.conn, id)? else {
+            return Ok(false);
+        };
+        if memory.state != STATE_ACCEPTED || memory.kind != "review" {
+            return Ok(false);
         }
-        Ok(())
+        review_is_stale(&self.conn, Path::new(&self.root), id)
     }
 
     fn ranked_hits(
@@ -376,7 +322,6 @@ impl Store {
                 AND m.state = ?2
                 AND {ACTIVE_ROW}
                 {PATH_FILTER}
-                {STALE_FILTER}
               ORDER BY bm25(memories_fts) ASC, m.updated_at DESC
               LIMIT ?12"
         );
@@ -391,11 +336,37 @@ impl Store {
                 AND {ACTIVE_ROW}
                 AND instr(lower(m.text), lower(?1)) > 0
                 {PATH_FILTER}
-                {STALE_FILTER}
               ORDER BY m.updated_at DESC
               LIMIT ?12"
         );
         self.collect_hits(&sql, query, paths, limit)
+    }
+
+    /// Literal hits for a set of CJK bigrams, best overlap first. One statement
+    /// covers the whole intent and stops at the row limit.
+    fn bigram_hits(
+        &self,
+        bigrams: &[String],
+        paths: &[String],
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        if bigrams.is_empty() {
+            return Ok(Vec::new());
+        }
+        let needles = serde_json::to_string(bigrams)?;
+        let sql = format!(
+            "SELECT m.id, m.kind, m.text, m.version, m.paths
+               FROM memories m
+              WHERE m.state = ?2
+                AND {ACTIVE_ROW}
+                AND (SELECT COUNT(*) FROM json_each(?1) t WHERE instr(m.text, t.value) > 0) > 0
+                {PATH_FILTER}
+              ORDER BY (SELECT COUNT(*) FROM json_each(?1) t
+                         WHERE instr(m.text, t.value) > 0) DESC,
+                       m.updated_at DESC
+              LIMIT ?12"
+        );
+        self.collect_hits(&sql, &needles, paths, limit)
     }
 
     fn collect_hits(
@@ -423,36 +394,14 @@ impl Store {
                 padded[7],
                 limit as i64,
                 now_ts(),
-                self.root,
             ],
             hit_from_row,
         )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
-
-    /// Review evidence that this worktree can no longer verify.
-    pub fn is_stale(&self, id: &str) -> Result<bool> {
-        let found: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT 1 FROM memory_stale WHERE memory_id=?1 AND root=?2",
-                params![id, self.root],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(found.is_some())
-    }
-
-    fn stale_ids(&self) -> Result<HashSet<String>> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT memory_id FROM memory_stale WHERE root=?1")?;
-        let rows = statement.query_map(params![self.root], |row| row.get::<_, String>(0))?;
-        Ok(rows.collect::<rusqlite::Result<HashSet<_>>>()?)
-    }
 }
 
-/// Active means accepted and not past its expiry.
+/// Active means accepted and not past a legacy expiry.
 fn is_active(memory: &Memory, now: i64) -> bool {
     memory.state == STATE_ACCEPTED && memory.expires_at.is_none_or(|at| at > now)
 }
@@ -472,6 +421,201 @@ fn padded_paths(paths: &[String]) -> [&str; MAX_PATH_FILTERS] {
     }
     padded
 }
+
+/// Distinctive terms of one bounded intent: ASCII words and CJK bigrams.
+/// Generic instruction words are dropped, because recalling on them would
+/// inject an unrelated rule into every task.
+struct RecallTerms {
+    ascii: Vec<String>,
+    cjk: Vec<String>,
+}
+
+fn recall_terms(query: &str) -> RecallTerms {
+    let mut words: Vec<String> = Vec::new();
+    let mut runs: Vec<Vec<char>> = Vec::new();
+    let mut word = String::new();
+    let mut run: Vec<char> = Vec::new();
+    let flush_word = |word: &mut String, out: &mut Vec<String>| {
+        if !word.is_empty() {
+            out.push(std::mem::take(word));
+        }
+    };
+    let flush_run = |run: &mut Vec<char>, out: &mut Vec<Vec<char>>| {
+        if !run.is_empty() {
+            out.push(std::mem::take(run));
+        }
+    };
+    for ch in query.chars() {
+        if is_cjk(ch) {
+            flush_word(&mut word, &mut words);
+            run.push(ch);
+        } else if ch.is_ascii_alphanumeric() {
+            flush_run(&mut run, &mut runs);
+            word.push(ch.to_ascii_lowercase());
+        } else {
+            flush_word(&mut word, &mut words);
+            flush_run(&mut run, &mut runs);
+        }
+    }
+    flush_word(&mut word, &mut words);
+    flush_run(&mut run, &mut runs);
+
+    // The whole bounded intent is scored, so every distinct term is kept. A
+    // rule that shares only a late or short word must still be found; bounding
+    // the list here would silently drop exactly those terms.
+    let mut ascii: Vec<String> = Vec::new();
+    for word in words {
+        if word.len() < 3 || GENERIC_TERMS.contains(&word.as_str()) {
+            continue;
+        }
+        if !ascii.iter().any(|known| known == &word) {
+            ascii.push(word);
+        }
+    }
+    let mut cjk: Vec<String> = Vec::new();
+    for run in runs {
+        for pair in run.windows(2) {
+            let bigram: String = pair.iter().collect();
+            if GENERIC_CJK.contains(&bigram.as_str()) {
+                continue;
+            }
+            if !cjk.iter().any(|known| known == &bigram) {
+                cjk.push(bigram);
+            }
+        }
+    }
+    RecallTerms { ascii, cjk }
+}
+
+impl RecallTerms {
+    fn is_empty(&self) -> bool {
+        self.ascii.is_empty() && self.cjk.is_empty()
+    }
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(ch as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF)
+}
+
+/// `term* OR ...` for ASCII tokens only, which FTS5 accepts as prefix queries
+/// without quoting. Each term also contributes its inflected stem, because a
+/// suffix moves the word past a plain prefix match: `merge` does not prefix
+/// `merging` (the `e` is dropped), so both sides supply a stemmed prefix.
+fn prefix_expression(terms: &[String]) -> Option<String> {
+    let mut out = String::new();
+    for term in terms {
+        for variant in prefix_variants(term) {
+            if !out.is_empty() {
+                out.push_str(" OR ");
+            }
+            out.push_str(&variant);
+            out.push('*');
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The term plus its common inflections trimmed to a shared stem, never shorter
+/// than four characters so a stem cannot match half the store.
+fn prefix_variants(term: &str) -> Vec<String> {
+    let mut out = vec![term.to_string()];
+    for suffix in ["ing", "ed", "es", "s", "e"] {
+        if let Some(base) = term.strip_suffix(suffix) {
+            if base.len() >= 4 && !out.iter().any(|known| known.as_str() == base) {
+                out.push(base.to_string());
+            }
+        }
+    }
+    out.retain(|variant| variant.chars().all(|ch| ch.is_ascii_alphanumeric()));
+    out
+}
+
+/// Words that describe the act of asking, not the subject of the rule.
+const GENERIC_TERMS: &[&str] = &[
+    "the",
+    "and",
+    "for",
+    "not",
+    "are",
+    "was",
+    "how",
+    "can",
+    "now",
+    "this",
+    "that",
+    "with",
+    "from",
+    "have",
+    "using",
+    "use",
+    "used",
+    "please",
+    "make",
+    "change",
+    "configure",
+    "project",
+    "about",
+    "should",
+    "would",
+    "could",
+    "does",
+    "did",
+    "also",
+    "then",
+    "than",
+    "into",
+    "just",
+    "like",
+    "only",
+    "some",
+    "very",
+    "when",
+    "what",
+    "where",
+    "which",
+    "while",
+    "your",
+    "ours",
+    "their",
+    "there",
+    "here",
+    "more",
+    "most",
+    "other",
+    "same",
+    "such",
+    "take",
+    "give",
+    "still",
+    "even",
+    "run",
+    "runs",
+    "test",
+    "tests",
+    "code",
+    "file",
+    "files",
+    "fix",
+    "fixes",
+    "build",
+    "error",
+    "errors",
+    "check",
+    "checks",
+    "add",
+    "remove",
+    "update",
+    "work",
+    "need",
+    "want",
+];
+
+/// Function-word bigrams; they appear in any sentence and prove nothing.
+const GENERIC_CJK: &[&str] = &[
+    "这个", "那个", "一下", "什么", "我们", "你们", "他们", "可以", "已经", "然后", "就是", "不是",
+    "这样", "那样", "时候", "东西", "怎么", "如何", "现在", "帮我", "给我", "一个", "还是", "如果",
+    "因为", "所以",
+];
 
 /// Build an FTS5 MATCH expression from alphanumeric tokens only. `None` when
 /// the query has no tokens, because FTS5 rejects an empty match expression.
@@ -617,14 +761,14 @@ mod tests {
     }
 
     #[test]
-    fn stats_counts_states_and_snapshots() {
+    fn stats_counts_states_and_history() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = open(dir.path(), "s1");
         let first = add(&mut store, "decision", "keep a version per edit", &[], true);
         add(
             &mut store,
             "reference",
-            "pending note about versions",
+            "queued note about versions",
             &[],
             false,
         );
@@ -657,7 +801,7 @@ mod tests {
             (stats.accepted, stats.candidates, stats.forgotten),
             (0, 1, 2)
         );
-        assert_eq!(stats.versions, 3, "purge wipes stored snapshots");
+        assert_eq!(stats.versions, 3, "purge wipes stored history");
 
         let settings = store.settings().unwrap();
         assert!(settings.use_enabled && settings.capture_enabled);
@@ -667,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn read_returns_accepted_memories_in_requested_order() {
+    fn read_returns_active_memories_in_requested_order() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = open(dir.path(), "s1");
         let first = add(
@@ -696,10 +840,11 @@ mod tests {
 
         let too_many: Vec<String> = (0..9).map(|n| format!("{n:032x}")).collect();
         assert!(store.read(&too_many).is_err());
+        assert!(store.read_partial(&too_many).is_err());
     }
 
     #[test]
-    fn read_fails_whole_batch_on_unknown_candidate_or_tombstone() {
+    fn read_returns_known_active_entries_and_reports_missing_ids() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = open(dir.path(), "s1");
         let accepted = add(
@@ -727,23 +872,40 @@ mod tests {
         store.forget(&forgotten.id).unwrap();
         store.purge(&purged.id).unwrap();
 
+        let (memories, missing) = store
+            .read_partial(&[
+                accepted.id.clone(),
+                candidate.id.clone(),
+                forgotten.id.clone(),
+                purged.id.clone(),
+                "0".repeat(32),
+            ])
+            .unwrap();
+        assert_eq!(hit_ids_memories(&memories), vec![accepted.id.clone()]);
+        assert_eq!(
+            missing,
+            vec![
+                candidate.id.clone(),
+                forgotten.id.clone(),
+                purged.id.clone(),
+                "0".repeat(32),
+            ]
+        );
+        // The same batch read without the missing set still answers in full.
         assert_eq!(
             store
-                .read(std::slice::from_ref(&accepted.id))
+                .read(&[accepted.id.clone(), purged.id.clone()])
                 .unwrap()
                 .len(),
             1
         );
-        for blocked in [&candidate.id, &forgotten.id, &purged.id] {
-            assert!(store.read(std::slice::from_ref(blocked)).is_err());
-            let mixed = store.read(&[accepted.id.clone(), blocked.clone()]);
-            assert!(
-                mixed.is_err(),
-                "one unavailable id must fail the whole read"
-            );
-        }
-        assert!(store.read(&["0".repeat(32)]).is_err());
+        // A malformed id is a request error, not a missing memory.
         assert!(store.read(&[String::new()]).is_err());
+        assert!(store.read(&["   ".to_string()]).is_err());
+    }
+
+    fn hit_ids_memories(memories: &[Memory]) -> Vec<String> {
+        memories.iter().map(|memory| memory.id.clone()).collect()
     }
 
     #[test]
@@ -801,6 +963,129 @@ mod tests {
     }
 
     #[test]
+    fn recall_finds_a_cjk_rule_from_a_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), "s1");
+        let rule = add(
+            &mut store,
+            "decision",
+            "提交前运行共享测试，失败则禁止合并",
+            &[],
+            true,
+        );
+        // The tokenizer cannot segment Chinese, so a sentence can only match
+        // through bigrams. This is the case that used to recall nothing.
+        let hits = store.recall("提交前要跑共享测试再合并", 6).unwrap();
+        assert_eq!(hits.len(), 1, "a Chinese sentence must recall the rule");
+        assert_eq!(hits[0].id, rule.id);
+        assert!(store.recall("这个功能怎么做", 6).unwrap().is_empty());
+    }
+
+    #[test]
+    fn recall_matches_word_forms_by_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), "s1");
+        let rule = add(
+            &mut store,
+            "decision",
+            "run the shared test before merging",
+            &[],
+            true,
+        );
+        let hits = store.recall("how does the merge work", 6).unwrap();
+        assert_eq!(hits.len(), 1, "merge must find merging");
+        assert_eq!(hits[0].id, rule.id);
+    }
+
+    #[test]
+    fn recall_ignores_instruction_words_that_would_match_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), "s1");
+        add(
+            &mut store,
+            "decision",
+            "run the shared test before merging",
+            &[],
+            true,
+        );
+        // Precision beats recall here: injecting an unrelated rule into every
+        // task is worse than missing a convenience reminder.
+        assert!(store
+            .recall("please run the tests again", 6)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .fuzzy_hits("please run the tests again", &hints(&[]), 20)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn recall_scores_the_whole_bounded_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), "s1");
+        let rule = add(
+            &mut store,
+            "decision",
+            "the flibbertigibbet cache must persist across restarts",
+            &[],
+            true,
+        );
+        // The only word that identifies the rule sits far past the first 256
+        // characters, which the old prefix-only scan never looked at.
+        let mut intent = "lorem ipsum dolor sit amet ".repeat(40);
+        intent.push_str("and finally flibbertigibbet");
+        assert!(intent.chars().count() > 512);
+        let hits = store.recall(&intent, 6).unwrap();
+        assert_eq!(hits.len(), 1, "a late term must still recall the rule");
+        assert_eq!(hits[0].id, rule.id);
+    }
+
+    #[test]
+    fn fuzzy_recall_respects_one_global_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), "s1");
+        for index in 0..4 {
+            add(
+                &mut store,
+                "reference",
+                &format!("zebra record {index}"),
+                &[],
+                true,
+            );
+            add(
+                &mut store,
+                "reference",
+                &format!("quokka record {index}"),
+                &[],
+                true,
+            );
+        }
+        let hits = store.fuzzy_hits("zebra quokka", &hints(&[]), 3).unwrap();
+        assert_eq!(hits.len(), 3, "the merged result is capped once, globally");
+        assert_eq!(store.recall("zebra quokka", 2).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn recall_handles_an_intent_with_many_distinct_terms() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), "s1");
+        let rule = add(
+            &mut store,
+            "decision",
+            "quantumbadger expands every checkpoint manifest",
+            &[],
+            true,
+        );
+        let filler: Vec<String> = (0..40).map(|n| format!("placeholder{n}wording")).collect();
+        let intent = format!("{} quantumbadger", filler.join(" "));
+        assert!(intent.chars().count() > 512);
+        let hits = store.recall(&intent, 6).unwrap();
+        assert_eq!(hits.len(), 1, "one global query must cover every term");
+        assert_eq!(hits[0].id, rule.id);
+    }
+
+    #[test]
     fn search_sees_accepted_memories_only() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = open(dir.path(), "s1");
@@ -851,6 +1136,9 @@ mod tests {
         assert!(store
             .search(&"x".repeat(MAX_QUERY_CHARS + 1), &hints(&[]), 20)
             .is_err());
+        assert!(store
+            .search(&"x".repeat(MAX_QUERY_CHARS), &hints(&[]), 20)
+            .is_ok());
     }
 
     #[test]
@@ -1008,8 +1296,13 @@ mod tests {
         assert!(store.search("alpha", &hints(&["/abs/path"]), 5).is_err());
         let many: Vec<String> = (0..9).map(|n| format!("src/{n}.rs")).collect();
         assert!(store.search("alpha", &many, 5).is_err());
-
-        assert!(store.search("alpha", &hints(&[]), 100).unwrap().len() <= MAX_SEARCH_HITS);
+        assert!(
+            store
+                .search("alpha", &hints(&["src/lib.rs"]), 100)
+                .unwrap()
+                .len()
+                <= MAX_SEARCH_HITS
+        );
     }
 
     #[test]
@@ -1043,33 +1336,62 @@ mod tests {
     }
 
     #[test]
-    fn search_backfills_memories_written_before_the_index_existed() {
+    fn search_recovers_a_missing_or_desynced_index() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = open(dir.path(), "s1");
-        let first = add(&mut store, "decision", "prebuilt index note", &[], true);
-        add(&mut store, "pitfall", "prebuilt candidate note", &[], false);
-        assert_eq!(store.search("prebuilt", &hints(&[]), 20).unwrap().len(), 1);
+        let live = add(&mut store, "decision", "prebuilt index note", &[], true);
+        add(
+            &mut store,
+            "reference",
+            "queued index candidate",
+            &[],
+            false,
+        );
+        assert_eq!(
+            hit_ids(&store.search("prebuilt", &hints(&[]), 20).unwrap()),
+            vec![live.id.clone()]
+        );
 
+        // The index lost every row while its triggers survived.
+        store.conn.execute("DELETE FROM memories_fts", []).unwrap();
         drop(store);
         let mut reopened = open(dir.path(), "s1");
+        assert_eq!(
+            hit_ids(&reopened.search("prebuilt", &hints(&[]), 20).unwrap()),
+            vec![live.id.clone()],
+            "opening the store repairs the index"
+        );
         let later = add(&mut reopened, "decision", "indexed after reopen", &[], true);
         assert_eq!(
             hit_ids(&reopened.search("reopen", &hints(&[]), 20).unwrap()),
             vec![later.id.clone()]
         );
-        assert_eq!(
-            hit_ids(&reopened.search("prebuilt", &hints(&[]), 20).unwrap()),
-            vec![first.id.clone()]
-        );
 
+        // A destroyed table and its triggers are recreated from scratch.
+        reopened
+            .conn
+            .execute_batch(
+                "DROP TABLE memories_fts;
+                 DROP TRIGGER memories_fts_insert;
+                 DROP TRIGGER memories_fts_update;
+                 DROP TRIGGER memories_fts_delete;",
+            )
+            .unwrap();
+        drop(reopened);
         let mut again = open(dir.path(), "s1");
+        assert_eq!(again.search("prebuilt", &hints(&[]), 20).unwrap().len(), 1);
+        let fresh = add(&mut again, "pitfall", "recreated trigger note", &[], true);
+        assert_eq!(
+            hit_ids(&again.search("recreated", &hints(&[]), 20).unwrap()),
+            vec![fresh.id.clone()]
+        );
         let promoted = add(&mut again, "pitfall", "promoted later", &[], false);
         again.accept(&promoted.id).unwrap();
         assert_eq!(again.search("promoted", &hints(&[]), 20).unwrap().len(), 1);
     }
 
     #[test]
-    fn invalid_and_foreign_ids_are_rejected() {
+    fn invalid_and_foreign_ids_are_rejected_or_reported_missing() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = open(dir.path(), "s1");
         let mut other = open(dir.path(), "s2");
@@ -1078,14 +1400,25 @@ mod tests {
 
         assert_eq!(store.get(&local.id).unwrap().id, local.id);
         assert!(store.get(&foreign.id).is_err());
-        assert!(store.read(std::slice::from_ref(&foreign.id)).is_err());
+        assert!(store
+            .read(std::slice::from_ref(&foreign.id))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .read_partial(std::slice::from_ref(&foreign.id))
+                .unwrap()
+                .1,
+            vec![foreign.id.clone()]
+        );
         assert!(store.get("").is_err());
         assert!(store.get("   ").is_err());
         assert!(store.get(&"z".repeat(MAX_ID_CHARS + 1)).is_err());
-        assert!(store.read(&["not-an-id".to_string()]).is_err());
+        assert!(store.read(&["not-an-id".to_string()]).is_ok());
         assert_eq!(store.search("local", &hints(&[]), 20).unwrap().len(), 1);
         assert!(store.search("foreign", &hints(&[]), 20).unwrap().is_empty());
     }
+
     #[test]
     fn search_tracks_correction_and_forget() {
         let dir = tempfile::tempdir().unwrap();

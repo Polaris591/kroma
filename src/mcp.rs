@@ -44,103 +44,13 @@ const MAX_TRUST_LOCAL_IMPORTS: usize = 256;
 const MAX_MCP_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_MCP_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Tool calls may legitimately run for minutes, but they must not be the only
+/// MCP request without a deadline. `KROMA_MCP_CALL_SECS=0` removes it.
+const MCP_CALL_TIMEOUT: Duration = Duration::from_secs(600);
 const MCP_SEARCH_BUDGET: Duration = Duration::from_secs(30);
 const MCP_IDLE_REAP_INTERVAL: Duration = Duration::from_secs(60);
 const MCP_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const TRUST_PROJECT_ENV: &str = "KROMA_TRUST_PROJECT_MCP";
-const PROJECT_ENV_ALLOW: [&str; 12] = [
-    "HOME",
-    "USERPROFILE",
-    "PATH",
-    "TEMP",
-    "TMP",
-    "PWD",
-    "KROMA_WORKDIR",
-    "KROMA_PLUGIN_DIR",
-    "KROMA_CONFIG_FILE",
-    "XDG_CONFIG_HOME",
-    "LOCALAPPDATA",
-    "APPDATA",
-];
-const CHILD_ENV_ALLOW: [&str; 3] = ["KROMA_WORKDIR", "KROMA_PLUGIN_DIR", "KROMA_CONFIG_FILE"];
-const HOST_SECRET_ENV: [&str; 12] = [
-    "KROMA_API_KEY",
-    "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "EXA_API_KEY",
-    "BRAVE_SEARCH_API_KEY",
-    "TAVILY_API_KEY",
-    "PARALLEL_API_KEY",
-    "YDC_API_KEY",
-    "FIRECRAWL_API_KEY",
-];
-
-fn is_host_secret(name: &str) -> bool {
-    let upper = name.to_ascii_uppercase();
-    upper.starts_with("KROMA_")
-        || HOST_SECRET_ENV
-            .iter()
-            .any(|blocked| blocked.eq_ignore_ascii_case(&upper))
-        || upper.starts_with("AWS_")
-        || upper.starts_with("AZURE_")
-        || upper.starts_with("GCP_")
-        || upper.starts_with("GOOGLE_")
-        || upper.starts_with("GITHUB_")
-        || upper.starts_with("GH_")
-        || upper.starts_with("SSH_")
-        || upper.starts_with("DOCKER_")
-        || upper.starts_with("NPM_")
-        || upper.starts_with("CARGO_REGISTRY_")
-        || upper.starts_with("DATABASE_URL")
-        || upper.starts_with("REDIS_URL")
-        || upper.starts_with("MONGODB_URI")
-        || matches!(
-            upper.as_str(),
-            "PGPASSWORD" | "MYSQL_PWD" | "REDISCLI_AUTH" | "COOKIE"
-        )
-        || upper.ends_with("_KEY")
-        || upper.ends_with("_TOKEN")
-        || upper.ends_with("_SECRET")
-        || upper.ends_with("_PASSWORD")
-        || upper.ends_with("_PWD")
-        || upper.ends_with("_COOKIE")
-        || upper.ends_with("_CREDENTIALS")
-}
-
-fn is_child_secret(name: &str) -> bool {
-    let upper = name.to_ascii_uppercase();
-    if upper.starts_with("KROMA_") {
-        return !CHILD_ENV_ALLOW
-            .iter()
-            .any(|allowed| allowed.eq_ignore_ascii_case(&upper));
-    }
-    is_host_secret(name)
-}
-
-fn filter_child_environment(
-    process: &mut Command,
-    variables: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
-) {
-    for (key, _) in variables {
-        if is_child_secret(&key.to_string_lossy()) {
-            process.env_remove(key);
-        }
-    }
-}
-
-fn project_env_allowed(name: &str) -> bool {
-    if is_host_secret(name) {
-        return false;
-    }
-    let upper = name.to_ascii_uppercase();
-    upper.starts_with("MCP_")
-        || PROJECT_ENV_ALLOW
-            .iter()
-            .any(|allowed| allowed.eq_ignore_ascii_case(&upper))
-}
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
@@ -256,8 +166,12 @@ struct TrustCodeFiles {
 
 impl TrustCodeFiles {
     fn new(root: &Path) -> Self {
+        // Compare against a canonical root: on Windows `canonicalize` returns
+        // the `\?\` extended-length form, so an unnormalized root would make
+        // every real project file look like it resolves outside the project.
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         Self {
-            root: root.to_path_buf(),
+            root,
             files: BTreeMap::new(),
             bytes: 0,
             unscanned: Vec::new(),
@@ -269,6 +183,31 @@ impl TrustCodeFiles {
     /// `node_modules` file reached through an explicit `./` or `../` specifier.
     /// Unreferenced dependency directories are never walked, so a bare package
     /// import cannot pull the whole dependency tree into the approval hash.
+    /// Direct `command`/`args` entry points differ from import specifiers: a
+    /// bare name is a PATH lookup, but a *path* that cannot be resolved is an
+    /// approval for code nobody hashed. Those fail closed instead of silently
+    /// producing a fingerprint that later stops matching the real file.
+    fn include_entry_point(&mut self, raw: &str, candidate: &Path) -> Result<()> {
+        let separator = std::path::MAIN_SEPARATOR;
+        let path_like = raw.starts_with('.') || raw.contains(separator) || raw.contains('/');
+        match candidate.canonicalize() {
+            Ok(path) if path.starts_with(&self.root) && path.is_file() => self.include(&path),
+            // A system executable outside the project: the approval covers its
+            // path, because hashing a package-managed binary would invalidate
+            // every approval on a routine system update.
+            Ok(path) if Path::new(raw).is_absolute() && path.is_file() => Ok(()),
+            Ok(path) if path_like => bail!(
+                "project MCP entry point '{raw}' resolves outside the project: {}",
+                path.display()
+            ),
+            Ok(_) => Ok(()),
+            Err(_) if path_like => {
+                bail!("project MCP entry point '{raw}' does not exist; create it before approving")
+            }
+            Err(_) => Ok(()),
+        }
+    }
+
     fn include(&mut self, candidate: &Path) -> Result<()> {
         let Ok(path) = candidate.canonicalize() else {
             // A missing or unresolvable path cannot run, so nothing to hash.
@@ -429,13 +368,11 @@ fn project_working_directory(root: &Path, cwd: Option<&Path>) -> Result<PathBuf>
 
 /// Project MCP approval covers the config bytes and the project-local code that
 /// entry can execute. `command`/`args` are expanded exactly as
-/// `Connection::connect` expands a project entry (`allow_host_secrets = false`,
-/// so an unset or disallowed variable fails closed), resolved against the same
-/// working directory, and JavaScript/TypeScript entries also contribute the
-/// project-local modules they import. Without the expansion a
-/// `${MCP_REVIEW_ENTRY}` indirection would hide the checked-in entry from the
-/// approval hash, and without the import walk editing a required helper would
-/// keep the old approval valid.
+/// `Connection::connect` expands them, resolved against the same working
+/// directory, and JavaScript/TypeScript entries also contribute the
+/// project-local modules they import. Environment values are hashed as written:
+/// the user approved the configured text, not whatever secret it names, and an
+/// unset variable must not make the approval unreadable.
 fn project_trust_fingerprint(workdir: &Path, config_bytes: &[u8]) -> Result<String> {
     let root = workdir
         .canonicalize()
@@ -450,28 +387,19 @@ fn project_trust_fingerprint(workdir: &Path, config_bytes: &[u8]) -> Result<Stri
             };
             let base = project_working_directory(&root, server.cwd.as_deref())
                 .with_context(|| format!("project MCP server '{name}' working directory"))?;
-            // Project entries never expand host secrets, at approval or launch.
-            let command = expand_env(raw_command, false)
+            let command = expand_env(raw_command)
                 .with_context(|| format!("project MCP server '{name}' command"))?;
             push_trust_material(&mut material, name.as_bytes());
             push_trust_material(&mut material, command.as_bytes());
-            if server.env.keys().any(|key| is_host_secret(key)) {
-                bail!("project MCP config may not set host secret environment variables");
-            }
             for (key, value) in &server.env {
                 push_trust_material(&mut material, key.as_bytes());
-                push_trust_material(
-                    &mut material,
-                    expand_env(value, false)
-                        .with_context(|| {
-                            format!("project MCP server '{name}' environment value '{key}'")
-                        })?
-                        .as_bytes(),
-                );
+                // The raw text is what the user approved. Environment values are
+                // not expanded here, so a secret's contents are never hashed.
+                push_trust_material(&mut material, value.as_bytes());
             }
-            code.include(&base.join(&command))?;
+            code.include_entry_point(&command, &base.join(&command))?;
             for raw_arg in &server.args {
-                let arg = expand_env(raw_arg, false)
+                let arg = expand_env(raw_arg)
                     .with_context(|| format!("project MCP server '{name}' argument"))?;
                 push_trust_material(&mut material, arg.as_bytes());
                 if arg.is_empty() || arg.contains('\0') || arg.starts_with('-') {
@@ -483,7 +411,7 @@ fn project_trust_fingerprint(workdir: &Path, config_bytes: &[u8]) -> Result<Stri
                 } else {
                     base.join(candidate)
                 };
-                code.include(&candidate)?;
+                code.include_entry_point(&arg, &candidate)?;
             }
         }
     }
@@ -819,7 +747,7 @@ fn configured_servers_with(
     Ok((servers, warnings))
 }
 
-fn expand_env(raw: &str, allow_host_secrets: bool) -> Result<String> {
+fn expand_env(raw: &str) -> Result<String> {
     let mut output = String::new();
     let mut rest = raw;
     while let Some(start) = rest.find("${") {
@@ -831,16 +759,6 @@ fn expand_env(raw: &str, allow_host_secrets: bool) -> Result<String> {
         let name = &suffix[..end];
         if name.is_empty() {
             bail!("empty environment variable reference");
-        }
-        if !allow_host_secrets && is_host_secret(name) {
-            bail!(
-                "project MCP config may not expand host secret '{name}'; use ~/.kroma/mcp.json or an explicit trusted config"
-            );
-        }
-        if !allow_host_secrets && !project_env_allowed(name) {
-            bail!(
-                "project MCP config may only expand MCP_* or basic path variables, not '{name}'; use a literal value or ~/.kroma/mcp.json"
-            );
         }
         output.push_str(
             &env::var(name).with_context(|| format!("environment variable {name} is not set"))?,
@@ -892,13 +810,9 @@ impl Connection {
         }
         let transport = match (&config.command, &config.url) {
             (Some(command), None) => {
-                let mut process = Command::new(expand_env(command, !config.project)?);
+                let mut process = Command::new(expand_env(command)?);
                 for arg in &config.args {
-                    process.arg(expand_env(arg, !config.project)?);
-                }
-                filter_child_environment(&mut process, env::vars_os());
-                if config.project && config.env.keys().any(|key| is_host_secret(key)) {
-                    bail!("project MCP config may not set host secret environment variables");
+                    process.arg(expand_env(arg)?);
                 }
                 let cwd = if config.project {
                     let root = workdir
@@ -919,7 +833,7 @@ impl Connection {
                 };
                 process.current_dir(cwd);
                 for (key, value) in &config.env {
-                    process.env(key, expand_env(value, !config.project)?);
+                    process.env(key, expand_env(value)?);
                 }
                 // Third-party server logs are noisy and can contain secrets.
                 // Keep them out of Kroma's output unless explicitly requested.
@@ -962,7 +876,7 @@ impl Connection {
                 }
             }
             (None, Some(url)) => {
-                let url = expand_env(url, !config.project)?;
+                let url = expand_env(url)?;
                 let parsed = reqwest::Url::parse(&url).context("invalid MCP HTTP endpoint")?;
                 if !matches!(parsed.scheme(), "http" | "https") {
                     bail!("MCP URL must use HTTP or HTTPS");
@@ -971,7 +885,7 @@ impl Connection {
                 for (name, value) in &config.headers {
                     headers.insert(
                         HeaderName::from_bytes(name.as_bytes())?,
-                        HeaderValue::from_str(&expand_env(value, !config.project)?)?,
+                        HeaderValue::from_str(&expand_env(value)?)?,
                     );
                 }
                 let client = Client::builder()
@@ -1058,10 +972,15 @@ impl Connection {
     }
 
     async fn call_tool(&mut self, name: &str, args: Value) -> Result<Value> {
-        // Tool operations may legitimately run for minutes. Agent cancellation
-        // drops this future; the process guard then closes the stdio tree.
+        // Tool operations may legitimately run for minutes, so they get a
+        // generous deadline of their own. Agent cancellation still drops this
+        // future and the process guard closes the stdio tree.
         let result = self
-            .rpc_with_timeout("tools/call", json!({"name":name,"arguments":args}), None)
+            .rpc_with_timeout(
+                "tools/call",
+                json!({"name":name,"arguments":args}),
+                mcp_call_timeout(),
+            )
             .await?;
         ensure_complete(&result)?;
         if serde_json::to_vec(&result)?.len() > MAX_MCP_RESPONSE_BYTES {
@@ -1227,19 +1146,17 @@ impl Connection {
                             // Older MCP servers may ask for roots/sampling.
                             // Advertise neither; answer unsupported requests
                             // instead of hanging until the original RPC ends.
-                            if self.version != MODERN_VERSION {
-                                let response = if method == "ping" {
-                                    json!({"jsonrpc":"2.0","id":other,"result":{}})
-                                } else {
-                                    json!({"jsonrpc":"2.0","id":other,"error":{
-                                        "code":-32601,"message":"Method not supported by Kroma"
-                                    }})
-                                };
-                                let mut raw = serde_json::to_vec(&response)?;
-                                raw.push(b'\n');
-                                stdin.write_all(&raw).await?;
-                                stdin.flush().await?;
-                            }
+                            let response = if method == "ping" {
+                                json!({"jsonrpc":"2.0","id":other,"result":{}})
+                            } else {
+                                json!({"jsonrpc":"2.0","id":other,"error":{
+                                    "code":-32601,"message":"Method not supported by Kroma"
+                                }})
+                            };
+                            let mut raw = serde_json::to_vec(&response)?;
+                            raw.push(b'\n');
+                            stdin.write_all(&raw).await?;
+                            stdin.flush().await?;
                         }
                         // Ignore unrelated notifications/progress and stale
                         // responses to previously cancelled requests.
@@ -1298,6 +1215,23 @@ impl Connection {
             }
             Transport::Closed => bail!("MCP connection is closed"),
         }
+    }
+}
+
+/// Wall-clock deadline for `tools/call`. Unset uses `MCP_CALL_TIMEOUT`; an
+/// explicit `KROMA_MCP_CALL_SECS=0` disables it and leaves only the agent's own
+/// idle guard as a bound.
+fn mcp_call_timeout() -> Option<Duration> {
+    match std::env::var("KROMA_MCP_CALL_SECS") {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(0) => None,
+            Ok(secs) => Some(Duration::from_secs(secs.min(86_400))),
+            Err(_) => {
+                crate::runtime_log!("[mcp] ignoring invalid KROMA_MCP_CALL_SECS={raw:?}");
+                Some(MCP_CALL_TIMEOUT)
+            }
+        },
+        Err(_) => Some(MCP_CALL_TIMEOUT),
     }
 }
 
@@ -1688,6 +1622,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn project_entry_points_fail_closed_instead_of_hashing_nothing() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("kroma-mcp-trust-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("scripts"))?;
+        fs::write(root.join("scripts/server.js"), "console.log(1)")?;
+        let mut files = TrustCodeFiles::new(&root);
+        files.include_entry_point("scripts/server.js", &root.join("scripts/server.js"))?;
+        assert!(
+            files.files.keys().any(|path| path.ends_with("server.js")),
+            "a project entry point is part of the approval hash"
+        );
+        // A bare name is a PATH lookup, so it is not a project file.
+        files.include_entry_point("node", &root.join("node"))?;
+        let missing = files
+            .include_entry_point("./scripts/later.sh", &root.join("scripts/later.sh"))
+            .expect_err("a missing path entry point must not be approved");
+        assert!(format!("{missing:#}").contains("does not exist"));
+        let outside_name = format!("kroma-mcp-outside-{}.sh", std::process::id());
+        let outside = std::env::temp_dir().join(&outside_name);
+        fs::write(&outside, "echo hi")?;
+        let escaping = files
+            .include_entry_point(
+                &format!("../{outside_name}"),
+                &root.join("..").join(&outside_name),
+            )
+            .expect_err("an escaping entry point must not be approved");
+        assert!(format!("{escaping:#}").contains("outside the project"));
+        let _ = fs::remove_file(&outside);
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    #[test]
     fn image_tool_results_keep_file_reference_instead_of_base64() -> Result<()> {
         let root =
             std::env::temp_dir().join(format!("kroma-mcp-image-test-{}", std::process::id()));
@@ -1783,34 +1750,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn project_configs_cannot_expand_secrets_or_arbitrary_environment() {
-        let secret = expand_env("${AWS_SECRET_ACCESS_KEY}", false).unwrap_err();
-        assert!(secret.to_string().contains("host secret"), "{secret:#}");
-        let mcp_secret = expand_env("${MCP_API_TOKEN}", false).unwrap_err();
-        assert!(
-            mcp_secret.to_string().contains("host secret"),
-            "{mcp_secret:#}"
-        );
-        let arbitrary = expand_env("${SOME_UNLISTED_VARIABLE}", false).unwrap_err();
-        assert!(
-            arbitrary.to_string().contains("may only expand"),
-            "{arbitrary:#}"
-        );
-        // Trusted configs keep the existing escape hatch.
-        assert!(expand_env("${PATH}", true).is_ok());
-    }
-
-    #[test]
-    fn project_mcp_env_allowlist_is_narrow() {
-        assert!(project_env_allowed("MCP_SERVER_URL"));
-        assert!(project_env_allowed("PATH"));
-        assert!(project_env_allowed("home"));
-        assert!(!project_env_allowed("MCP_API_TOKEN"));
-        assert!(!project_env_allowed("AWS_PROFILE"));
-        assert!(!project_env_allowed("OPENAI_API_KEY"));
-        assert!(!project_env_allowed("UNRELATED"));
-    }
     fn scratch(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "kroma-mcp-{label}-{}-{}",
@@ -1836,20 +1775,6 @@ mod tests {
         assert!(oversized);
         assert_eq!(bytes.len(), 1025, "read only limit+1 bytes");
         let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn credential_shaped_environment_names_are_filtered() {
-        for name in [
-            "PGPASSWORD",
-            "MYSQL_PWD",
-            "SESSION_COOKIE",
-            "COOKIE",
-            "REDISCLI_AUTH",
-        ] {
-            assert!(is_host_secret(name), "{name}");
-        }
-        assert!(!is_host_secret("PATH"));
     }
 
     #[cfg(unix)]
@@ -1954,83 +1879,6 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(20), future)
             .await
             .context("mock MCP test exceeded its hard timeout")?
-    }
-
-    #[tokio::test]
-    async fn child_environment_filters_sensitive_kroma_names() -> Result<()> {
-        for name in [
-            "KROMA_API_KEY",
-            "KROMA_PROXY_TOKEN",
-            "KROMA_CUSTOM_KEY",
-            "KROMA_WEBHOOK_SECRET",
-            "KROMA_MCP_PASSWORD",
-            "UNKNOWN_TOKEN",
-            "CUSTOM_SECRET",
-        ] {
-            assert!(is_child_secret(name), "{name} must be filtered");
-        }
-        for name in [
-            "KROMA_WORKDIR",
-            "KROMA_PLUGIN_DIR",
-            "KROMA_CONFIG_FILE",
-            "PATH",
-        ] {
-            assert!(!is_child_secret(name), "{name} is an explicit non-secret");
-        }
-
-        #[cfg(unix)]
-        let mut command = Command::new("/bin/sh");
-        #[cfg(unix)]
-        command.args(["-c", "env"]);
-        #[cfg(windows)]
-        let mut command =
-            Command::new(std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()));
-        #[cfg(windows)]
-        command.args(["/C", "set"]);
-        command.env_clear();
-        let values = [
-            ("KROMA_PROXY_TOKEN", "proxy-secret"),
-            ("KROMA_CUSTOM_KEY", "custom-secret"),
-            ("KROMA_WEBHOOK_SECRET", "webhook-secret"),
-            ("KROMA_MCP_PASSWORD", "mcp-password"),
-            ("UNKNOWN_TOKEN", "unknown-secret"),
-            ("KROMA_WORKDIR", "safe-workdir"),
-            ("MCP_SAFE_VALUE", "safe-value"),
-        ];
-        for (key, value) in values {
-            command.env(key, value);
-        }
-        let fake: Vec<(std::ffi::OsString, std::ffi::OsString)> = values
-            .iter()
-            .map(|(key, value)| ((*key).into(), (*value).into()))
-            .collect();
-        filter_child_environment(&mut command, fake.clone());
-        // This mirrors the explicit global MCP config path: config.env is
-        // applied after inherited values were filtered.
-        command.env("KROMA_EXPLICIT_CONFIG", "explicit-allowed");
-        let output = with_test_timeout(async move {
-            command.output().await.context("spawning environment probe")
-        })
-        .await?;
-        assert!(output.status.success());
-        let text = String::from_utf8_lossy(&output.stdout);
-        for allowed in [
-            "KROMA_WORKDIR=safe-workdir",
-            "MCP_SAFE_VALUE=safe-value",
-            "KROMA_EXPLICIT_CONFIG=explicit-allowed",
-        ] {
-            assert!(text.contains(allowed), "missing {allowed}: {text}");
-        }
-        for secret in [
-            "KROMA_PROXY_TOKEN=proxy-secret",
-            "KROMA_CUSTOM_KEY=custom-secret",
-            "KROMA_WEBHOOK_SECRET=webhook-secret",
-            "KROMA_MCP_PASSWORD=mcp-password",
-            "UNKNOWN_TOKEN=unknown-secret",
-        ] {
-            assert!(!text.contains(secret), "leaked {secret}: {text}");
-        }
-        Ok(())
     }
 
     #[tokio::test]
@@ -2202,6 +2050,7 @@ mod tests {
                 workdir: &dir,
                 archive: &archive_a,
                 on_output: None,
+                ask: None,
             },
         ));
         // Let A enter the connection lock and send the request. The mock waits
@@ -2242,6 +2091,7 @@ mod tests {
                         workdir: &waiting_dir,
                         archive: &archive,
                         on_output: None,
+                        ask: None,
                     },
                 )
                 .await
@@ -2313,6 +2163,7 @@ mod tests {
                         workdir: &dir,
                         archive: &dir.join("session.json"),
                         on_output: None,
+                        ask: None,
                     },
                 )
                 .await)
@@ -2359,6 +2210,7 @@ mod tests {
                 workdir: &dir,
                 archive: &archive,
                 on_output: None,
+                ask: None,
             },
         ));
         tokio::select! {
@@ -2580,13 +2432,14 @@ mod trust_hardening_tests {
             changed_entry,
             project_trust_fingerprint(&dir, config.as_bytes())?
         );
-        // A host secret in a project entry is rejected at approval and at launch.
+        // An approved project entry may name any variable, even one whose name
+        // looks like a credential: approving the config is the decision.
         let secret = format!("KROMA_TRUST_TEST_SECRET_{}", std::process::id());
         std::env::set_var(&secret, "server.js");
         let secret_config = format!(
-            "{{\"mcpServers\":{{\"local\":{{\"command\":\"node\",\"args\":[\"${{{secret}}}\"]}}}}}}"
+            "{{\"mcpServers\":{{\"local\":{{\"command\":\"node\",\"args\":[\"${{{secret}}}\"],\"env\":{{\"MCP_TOKEN\":\"${{{secret}}}\"}}}}}}}}"
         );
-        assert!(project_trust_fingerprint(&dir, secret_config.as_bytes()).is_err());
+        assert!(project_trust_fingerprint(&dir, secret_config.as_bytes()).is_ok());
         std::env::remove_var(&secret);
         std::env::remove_var(&variable);
         assert!(project_trust_fingerprint(&dir, config.as_bytes()).is_err());
@@ -2657,7 +2510,7 @@ mod trust_hardening_tests {
     /// Environment values are expanded at launch, so approval must bind the
     /// expanded value rather than only the literal `${NAME}` text.
     #[test]
-    fn project_trust_expands_environment_values() -> Result<()> {
+    fn project_trust_keeps_environment_values_as_written() -> Result<()> {
         let dir = scratch("env-values")?;
         let variable = format!(
             "MCP_TRUST_VALUE_{}_{}",
@@ -2671,12 +2524,19 @@ mod trust_hardening_tests {
         fs::write(dir.join("server.js"), "export const version = 1;\n")?;
         std::env::set_var(&variable, "one");
         let approved = project_trust_fingerprint(&dir, config.as_bytes())?;
+        // The approval covers the configured text, so changing the secret it
+        // names must not silently invalidate an approval the user already gave.
         std::env::set_var(&variable, "two");
-        assert_ne!(
+        assert_eq!(
             approved,
             project_trust_fingerprint(&dir, config.as_bytes())?
         );
         std::env::remove_var(&variable);
+        assert_eq!(
+            approved,
+            project_trust_fingerprint(&dir, config.as_bytes())?,
+            "an unset variable keeps the same approval"
+        );
         fs::remove_dir_all(dir)?;
         Ok(())
     }

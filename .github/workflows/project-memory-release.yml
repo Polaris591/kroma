@@ -20,7 +20,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
       - name: Build release
         run: cargo build --locked --release --manifest-path examples/plugins/project-memory/Cargo.toml
       - name: Package (Unix)

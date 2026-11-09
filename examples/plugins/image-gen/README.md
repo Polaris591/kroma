@@ -1,6 +1,8 @@
 # Image Generation (official example plugin)
 
-One model tool, `image_generate`. Installed plugins are disabled by default.
+One model tool, `image_generate`, plus an `/image <prompt>` command so you can
+ask for a picture yourself without a model turn. Installed plugins are disabled
+by default.
 
 ## Install and configure
 
@@ -28,6 +30,12 @@ another paid backend automatically.
 
 To generate: "Make a 16:9 illustration and save it to assets/cover.png."
 
+Or directly, without the model: `/image a watercolor lighthouse at dawn`.
+The command returns the same durable image ID, path and real dimensions.
+Because it runs outside a model turn it cannot resolve `attachment:N` or
+`previous:N`; `image:<uuid>` and `project:relative/path.png` references still
+work (as tool arguments).
+
 To edit a pasted user image: "Turn attachment:1 into watercolor."
 
 To edit a previous output: "Use image:<uuid> as reference and change its sky."
@@ -37,7 +45,7 @@ and `project:relative/path.png` for a project image.
 
 The plugin saves a durable original and metadata under its private `data_dir/images`
 and returns a stable image ID plus actual width and height. Explicit
-`output_path` is relative to the project and never overwrites an existing file.
+`output_path` is relative to the project and replaces an existing file in one step, so regenerating the same name is normal.
 If export fails after generation, the private image remains available and the
 tool returns a visible warning. It does not retry ambiguous provider failures.
 

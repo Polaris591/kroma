@@ -143,33 +143,6 @@ pub trait ModelBackend: Send + Sync {
         on_text: &'a mut (dyn FnMut(&str) + Send),
     ) -> StreamFuture<'a, Completion>;
 
-    /// Optional live, provider-exposed reasoning. The reasoning callback is
-    /// separate from assistant text: it must never enter the answer stream.
-    /// Existing model backends can keep implementing only `complete`.
-    fn complete_with_reasoning<'a>(
-        &'a self,
-        messages: &'a [Message],
-        tools: &'a [Value],
-        on_text: &'a mut (dyn FnMut(&str) + Send),
-        _on_reasoning: &'a mut (dyn FnMut(&str) + Send),
-    ) -> StreamFuture<'a, Completion> {
-        self.complete(messages, tools, on_text)
-    }
-
-    /// Optional per-task image encoding reuse. The default preserves every
-    /// custom backend's existing behavior; the built-in HTTP backend reuses
-    /// immutable attachment bytes across tool rounds in the same task.
-    fn complete_with_task_images<'a>(
-        &'a self,
-        messages: &'a [Message],
-        tools: &'a [Value],
-        _images: &'a TaskImageCache,
-        on_text: &'a mut (dyn FnMut(&str) + Send),
-        on_reasoning: &'a mut (dyn FnMut(&str) + Send),
-    ) -> StreamFuture<'a, Completion> {
-        self.complete_with_reasoning(messages, tools, on_text, on_reasoning)
-    }
-
     /// Optional live effort control. Hosts can change it between (or during)
     /// requests without replacing the backend or rebuilding the Agent.
     /// The provider snapshots the setting when it builds the next request.
@@ -187,18 +160,19 @@ pub trait ModelBackend: Send + Sync {
         anyhow::bail!("this model backend does not support live reasoning settings")
     }
 
-    /// Optional server-side tool activity (for example an endpoint-executed
-    /// web search). Reported for display only; never a local tool call.
+    /// The one extended request: reasoning, per-task image reuse and
+    /// server-side activity in a single entry point. A backend that has no
+    /// extras keeps implementing only `complete`.
     fn complete_with_activity<'a>(
         &'a self,
         messages: &'a [Message],
         tools: &'a [Value],
-        images: &'a TaskImageCache,
+        _images: &'a TaskImageCache,
         on_text: &'a mut (dyn FnMut(&str) + Send),
-        on_reasoning: &'a mut (dyn FnMut(&str) + Send),
+        _on_reasoning: &'a mut (dyn FnMut(&str) + Send),
         _on_activity: &'a mut (dyn FnMut(NativeActivity) + Send),
     ) -> StreamFuture<'a, Completion> {
-        self.complete_with_task_images(messages, tools, images, on_text, on_reasoning)
+        self.complete(messages, tools, on_text)
     }
 
     /// Tool-free text generation, with an explicitly supplied system prompt.

@@ -52,10 +52,9 @@ test("OpenAI generates one image, persists a reusable ID and publishes an atomic
   assert.match(result.images[0].id, /^image:[\da-f-]{36}$/);
   assert.equal((await fs.readdir(path.join(req.data_dir, "images"))).length, 2);
 
-  const again = await assert.rejects(dispatch(req, {fetcher: () => {
-    throw Error("must not make another paid request");
-  }}), /already exists/);
-  assert.equal(again, undefined);
+  const again = JSON.parse((await dispatch(req, {fetcher: mock()})).content);
+  assert.equal(again.images[0].path, result.images[0].path, "a second run overwrites the same file");
+  assert.deepEqual(await fs.readFile(path.join(req.workdir, "assets/background.png")), PNG);
 });
 
 test("Edit an earlier generated image by stable ID, and do not choose last image implicitly", async t => {
@@ -176,4 +175,20 @@ test("Protocol emits correlated streaming progress then complete, with clean JSO
   assert.deepEqual(frames.map(f => f.event), ["output_delta", "complete"]);
   assert.equal(frames[0].request_id, 17);
   assert.equal(frames[1].result.is_error, undefined);
+});
+
+test("/image generates one image without a model turn and rejects an empty prompt", async t => {
+  const base = await fixture(t);
+  const command = {
+    type: "command", name: "/image", user_input: "Draw a tiny dot",
+    workdir: base.workdir, data_dir: base.data_dir, archive: base.archive,
+    config: base.config,
+  };
+  const result = JSON.parse((await dispatch(command, {fetcher: mock()})).content);
+  assert.equal(result.images.length, 1);
+  assert.equal(result.images[0].width, 1);
+  assert.equal(result.images[0].source_images, undefined);
+  await assert.rejects(dispatch({...command, user_input: "   "}, {fetcher: mock()}), /Usage: \/image <prompt>/);
+  const viaArgs = JSON.parse((await dispatch({...command, user_input: undefined, arguments: ["Draw", "a", "dot"]}, {fetcher: mock()})).content);
+  assert.equal(viaArgs.images.length, 1);
 });

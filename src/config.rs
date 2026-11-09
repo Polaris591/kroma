@@ -349,6 +349,7 @@ impl Config {
     }
 }
 
+// A configured child model may use a different endpoint/protocol from its parent.
 fn needs_saved_profiles(
     model: Option<&str>,
     base_url: Option<&str>,

@@ -24,32 +24,8 @@ commands![
     (
         "/help",
         "",
-        "Shortcuts, turn navigation and code copying",
-        "快捷键、轮次跳转与代码复制"
-    ),
-    (
-        "/commands",
-        "",
-        "Search all slash commands",
-        "搜索全部斜杠命令"
-    ),
-    (
-        "/hotkeys",
-        "",
-        "Show keyboard shortcuts (alias of /help)",
-        "查看快捷键（/help 别名）"
-    ),
-    (
-        "/transcript",
-        "",
-        "Open searchable full transcript",
-        "查看可搜索的全文记录"
-    ),
-    (
-        "/language",
-        "[en|zh]",
-        "Switch interface language (saved)",
-        "切换界面语言并保存"
+        "Shortcuts, search and the command index",
+        "快捷键、搜索与命令索引"
     ),
     (
         "/new",
@@ -65,144 +41,66 @@ commands![
     ),
     (
         "/compact",
-        "",
-        "Compact context now; preserve original history",
+        "[focus]",
+        "Compact context now; original history is preserved",
         "立即压缩上下文，保留原始会话记录"
     ),
     (
         "/sessions",
-        "",
-        "Browse saved conversations",
-        "浏览已保存会话"
-    ),
-    (
-        "/resume",
-        "[session]",
-        "Resume a saved conversation",
-        "恢复指定会话"
-    ),
-    (
-        "/continue",
-        "",
-        "Resume the latest conversation",
-        "恢复最近会话"
-    ),
-    (
-        "/rename",
-        "<name>",
-        "Rename this conversation",
-        "重命名当前会话"
+        "[id|rename <name>]",
+        "Browse, resume or rename conversations",
+        "浏览、恢复或重命名会话"
     ),
     (
         "/model",
-        "[profile]",
-        "Choose a model profile",
-        "选择模型配置"
+        "[status|profile]",
+        "Choose a model profile, or show resolved limits",
+        "选择模型配置，或查看生效的模型限制"
     ),
     ("/think", "[level]", "Set reasoning effort", "设置推理强度"),
-    ("/thinking", "[level]", "Alias for /think", "/think 的别名"),
-    ("/reasoning", "[level]", "Alias for /think", "/think 的别名"),
+    ("/exit", "", "Quit Kroma", "退出 Kroma"),
     (
-        "/theme",
-        "[dark|light|mono|reload]",
-        "Change or reload theme",
-        "切换或重新加载主题"
+        "/language",
+        "[en|zh]",
+        "Switch interface language (saved)",
+        "切换界面语言并保存"
     ),
     (
         "/tools",
         "",
-        "List tools and MCP warnings",
-        "查看工具与 MCP 警告"
+        "List tools, skills and MCP warnings",
+        "查看工具、技能与 MCP 警告"
     ),
-    ("/skills", "", "List available skills", "查看可用技能"),
     (
         "/plugins",
         "[list|enable|disable|install|config|set|reset|view|reload]",
-        "Manage/reload idle-safe plugins",
-        "管理插件并重载可热更新部分"
+        "Manage plugins",
+        "管理插件"
     ),
     (
         "/usage",
         "",
-        "Detailed usage and cache statistics",
-        "查看详细用量与缓存统计"
-    ),
-    (
-        "/model-status",
-        "",
-        "Effective model limits and their sources",
-        "查看有效模型限制及其来源"
-    ),
-    (
-        "/inspect",
-        "[call-id]",
-        "Inspect recorded commands and output",
-        "检视执行命令与输出"
-    ),
-    ("/diff", "", "Show workspace changes", "查看工作区修改"),
-    (
-        "/export",
-        "<path>",
-        "Export conversation to a file",
-        "将会话导出到文件"
-    ),
-    (
-        "/history",
-        "[count]",
-        "List conversation checkpoints",
-        "查看会话检查点"
+        "Show session token usage and cost",
+        "查看本次会话的用量与费用"
     ),
     (
         "/checkpoints",
-        "",
-        "List file snapshots (Git worktrees)",
-        "查看文件快照（Git 工作区）"
-    ),
-    (
-        "/restore-files",
-        "<number>",
-        "Restore files from a snapshot",
-        "从快照恢复文件"
-    ),
-    (
-        "/fork",
-        "<checkpoint>",
-        "Branch from a checkpoint",
-        "从检查点创建分支"
-    ),
-    (
-        "/rewind",
-        "<checkpoint>",
-        "Rewind and preserve old history",
-        "回退并保留原历史"
-    ),
-    ("/undo", "", "Undo the last rewind", "撤销上次回退"),
-    (
-        "/pending",
-        "",
-        "Show queued tasks and steering",
-        "查看待办任务与引导指令"
+        "[list|restore <n>|fork <n>|rewind <n>|history]",
+        "File snapshots: list, restore, fork, rewind, history",
+        "文件快照：列表、恢复、分叉、回退、历史"
     ),
     (
         "/queue",
-        "<task>|list|clear|run",
-        "Manage follow-up tasks",
-        "管理后续任务队列"
+        "[list|clear|run|<text>]",
+        "Queued tasks: list, clear, run, or add one",
+        "排队任务：查看、清空、执行或新增"
     ),
     (
-        "/steer",
-        "<instruction>",
-        "Guide the active task",
-        "引导正在执行的任务"
+        "/transcript",
+        "[export|tool <id>]",
+        "Searchable transcript, export and raw tool output",
+        "可搜索的全文记录、导出与原始工具输出"
     ),
-    (
-        "/editor",
-        "",
-        "Edit draft in external editor",
-        "使用外部编辑器编辑草稿"
-    ),
-    ("/exit", "", "Exit Kroma", "退出 Kroma"),
-    ("/quit", "", "Alias for /exit", "/exit 的别名"),
 ];
 
 pub(super) fn items_with_plugins(language: Language, plugins: &[(String, String)]) -> Vec<Item> {
@@ -235,6 +133,22 @@ pub(super) fn items(language: Language) -> Vec<Item> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every catalog name must be dispatchable by some host. A name that no
+    /// registry and no full-screen handler owns is a broken promise to users.
+    #[test]
+    fn every_catalog_name_is_dispatchable() {
+        let commands = crate::commands::CommandRegistry::builtin(Vec::new()).unwrap();
+        for command in COMMANDS {
+            let name = command.name;
+            let plugin_owned = name == "/goal" || name.starts_with("/plugin");
+            assert!(
+                commands.knows(name) || crate::commands::is_full_screen_only(name) || plugin_owned,
+                "catalog lists {name}, but no host dispatches it"
+            );
+        }
+    }
+
     #[test]
     fn enabled_plugin_commands_appear_once_in_completion() {
         let commands = items_with_plugins(

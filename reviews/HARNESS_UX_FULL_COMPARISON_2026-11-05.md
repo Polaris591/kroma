@@ -441,7 +441,7 @@ Kroma 这套能力并不少，隔离用户 Git 的快照设计也应保留。差
 [K12]: ../docs/security.md "权限、资源信任、私有快照与恢复边界；取消语义另见 docs/lifecycle.md"
 [K13]: ../src/tui/status.rs#L120 "预算、用量与状态展示；完整计算见 src/usage.rs"
 [K14]: ../src/skills.rs#L103 "Skills 元数据与加载；AGENTS/MCP 另见 src/prompt.rs 与 src/app.rs"
-[K15]: ../examples/plugins/subagents/README.md#L118 "子代理进度、最终结果与证据；实现见 subagent.js:651–747，设计边界见 docs/subagents-design.md"
+[K15]: ../examples/plugins/subagents/README.md#L118 "子代理进度、最终结果与证据；实现见 subagent.js:651–747，设计边界见 docs/subagents.md"
 [K16]: ../desktop/src/App.svelte#L54 "bootstrap、事件消费、输入、任务与会话 UI"
 [K17]: ../desktop/src/components/SettingsView.svelte#L66 "profile、插件与设置交互"
 [K18]: ../desktop/src/components/MessageView.svelte#L23 "回答/工具渲染、输出与可访问性"

@@ -13,8 +13,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99.1"
           components: rustfmt, clippy
       - uses: actions/setup-node@v4
         with:
@@ -28,6 +29,8 @@ jobs:
         run: |
           node --test examples/plugins/web/web.test.js examples/plugins/web/http.test.js examples/plugins/web/main.test.js
           node --test examples/plugins/subagents/subagent.test.js examples/plugins/subagents/main.test.js
+          node --test examples/plugins/goal/goal.test.js examples/plugins/goal/protocol.test.js
+          node --test examples/plugins/image-gen/image.test.js examples/plugins/memory/memory.test.js
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Native PowerShell fallback

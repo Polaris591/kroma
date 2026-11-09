@@ -29,7 +29,7 @@ test("streaming progress and completion echo the request id", async () => {
     result: {content: "{\"status\":\"completed\"}", is_error: false}});
 });
 
-test("a partial batch is marked as an error at the protocol layer", async () => {
+test("the protocol layer echoes a partial result unchanged", async () => {
   const streaming = sink();
   await createHandler({
     run: async () => ({content: "{\"status\":\"partial\"}", is_error: true}),

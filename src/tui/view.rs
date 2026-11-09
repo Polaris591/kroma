@@ -30,6 +30,7 @@ use super::event_queue::EventSender;
 use super::runtime_events::UiEvent;
 use super::tool_display::{compact_line, ellipsize_cells, tool_arguments, tool_result_details};
 use super::{
+    ask::{Key as AskKey, Overlay as AskOverlay, Slot as AskSlot},
     attachments::{Attachment, MAX_ATTACHMENTS},
     editor::Editor,
     links, markdown,
@@ -525,6 +526,45 @@ pub(super) enum TaskOutcome {
     Cancelled,
 }
 
+/// Last committed goal state. It is separate from the foreground outcome, so
+/// a completed turn never renders as a completed goal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ControlStatus {
+    pub owner: String,
+    pub id: String,
+    pub revision: u64,
+    pub status: String,
+    pub reason: String,
+    pub summary: String,
+}
+
+impl ControlStatus {
+    pub(super) fn label(&self, chinese: bool) -> String {
+        let status = match (self.status.as_str(), chinese) {
+            ("running", true) => "执行中",
+            ("paused", true) => "已暂停",
+            (other, true) => other,
+            ("running", false) => "running",
+            ("paused", false) => "paused",
+            (other, false) => other,
+        };
+        let mut line = if chinese {
+            format!("目标 {} · {status} · 修订 {}", self.id, self.revision)
+        } else {
+            format!("Goal {} · {status} · rev {}", self.id, self.revision)
+        };
+        if !self.reason.trim().is_empty() {
+            line.push_str(" · ");
+            line.push_str(self.reason.trim());
+        }
+        if !self.summary.trim().is_empty() {
+            line.push_str(" · ");
+            line.push_str(self.summary.trim());
+        }
+        line
+    }
+}
+
 pub struct UiState {
     #[cfg(any(windows, test))]
     pub(super) native_paste_keys: super::paste::NativePasteKeys,
@@ -554,9 +594,15 @@ pub struct UiState {
     unread_updates: usize,
     pub editor: Editor,
     pub picker: Option<Picker>,
+    /// The one open question, if a running tool is waiting for an answer.
+    pub(super) ask: Option<AskOverlay>,
+    /// Where a waiting tool hands its question to this interface.
+    pub(super) asker: AskSlot,
     plugin_panel: Option<PluginPanel>,
     pub plugin_commands: Vec<(String, String)>,
     pub plugin_statuses: Vec<String>,
+    /// Last committed goal state; the foreground result never implies it.
+    pub(super) control_status: Option<ControlStatus>,
     plugin_activity_frames: Vec<String>,
     plugin_tool_labels: BTreeMap<String, String>,
     plugin_layout: Option<PluginLayoutSpec>,
@@ -677,6 +723,58 @@ impl UiState {
         self.history_cache = None;
     }
 
+    /// The handle a running tool uses to hand this interface a question.
+    pub(super) fn asker(&self) -> std::sync::Arc<dyn crate::tools::Asker> {
+        std::sync::Arc::new(self.asker.clone())
+    }
+
+    /// Pick up a question a tool is waiting on. Answers arrive as an ordinary
+    /// tool result, so nothing about the question is persisted separately.
+    pub(super) fn pull_ask(&mut self) -> bool {
+        if self.ask.is_some() {
+            return false;
+        }
+        let Some((request, answer)) = self.asker.take() else {
+            return false;
+        };
+        self.ask = Some(AskOverlay::new(request, answer));
+        true
+    }
+
+    /// Route one input event to the open question. Returns whether the question
+    /// consumed it; Ctrl+C keeps its run-wide meaning and falls through.
+    pub(super) fn ask_event(&mut self, event: &crossterm::event::Event) -> bool {
+        use crossterm::event::{Event, KeyEventKind};
+        let Some(overlay) = self.ask.as_mut() else {
+            return false;
+        };
+        let outcome = match event {
+            Event::Key(key) if key.kind != KeyEventKind::Release => overlay.key(*key),
+            Event::Paste(text) => {
+                overlay.paste(text);
+                AskKey::Taken
+            }
+            _ => AskKey::Taken,
+        };
+        match outcome {
+            AskKey::Taken => true,
+            AskKey::Pass => false,
+            AskKey::Closed(answer) => {
+                if let Some(sender) = self.ask.as_mut().and_then(AskOverlay::take_answer) {
+                    let _ = sender.send(answer);
+                }
+                self.ask = None;
+                true
+            }
+        }
+    }
+
+    /// Drop an unresolved question: an ended turn must not leave an overlay
+    /// that can never be answered.
+    pub(super) fn clear_ask(&mut self) {
+        self.ask = None;
+    }
+
     /// Low-level legacy initializer retained for historical rendering regressions.
     /// The interactive host uses `new_default`, which selects A / Plain.
     pub(super) fn new(
@@ -710,9 +808,12 @@ impl UiState {
             unread_updates: 0,
             editor: Editor::default(),
             picker: None,
+            ask: None,
+            asker: AskSlot::new(),
             plugin_panel: None,
             plugin_commands: Vec::new(),
             plugin_statuses: Vec::new(),
+            control_status: None,
             plugin_activity_frames: Vec::new(),
             plugin_tool_labels: BTreeMap::new(),
             plugin_layout: None,
@@ -1267,6 +1368,24 @@ impl UiState {
             self.history_cache = None;
         }
         match event {
+            UiEvent::ControlStatus {
+                owner,
+                id,
+                revision,
+                status,
+                reason,
+                summary,
+            } => {
+                self.control_status = (!matches!(status.as_str(), "completed" | "cancelled"))
+                    .then_some(ControlStatus {
+                        owner,
+                        id,
+                        revision,
+                        status,
+                        reason,
+                        summary,
+                    });
+            }
             UiEvent::Warning(message) => self.note_with_level(NoticeLevel::Warning, message),
             UiEvent::GitInfo {
                 revision,
@@ -1573,6 +1692,12 @@ impl UiState {
         self.scroll_anchor = None;
         self.prepend_rows_before = None;
         self.scroll_from_bottom = 0;
+        if self.history_visible > 300 {
+            // The live tail is visible again, so the enlarged window is pure
+            // per-frame cost. Shrink before the next streamed token arrives.
+            self.history_visible = 300;
+            self.history_cache = None;
+        }
     }
 
     /// The small disclosure chevron expands exactly one tool call. Clicks
@@ -2745,6 +2870,7 @@ impl UiState {
             .saturating_add(composer_padding)
             .clamp(composer_min, composer_max);
         let status_rows = u16::from(self.has_activity_tail() && area.height >= 12);
+        let goal_rows = u16::from(self.control_status.is_some() && area.height >= 12);
         let layout = Layout::vertical([
             // A blank row separates the session heading from the first turn.
             Constraint::Length(header_rows),
@@ -2754,6 +2880,7 @@ impl UiState {
             // visible while the transcript scrolls. Small terminals keep the
             // row out of the layout so the transcript does not collapse.
             Constraint::Length(status_rows),
+            Constraint::Length(goal_rows),
             Constraint::Length(composer_height),
             Constraint::Length(1),
         ])
@@ -3438,7 +3565,8 @@ impl UiState {
                 ),
             );
         }
-        let composer = layout[4];
+        self.draw_pinned_status(frame, layout[4], colors);
+        let composer = layout[5];
         let border = if self.attach_mode {
             colors.accent_text
         } else {
@@ -3588,9 +3716,9 @@ impl UiState {
             self.ime_cursor_position = Some(caret);
         }
         let status_area = Rect::new(
-            layout[5].x.saturating_add(2),
-            layout[5].y,
-            layout[5].width.saturating_sub(4),
+            layout[6].x.saturating_add(2),
+            layout[6].y,
+            layout[6].width.saturating_sub(4),
             1,
         );
         let hovered = self.hover_pointer.and_then(|(x, y)| self.link_at(x, y));
@@ -3619,6 +3747,14 @@ impl UiState {
         frame.render_widget(Paragraph::new(footer), status_area);
         if let Some(picker) = &mut self.picker {
             picker.draw(
+                frame,
+                Rect::new(area.x, history_slot.y, area.width, history_slot.height),
+                colors,
+                self.preferences.language,
+            );
+        }
+        if let Some(ask) = &mut self.ask {
+            ask.draw(
                 frame,
                 Rect::new(area.x, history_slot.y, area.width, history_slot.height),
                 colors,
@@ -3669,6 +3805,35 @@ mod plain_tests;
 #[cfg(test)]
 #[path = "semantic_tests.rs"]
 mod semantic_tests;
+
+impl UiState {
+    /// One pinned line for the committed goal state. It stays visible while the
+    /// transcript scrolls and is never part of the transcript itself.
+    pub(super) fn draw_pinned_status(
+        &self,
+        frame: &mut ratatui::Frame,
+        area: ratatui::layout::Rect,
+        colors: super::theme::Theme,
+    ) {
+        use ratatui::{style::Style, text::Line, widgets::Paragraph};
+        let Some(status) = self.control_status.as_ref().filter(|_| area.height > 0) else {
+            return;
+        };
+        let chinese = self.preferences.language == super::preferences::Language::Zh;
+        let color = if status.status == "paused" {
+            colors.warning
+        } else {
+            colors.accent
+        };
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                status.label(chinese),
+                Style::default().fg(color),
+            )),
+            area,
+        );
+    }
+}
 
 #[cfg(test)]
 #[path = "message_tests.rs"]
@@ -3748,5 +3913,72 @@ mod hardening_tests {
         let mut normal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         normal.draw(|frame| ui.draw(frame)).unwrap();
         assert!(ui.selected_text().is_none());
+    }
+    #[test]
+    fn a_committed_goal_state_is_pinned_and_terminal_states_clear_it() {
+        let mut ui = state();
+        let control = |status: &str| UiEvent::ControlStatus {
+            owner: "goal".into(),
+            id: "task-1".into(),
+            revision: 2,
+            status: status.into(),
+            reason: "user_stop".into(),
+            summary: "修复登录失败".into(),
+        };
+        ui.event(control("running"));
+        let running = ui.control_status.clone().expect("running goal is pinned");
+        let line = running.label(false);
+        assert!(line.contains("Goal task-1"), "{line}");
+        assert!(line.contains("running"), "{line}");
+        assert!(!line.contains('%'), "no completion percentage: {line}");
+        assert!(running.label(true).contains("执行中"));
+
+        // The foreground outcome never renders as a completed goal.
+        ui.task_outcome = Some(TaskOutcome::Completed);
+        assert!(ui.control_status.is_some());
+
+        ui.event(control("paused"));
+        let paused = ui.control_status.clone().expect("paused goal is pinned");
+        assert!(paused.label(false).contains("paused"));
+        assert!(paused.label(false).contains("user_stop"));
+        assert!(paused.label(true).contains("已暂停"));
+
+        for terminal in ["completed", "cancelled"] {
+            ui.event(control(terminal));
+            assert!(
+                ui.control_status.is_none(),
+                "{terminal} must clear the line"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pinned_goal_line_renders_on_a_small_terminal() {
+        let mut ui = state();
+        ui.event(UiEvent::ControlStatus {
+            owner: "goal".into(),
+            id: "task-1".into(),
+            revision: 1,
+            status: "paused".into(),
+            reason: "user_stop".into(),
+            summary: String::new(),
+        });
+        for (width, height) in [(40u16, 12u16), (24, 8), (80, 24)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| ui.draw(frame)).unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            if height >= 12 {
+                assert!(
+                    text.contains("task-1"),
+                    "{width}x{height} must show the pinned goal line: {text}"
+                );
+            }
+        }
     }
 }

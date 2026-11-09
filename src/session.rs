@@ -376,6 +376,15 @@ impl SessionStore {
         })
     }
 
+    /// Real history generation this store appends to. It changes when the
+    /// history is replaced, so host metadata cannot follow a copied prefix.
+    pub fn generation(&self) -> u64 {
+        self.journal
+            .lock()
+            .expect("session journal lock poisoned")
+            .generation
+    }
+
     pub fn archive_path(&self) -> &Path {
         &self.path
     }

@@ -136,8 +136,9 @@ async function publishOutput(bytes, target, root) {
   const scratch = path.join(folder, `.${path.basename(target)}.${crypto.randomUUID()}.partial`);
   await fs.writeFile(scratch, bytes, {flag: "wx"});
   try {
-    // The hardlink is atomic and refuses existing targets, unlike rename().
-    await fs.link(scratch, target);
+    // rename replaces the previous file in one step, so regenerating a name
+    // is as safe as writing it the first time.
+    await fs.rename(scratch, target);
   } finally {
     await fs.unlink(scratch).catch(() => {});
   }
@@ -158,8 +159,16 @@ async function writePrivate(folder, id, bytes, metadata) {
 }
 
 async function dispatch(request, {onProgress = () => {}, fetcher = fetch} = {}) {
-  if (request.type !== "tool_stream" && request.type !== "tool") throw Error("Unsupported image plugin request");
-  if (request.name !== "image_generate") throw Error("Unknown image tool");
+  if (request.type === "command") {
+    // /image lets the user generate one image yourself, without a model turn.
+    if (request.name !== "/image") throw Error("Unknown image command");
+    const text = typeof request.user_input === "string" ? request.user_input
+      : Array.isArray(request.arguments) ? request.arguments.join(" ")
+      : typeof request.arguments === "string" ? request.arguments : "";
+    if (!text.trim()) throw Error("Usage: /image <prompt>");
+    request = {...request, arguments: {prompt: text.trim()}};
+  } else if (request.type !== "tool_stream" && request.type !== "tool") throw Error("Unsupported image plugin request");
+  else if (request.name !== "image_generate") throw Error("Unknown image tool");
   const args = request.arguments ?? {};
   if (typeof args.prompt !== "string" || !args.prompt.trim() || args.prompt.length > 32000)
     throw Error("prompt must be a nonempty string of at most 32000 characters");
@@ -173,8 +182,6 @@ async function dispatch(request, {onProgress = () => {}, fetcher = fetch} = {}) 
       throw Error("output_path requires .png, .jpg, .jpeg or .webp extension");
     // Reject broken or escaping destinations before any potentially paid API call.
     await ensureProjectDestination(target, request.workdir);
-    if (await fs.stat(target).then(() => true, e => {if (e.code === "ENOENT") return false; throw e;}))
-      throw Error("Output file already exists; choose a different name");
   }
   const inputs = await resolveInputs(request);
   onProgress(inputs.length ? "Editing reference image…" : "Generating image…");

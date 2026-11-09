@@ -122,6 +122,43 @@ fn local_plugin_install_follows_file_and_directory_symlinks_when_supported() -> 
 }
 
 #[tokio::test]
+async fn the_declarative_ask_plugin_installs_without_a_process() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let user = temp.path().join("plugins");
+    let state_path = temp.path().join("plugins.toml");
+    let workspace = temp.path().join("project");
+    fs::create_dir_all(&workspace)?;
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/ask");
+    PluginCatalog::discover_at(user.clone(), state_path.clone(), &workspace)?.install(&source)?;
+    PluginCatalog::discover_at(user.clone(), state_path.clone(), &workspace)?
+        .set_enabled("ask", true)?;
+
+    let catalog = PluginCatalog::discover_at(user, state_path, &workspace)?;
+    let mut tools = ToolRegistry::builtin();
+    let mut prompt = PromptComposer::default();
+    assert!(catalog.contribute(&mut tools, &mut prompt).is_empty());
+    // The manifest names the tool and describes it; the host owns the
+    // arguments, so the model fills exactly the list the interface draws.
+    let definition = tools
+        .definitions()
+        .into_iter()
+        .find(|item| item["function"]["name"] == "ask")
+        .expect("the host tool is registered");
+    let parameters = &definition["function"]["parameters"];
+    assert_eq!(parameters["required"][0], "question");
+    assert_eq!(parameters["required"][1], "options");
+    assert_eq!(parameters["properties"]["options"]["minItems"], 2);
+    let mut messages = prompt.initial_history(&workspace);
+    prompt.apply(&mut messages);
+    assert!(messages[0]
+        .content
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Ask only when both are true"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn install_enable_configure_execute_disable() -> Result<()> {
     let temp = TestDirectory::new()?;
     let user = temp.path().join("plugins");
@@ -210,6 +247,7 @@ async fn install_enable_configure_execute_disable() -> Result<()> {
                     workdir: &workspace,
                     archive: &archive,
                     on_output: None,
+                    ask: None,
                 },
             )
             .await;
@@ -227,6 +265,7 @@ async fn install_enable_configure_execute_disable() -> Result<()> {
                     workdir: &workspace,
                     archive: &archive,
                     on_output: None,
+                    ask: None,
                 },
             )
             .await;
@@ -273,7 +312,7 @@ async fn install_enable_configure_execute_disable() -> Result<()> {
             .execute("/plugins disable hello", &mut agent, &input)?
             .unwrap()
             .output
-            .contains("Restart Kroma"));
+            .contains("/plugins reload"));
     } else {
         installed.set_enabled("hello", false)?;
     }
@@ -402,6 +441,7 @@ async fn tool_replacement_prompt_override_and_hooks_execute() -> Result<()> {
                     workdir: &workdir,
                     archive: temp.path(),
                     on_output: None,
+                    ask: None,
                 },
             )
             .await;
@@ -991,11 +1031,13 @@ async fn streaming_model_emits_live_text_reasoning_tools_and_usage() -> Result<(
     let mut thoughts = Vec::new();
     let result = tokio::time::timeout(
         Duration::from_secs(8),
-        backend.complete_with_reasoning(
+        backend.complete_with_activity(
             &history,
             &[],
+            &kroma::model::TaskImageCache::default(),
             &mut |delta| texts.push((start.elapsed(), delta.to_string())),
             &mut |delta| thoughts.push((start.elapsed(), delta.to_string())),
+            &mut |_| {},
         ),
     )
     .await??;
@@ -1196,6 +1238,7 @@ async fn plugin_jsonl_rejects_incorrect_response_correlation() -> Result<()> {
                 workdir: temp.path(),
                 archive: temp.path(),
                 on_output: None,
+                ask: None,
             },
         )
         .await;
@@ -1489,6 +1532,7 @@ process.stdout.write(JSON.stringify({content:"recovered"})+"\n");}});"#,
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
+        ask: None,
     };
     assert!(
         tokio::time::timeout(Duration::from_millis(200), tools.execute(&call, ctx))
@@ -1550,6 +1594,7 @@ frame({event:"complete",result:{content:"ok",is_error:false}});});"#,
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
+        ask: None,
     };
     let call = |arguments: &str, id: &str| ToolCall {
         id: id.into(),
@@ -1648,6 +1693,7 @@ require("node:readline").createInterface({input:process.stdin}).on("line",line=>
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
+        ask: None,
     };
     let failed = tokio::time::timeout(Duration::from_secs(10), tools.execute(&call, ctx)).await?;
     assert!(failed.is_error);
@@ -1727,6 +1773,7 @@ frame({event:"error",message:"worker is unusable"});});"#,
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
+        ask: None,
     };
     let failed = tokio::time::timeout(Duration::from_secs(10), tools.execute(&call, ctx)).await?;
     assert!(failed.is_error);
@@ -1794,6 +1841,7 @@ process.stdout.write(JSON.stringify({content:"recovered"})+String.fromCharCode(1
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
+        ask: None,
     };
     let started = std::time::Instant::now();
     let failed = tokio::time::timeout(Duration::from_secs(10), tools.execute(&call, ctx))
@@ -1869,6 +1917,7 @@ setInterval(()=>frame({event:"output_delta",stream:"stdout",delta:"."}),50);});"
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
+        ask: None,
     };
     let started = std::time::Instant::now();
     let failed = tokio::time::timeout(Duration::from_secs(10), tools.execute(&call, ctx))
@@ -1945,7 +1994,7 @@ async fn web_tools_roundtrip_through_kroma_to_local_http_server() -> Result<()> 
             } else {
                 (
                     "text/html",
-                    "<title>Mock Page</title><main><h1>Article</h1>Local content.</main>",
+                    "<title>Mock Page</title><main><h1>Article</h1><p>Local content served by the mock server for the plugin round trip, with enough body text that the extractor treats the page as readable rather than as a navigation shell.</p></main>",
                 )
             };
             let response=format!("HTTP/1.1 200 OK\r\nContent-Type: {type_}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
@@ -1986,6 +2035,7 @@ async fn web_tools_roundtrip_through_kroma_to_local_http_server() -> Result<()> 
         workdir: temp.path(),
         archive: temp.path(),
         on_output: None,
+        ask: None,
     };
     let search = ToolCall {
         id: "search".into(),
@@ -2648,6 +2698,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
                 workdir: temp.path(),
                 archive: &archive,
                 on_output: None,
+                ask: None,
             },
         )
         .await;
@@ -2984,6 +3035,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
                         workdir: &workdir,
                         archive: temp.path(),
                         on_output: None,
+                        ask: None,
                     },
                 )
                 .await;
@@ -3318,6 +3370,7 @@ async fn process_plugin_tool_streams_progress_without_changing_final_result() ->
                 workdir: temp.path(),
                 archive: temp.path(),
                 on_output: Some(&callback),
+                ask: None,
             },
         )
         .await;
@@ -3681,7 +3734,7 @@ createInterface({input:process.stdin}).on("line",line=>{
  let content="{}";
  if(req.type==="request_context"){
    const intent=String(req.arguments?.intent||"");
-   if(intent.includes("FAIL")) content=JSON.stringify({blocks:[{id:"bad",kind:"preference",text:"x".repeat(2000)}]});
+   if(intent.includes("FAIL")) content=JSON.stringify({blocks:[{id:"bad",kind:"preference",text:"x".repeat(5000)}]});
    else if(intent.includes("EMPTY")) content=JSON.stringify({blocks:[]});
    else content=JSON.stringify({blocks:[{id:"mem-1",kind:"preference",text:"Use pnpm, not npm",paths:[]}]});
  }
@@ -3766,7 +3819,7 @@ createInterface({input:process.stdin}).on("line",line=>{
         .content
         .as_deref()
         .unwrap_or("")
-        .contains("<project-memory"));
+        .contains("<plugin-context"));
     let empty = vec![
         Message::new("system", "system"),
         Message::new("user", "EMPTY please use pnpm"),
@@ -3840,5 +3893,531 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
         .await?;
     let log = fs::read_to_string(plugin.join("events.log"))?;
     assert_eq!(log.matches("\"type\":\"task_finished\"").count(), 2);
+    Ok(())
+}
+
+/// A host control note shares `role = user` as transport. Recall must stay on
+/// the human turn, and the pack must never be injected into the host note.
+#[tokio::test]
+async fn memory_recall_survives_a_host_control_reference_in_the_projection() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let directory = temp.path().join("plugins").join("memory");
+    fs::create_dir_all(&directory)?;
+    fs::write(
+        directory.join("plugin.toml"),
+        "api_version=2\nid='memory'\nname='Memory'\ncommand='node'\nargs=['main.js']\ncapabilities=['provide_context']\n",
+    )?;
+    fs::write(
+        directory.join("main.js"),
+        r#"const fs=require("node:fs");
+require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
+ const req=JSON.parse(line);
+ fs.appendFileSync("requests.log",JSON.stringify({type:req.type,intent:req.arguments?.intent,budget:req.arguments?.budget})+"\n");
+ const content=req.type==="provide_context"
+   ? JSON.stringify({blocks:[{id:"rule-1",kind:"preference",text:"Use pnpm, not npm"}]})
+   : "{}";
+ process.stdout.write(JSON.stringify({protocol_version:2,request_id:req.request_id,content})+"\n");
+});"#,
+    )?;
+    let user = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?
+        .set_enabled("memory", true)?;
+    let catalog = PluginCatalog::discover_at(user, state, temp.path())?;
+    let captured = Arc::new(CaptureModel::default());
+    let model = catalog.model_hooks(
+        captured.clone(),
+        ContextConfig::with_output_reserve(32768, 1024)?,
+    );
+    let archive = temp.path().join("sessions").join("s1.json");
+    model.set_session_context("s1", &archive);
+    let mut note = Message::new("user", "[任务控制参考] 目标 mem-1 · 修订 2 · 状态 running");
+    note.provider_items = Some(vec![serde_json::json!({
+        "type": kroma::task_control::CONTROL_NOTE_ITEM_TYPE,
+        "source": "host"
+    })]);
+    let history = vec![
+        Message::new("system", "system"),
+        Message::new("user", "please use pnpm"),
+        Message::new("assistant", "ok"),
+        note.clone(),
+    ];
+    model.complete(&history, &[], &mut |_| {}).await?;
+    let sent = captured.0.lock().unwrap().clone();
+    let human = sent[1].content.as_deref().unwrap_or("");
+    assert!(
+        human.starts_with("please use pnpm\n\n<plugin-context trust="),
+        "the real user turn carries the pack: {human}"
+    );
+    assert!(human.contains("Use pnpm, not npm"));
+    assert_eq!(
+        sent[3].content.as_deref(),
+        note.content.as_deref(),
+        "an active host control note must stay untouched"
+    );
+    let log = fs::read_to_string(directory.join("requests.log"))?;
+    assert!(log.contains("\"intent\":\"please use pnpm\""), "{log}");
+    assert!(
+        !log.contains("任务控制参考"),
+        "host control text must never become the recall intent: {log}"
+    );
+    let budget_of = |log: &str| -> usize {
+        log.lines()
+            .next_back()
+            .and_then(|line| line.split("\"max_tokens\":").nth(1))
+            .and_then(|rest| rest.split(|ch: char| !ch.is_ascii_digit()).next())
+            .and_then(|digits| digits.parse().ok())
+            .expect("a memory budget is requested")
+    };
+    let small_window = budget_of(&log);
+    assert!(
+        small_window > 32_768 / 100,
+        "the budget is a real budget, never available_input/100: {small_window}"
+    );
+    let calls = log.matches("\"type\":\"provide_context\"").count();
+    model.complete(&history, &[], &mut |_| {}).await?;
+    let log = fs::read_to_string(directory.join("requests.log"))?;
+    assert_eq!(
+        log.matches("\"type\":\"provide_context\"").count(),
+        calls,
+        "the same human boundary reuses the cached pack"
+    );
+    // A much larger model window must not change the memory budget.
+    let wide = catalog.model_hooks(
+        Arc::new(CaptureModel::default()),
+        ContextConfig::with_output_reserve(200_000, 4096)?,
+    );
+    wide.set_session_context("wide", &archive);
+    wide.complete(
+        &[
+            Message::new("system", "system"),
+            Message::new("user", "a much larger window"),
+        ],
+        &[],
+        &mut |_| {},
+    )
+    .await?;
+    let log = fs::read_to_string(directory.join("requests.log"))?;
+    assert_eq!(
+        budget_of(&log),
+        small_window,
+        "the memory budget does not scale with the model window"
+    );
+    Ok(())
+}
+
+/// The memory budget is a user setting (default 1024) shared by every provider.
+/// A whole 4000-character record and more than six core blocks are admitted;
+/// what no longer fits is named in a compact host notice instead of silently
+/// disappearing, and an oversized block never stops a later valid one.
+#[tokio::test]
+async fn memory_pack_budget_is_user_set_and_whole_blocks_are_admitted() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let directory = temp.path().join("plugins").join("memory");
+    fs::create_dir_all(&directory)?;
+    fs::write(
+        directory.join("plugin.toml"),
+        "api_version=2\nid='memory'\nname='Memory'\ncommand='node'\nargs=['main.js']\ncapabilities=['provide_context']\n\n[settings]\ncontext_tokens = 4096\n",
+    )?;
+    fs::write(
+        directory.join("main.js"),
+        r#"const fs=require("node:fs");
+require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
+ const req=JSON.parse(line);
+ fs.appendFileSync("requests.log",JSON.stringify({type:req.type,intent:req.arguments?.intent,budget:req.arguments?.budget})+"\n");
+ const blocks=[];
+ for(let i=1;i<=8;i++) blocks.push({id:"core-"+i,kind:"preference",text:"core rule "+i+" "+"x".repeat(180)});
+ blocks.push({id:"long-rule",kind:"decision",text:"LONG"+"y".repeat(3990)+"END"});
+ blocks.push({id:"tail-rule",kind:"preference",text:"tail rule survives"});
+ blocks.push({id:"too-big",kind:"preference",text:"z".repeat(5000)});
+ process.stdout.write(JSON.stringify({protocol_version:2,request_id:req.request_id,content:JSON.stringify({blocks})})+"\n");
+});"#,
+    )?;
+    let user = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    let install = PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?;
+    install.set_enabled("memory", true)?;
+    let catalog = PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?;
+    let captured = Arc::new(CaptureModel::default());
+    let model = catalog.model_hooks(
+        captured.clone(),
+        ContextConfig::with_output_reserve(32768, 1024)?,
+    );
+    model.set_session_context("s1", &temp.path().join("s1.json"));
+    let history = vec![
+        Message::new("system", "system"),
+        Message::new("user", "first turn"),
+    ];
+    model.complete(&history, &[], &mut |_| {}).await?;
+    let sent = captured.0.lock().unwrap().clone();
+    let human = sent[1].content.as_deref().unwrap_or("").to_owned();
+    assert!(human.contains("core rule 1"), "{human}");
+    assert!(
+        human.contains("core rule 8"),
+        "more than six core blocks fit one frame: {human}"
+    );
+    assert!(
+        human.contains("LONG") && human.contains("END"),
+        "a 4000-character record is admitted whole, never truncated: {human}"
+    );
+    assert!(human.contains("tail rule survives"), "{human}");
+    assert!(
+        !human.contains(&"z".repeat(64)),
+        "an oversized block is dropped whole: {human}"
+    );
+    assert!(
+        !human.contains("omitted by the context budget"),
+        "everything fits the configured budget: {human}"
+    );
+    let log = fs::read_to_string(directory.join("requests.log"))?;
+    assert!(
+        log.contains("\"max_tokens\":4096"),
+        "the user setting, not the model window, sets the budget: {log}"
+    );
+    // A smaller user budget keeps the best candidates, names the rest and never
+    // fails the request.
+    PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?.set_config(
+        "memory",
+        "context_tokens",
+        Some("300"),
+    )?;
+    let smaller = PluginCatalog::discover_at(user, state, temp.path())?;
+    let captured = Arc::new(CaptureModel::default());
+    let model = smaller.model_hooks(
+        captured.clone(),
+        ContextConfig::with_output_reserve(32768, 1024)?,
+    );
+    model.set_session_context("s2", &temp.path().join("s2.json"));
+    let history = vec![
+        Message::new("system", "system"),
+        Message::new("user", "second turn"),
+    ];
+    model.complete(&history, &[], &mut |_| {}).await?;
+    let sent = captured.0.lock().unwrap().clone();
+    let human = sent[1].content.as_deref().unwrap_or("").to_owned();
+    assert!(human.contains("core rule 1"), "{human}");
+    assert!(
+        human.contains("memory block(s) omitted by the context budget"),
+        "omitted rules are reported, not silently dropped: {human}"
+    );
+    assert!(
+        human.contains("long-rule"),
+        "the notice names the omitted ids: {human}"
+    );
+    assert!(
+        human.contains("tail rule survives"),
+        "a later smaller block is still attempted after an omitted one: {human}"
+    );
+    Ok(())
+}
+
+/// A transient recall failure is a skipped optional call, never a cached empty
+/// answer: the next model round asks again instead of silencing memory.
+#[tokio::test]
+async fn a_failed_recall_is_retried_instead_of_cached_as_empty() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let directory = temp.path().join("plugins").join("memory");
+    fs::create_dir_all(&directory)?;
+    fs::write(
+        directory.join("plugin.toml"),
+        "api_version=2\nid='memory'\nname='Memory'\ncommand='node'\nargs=['main.js']\ncapabilities=['provide_context']\n",
+    )?;
+    fs::write(
+        directory.join("main.js"),
+        r#"const fs=require("node:fs");
+require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
+ const req=JSON.parse(line);
+ const seen=fs.existsSync("calls.log")
+   ? fs.readFileSync("calls.log","utf8").split("\n").filter(Boolean).length : 0;
+ fs.appendFileSync("calls.log","call\n");
+ const content=seen===0 ? "not json"
+   : JSON.stringify({blocks:[{id:"rule-1",kind:"preference",text:"Use pnpm, not npm"}]});
+ process.stdout.write(JSON.stringify({protocol_version:2,request_id:req.request_id,content})+"\n");
+});"#,
+    )?;
+    let user = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?
+        .set_enabled("memory", true)?;
+    let catalog = PluginCatalog::discover_at(user, state, temp.path())?;
+    let captured = Arc::new(CaptureModel::default());
+    let model = catalog.model_hooks(
+        captured.clone(),
+        ContextConfig::with_output_reserve(32768, 1024)?,
+    );
+    model.set_session_context("s1", &temp.path().join("s1.json"));
+    let history = vec![
+        Message::new("system", "system"),
+        Message::new("user", "use pnpm here"),
+    ];
+    model.complete(&history, &[], &mut |_| {}).await?;
+    let sent = captured.0.lock().unwrap().clone();
+    assert_eq!(
+        sent[1].content.as_deref(),
+        Some("use pnpm here"),
+        "a broken optional reply must not fail or rewrite the request"
+    );
+    model.complete(&history, &[], &mut |_| {}).await?;
+    let sent = captured.0.lock().unwrap().clone();
+    assert!(
+        sent[1]
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .contains("Use pnpm, not npm"),
+        "the retry must be able to recover the pack"
+    );
+    let calls = fs::read_to_string(directory.join("calls.log"))?;
+    assert_eq!(
+        calls.lines().filter(|line| !line.is_empty()).count(),
+        2,
+        "a degraded answer must not be cached as an empty success"
+    );
+    Ok(())
+}
+
+/// Private plugin data is protected before the first lazy write: a fresh
+/// repository cannot add it, an existing user ignore file is never rewritten,
+/// and data that Git already tracks is refused instead of silently committed.
+#[tokio::test]
+async fn project_plugin_data_is_git_ignored_before_the_first_write() -> Result<()> {
+    if Command::new("git").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let workdir = temp.path().join("repo");
+    fs::create_dir_all(&workdir)?;
+    let git = |args: &[&str]| -> Result<(bool, String)> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&workdir)
+            .args(args)
+            .output()?;
+        Ok((
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).to_string(),
+        ))
+    };
+    assert!(git(&["init", "-q"])?.0, "git init");
+    // The user already wrote an ignore rule in the shared plugin-data root.
+    fs::create_dir_all(workdir.join(".kroma/plugin-data"))?;
+    let user_ignore = workdir.join(".kroma/plugin-data/.gitignore");
+    fs::write(&user_ignore, "*.keep\n")?;
+    let directory = workdir.join(".kroma/plugins/notes");
+    fs::create_dir_all(&directory)?;
+    fs::write(
+        directory.join("plugin.toml"),
+        "id='notes'\nname='Notes'\ncommand='node'\nargs=['main.js']\n[[tools]]\nname='notes_write'\ndescription='write the private db'\n",
+    )?;
+    fs::write(
+        directory.join("main.js"),
+        r#"const fs=require("node:fs"),path=require("node:path");
+require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
+ const req=JSON.parse(line);
+ let content="saved",is_error=false;
+ try{
+   fs.mkdirSync(req.data_dir,{recursive:true});
+   fs.writeFileSync(path.join(req.data_dir,"notes.json"),"[]");
+ }catch(error){ is_error=true; content=String(error); }
+ process.stdout.write(JSON.stringify({protocol_version:1,request_id:req.request_id,content,is_error})+"\n");
+});"#,
+    )?;
+    let state = temp.path().join("plugins.toml");
+    let user = temp.path().join("plugins");
+    PluginCatalog::discover_at(user.clone(), state.clone(), &workdir)?
+        .set_enabled("notes", true)?;
+    let catalog = PluginCatalog::discover_at(user.clone(), state.clone(), &workdir)?;
+    let mut tools = ToolRegistry::builtin();
+    assert!(catalog
+        .contribute(&mut tools, &mut PromptComposer::default())
+        .is_empty());
+    let call = ToolCall {
+        id: "notes-1".into(),
+        kind: "function".into(),
+        function: FunctionCall {
+            name: "notes_write".into(),
+            arguments: "{}".into(),
+        },
+    };
+    let context = || ToolContext {
+        model_connection: None,
+        user_message: None,
+        user_turn: None,
+        user_images: None,
+        previous_user_images: None,
+        workdir: &workdir,
+        archive: &workdir,
+        on_output: None,
+        ask: None,
+    };
+    let result = tools.execute(&call, context()).await;
+    assert!(!result.is_error, "{}", result.content);
+    let data = workdir.join(".kroma/plugin-data/notes");
+    assert_eq!(
+        fs::read_to_string(data.join(".gitignore"))?,
+        "*\n!/.gitignore\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&user_ignore)?,
+        "*.keep\n",
+        "an existing user ignore file is never rewritten"
+    );
+    assert!(git(&["add", "-A"])?.0);
+    let tracked = git(&["ls-files"])?.1;
+    assert!(
+        !tracked.contains("notes.json"),
+        "the private db must not be addable: {tracked}"
+    );
+    assert!(
+        tracked.contains(".kroma/plugin-data/notes/.gitignore"),
+        "the protective rule itself stays reviewable: {tracked}"
+    );
+    assert!(git(&["check-ignore", "-q", ".kroma/plugin-data/notes/notes.json"])?.0);
+    // Data that is already tracked is refused, not claimed as ignored.
+    assert!(git(&["add", "-f", ".kroma/plugin-data/notes/notes.json"])?.0);
+    let catalog = PluginCatalog::discover_at(user, state, &workdir)?;
+    let mut tools = ToolRegistry::builtin();
+    assert!(catalog
+        .contribute(&mut tools, &mut PromptComposer::default())
+        .is_empty());
+    let refused = tools.execute(&call, context()).await;
+    assert!(refused.is_error);
+    assert!(
+        refused.content.contains("tracked by Git"),
+        "{}",
+        refused.content
+    );
+    Ok(())
+}
+/// The acceptance test for hot plugging: this plugin's id, tool, command, panel
+/// and presentation appear nowhere in the runtime. Installing it must be the
+/// whole integration — no core edit.
+#[tokio::test]
+async fn an_unseen_plugin_needs_no_core_change() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let user = temp.path().join("plugins");
+    let state_path = temp.path().join("plugins.toml");
+    let workspace = temp.path().join("project");
+    fs::create_dir_all(&workspace)?;
+    let source =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins/timeline-note");
+    let discover = || PluginCatalog::discover_at(user.clone(), state_path.clone(), &workspace);
+    let fingerprint =
+        || kroma::plugins::source_fingerprint_at(std::slice::from_ref(&user), Some(state_path.as_path()));
+    let before_install = fingerprint();
+    discover()?.install(&source)?;
+    discover()?.set_enabled("timeline-note", true)?;
+    let enabled = discover()?;
+    assert_ne!(
+        fingerprint(),
+        before_install,
+        "a running conversation notices the new plugin"
+    );
+
+    let mut tools = ToolRegistry::builtin();
+    let mut prompt = PromptComposer::default();
+    assert!(enabled.contribute(&mut tools, &mut prompt).is_empty());
+    let mut messages = prompt.initial_history(&workspace);
+    prompt.apply(&mut messages);
+    assert!(messages[0]
+        .content
+        .as_deref()
+        .unwrap_or_default()
+        .contains("note_thread"));
+
+    // Declared presentation reaches every interface through one interface.
+    assert_eq!(
+        enabled
+            .ui_tool_labels()?
+            .get("note_thread")
+            .map(String::as_str),
+        Some("记录线索")
+    );
+    assert_eq!(enabled.ui_statuses(), vec!["线索笔记已就绪".to_owned()]);
+    assert!(enabled.ui_activity_frames()?.len() >= 2);
+    assert_eq!(
+        enabled.ui_shortcuts()?,
+        vec![('n', "/note".to_owned())],
+        "an Alt+letter shortcut is just a manifest declaration"
+    );
+    assert_eq!(
+        enabled.ui_panels(),
+        vec![("timeline-note".to_owned(), "线索笔记".to_owned(), true)]
+    );
+    assert_eq!(
+        enabled.ui_colors()?.get("accent").map(String::as_str),
+        Some("#8fc79a")
+    );
+    assert_eq!(
+        enabled
+            .ui_layout()?
+            .and_then(|layout| layout.composer_max_rows),
+        Some(5)
+    );
+
+    if Command::new("node").arg("--version").output().is_err() {
+        // Without Node only the declarative surface is meaningful.
+        return Ok(());
+    }
+    let archive = temp.path().join("archive");
+    let call = ToolCall {
+        id: "tool-1".into(),
+        kind: "function".into(),
+        function: FunctionCall {
+            name: "note_thread".into(),
+            arguments: r#"{"text":"检查恢复路径","tag":"review"}"#.into(),
+        },
+    };
+    let first = tools
+        .execute(
+            &call,
+            ToolContext {
+                model_connection: None,
+                user_message: None,
+                user_turn: None,
+                user_images: None,
+                previous_user_images: None,
+                workdir: &workspace,
+                archive: &archive,
+                on_output: None,
+                ask: None,
+            },
+        )
+        .await;
+    assert!(!first.is_error, "{}", first.content);
+    assert!(first.content.contains("检查恢复路径"), "{}", first.content);
+
+    let mut commands = CommandRegistry::builtin(vec![])?;
+    assert!(enabled.register_commands(&mut commands).is_empty());
+    assert!(commands.knows("/note"));
+    let client = Arc::new(ModelClient::new(
+        "http://127.0.0.1:9/v1",
+        None,
+        "test".into(),
+    )?);
+    let mut agent = Agent::with_backends(client, ToolRegistry::builtin(), workspace.clone())?;
+    let input = agent.task_input();
+    let listed = commands
+        .execute_async("/note", &mut agent, &input)
+        .await?
+        .expect("plugin command registered")
+        .output;
+    assert!(listed.contains("检查恢复路径"), "{listed}");
+    assert!(
+        enabled.ui_panel("timeline-note")?.contains("检查恢复路径"),
+        "the panel shows the same state the tool wrote"
+    );
     Ok(())
 }

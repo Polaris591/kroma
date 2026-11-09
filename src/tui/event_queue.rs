@@ -335,7 +335,7 @@ impl State {
             6 => self.finished.take().map(|(_, event)| event),
             7 => self.notice.take().map(|(_, event)| event),
             8 => self.git.take().map(|(_, event)| event),
-            _ => unreachable!("the lane is selected from nine fixed slots"),
+            _ => unreachable!("the lane is selected from fixed slots"),
         }
     }
 }
@@ -365,6 +365,20 @@ fn event_bytes(event: &UiEvent) -> usize {
             UiEvent::ToolFinished { id, result, .. } => id.capacity() + result.capacity(),
             UiEvent::ToolOutput { id, stream, chunk } => {
                 id.capacity() + stream.capacity() + chunk.capacity()
+            }
+            UiEvent::ControlStatus {
+                owner,
+                id,
+                status,
+                reason,
+                summary,
+                ..
+            } => {
+                owner.capacity()
+                    + id.capacity()
+                    + status.capacity()
+                    + reason.capacity()
+                    + summary.capacity()
             }
             UiEvent::TitleUsage { session_id, .. } => session_id.capacity(),
             UiEvent::GitInfo { session, info, .. } => {

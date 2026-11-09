@@ -1,5 +1,11 @@
 # 独立读取合并提示：单句 A/B 消融
 
+**可复现性声明。** 文中证据目录 `D:/Kroma/experiments/...` 位于 git 仓库之外（仓库根为
+`D:/Kroma/kroma`），未入库；clone 本仓库无法复算文中数字，只能按本文件的命令重新生成新的
+实验目录。运行方式：标准库 Python 3.12，经 `uv run --no-project --python 3.12 python ...`
+执行；Rust 侧使用仓库自带工具链（`cargo build --locked`）。文中未记录 uv 版本，因此通过率、
+耗时与 Token 均为历史记录，不能仅凭本仓库重算。
+
 ## 只改一个变量
 
 - A：当前源码中的生产 EXECUTION_GUIDANCE + V7_GUIDANCE，原样提取。

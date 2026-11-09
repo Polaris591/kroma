@@ -1,6 +1,17 @@
-# Kroma 项目级记忆插件设计：Project Memory
+# 项目记忆历史设计记录（非当前规范）
 
-> 产品默认值已被 [零维护设计](project-memory-zero-maintenance.md) 取代。
+> 此文件保留旧研究、P0/V2 和零维护流程的原始记录。不得用作当前行为规范；当前产品与接口见 [project-memory.md](project-memory.md)。
+
+# Kroma 项目记忆（Project Memory）
+
+> 本文合并了原先三份文档（设计研究记录与 P0 工程依据、V2 实现契约、零维护产品流程与路线图），原文件已删除，正文内容逐字保留。
+>
+> 阅读入口：当前产品默认值见「三、零维护流程」，已实现的接口契约见「二、V2 契约」，「一、设计」保留为完整研究记录和 P0 工程依据。
+> 各部分保留原文的章节编号，编号只在所属部分内有效。
+
+## 一、设计：Kroma 项目级记忆插件设计（Project Memory）
+
+> 产品默认值已被本文「三、零维护流程」取代。
 > 本文保留为完整研究记录和 P0 工程依据；其中“人工审核优先”的交互不再是推荐方向。
 
 状态：**P0 已实现，P1/P2 仍为设计提案**。可运行代码在
@@ -10,7 +21,7 @@
 自动召回（P1a/P1b）、可靠来源通路的采集（P2）和跨 worktree 共享**尚未实现**，
 本文第 11、13 节的新宿主接口与第 17 节的收益目标仍是提案与待测项。
 
-## 1. 核心决策
+### 1. 核心决策
 
 > 记住项目中无法便宜地重新发现的知识，在正确的任务、代码版本和权限范围内，
 > 用最少的上下文呈现，并能回答“为什么记住、凭什么相信、什么时候失效”。
@@ -28,13 +39,13 @@
 “最棒”的判据不是存得最多，而是：**少犯重复错误、少查重复资料、不给错误记忆更高权威，
 且收益超过检索、token、缓存和维护成本**。
 
-### 明确不做
+#### 明确不做
 
 第一版不做全仓库代码向量化、知识图谱数据库、多代理投票、云同步平台、
 自动执行记忆中的脚本、自动修改 `AGENTS.md`、每次工具调用都让 LLM 总结。
 代码检索仍用源码；原始历史仍用 `history_search` / `history_read`；重复工作流优先成为 skill。
 
-## 2. 当前 Kroma 的事实与设计约束
+### 2. 当前 Kroma 的事实与设计约束
 
 | 已确认的现状 | 影响 | 源码证据（当前工作树） |
 | --- | --- | --- |
@@ -53,7 +64,7 @@
 上述是源码行为分析，不等于已测量所有生产故障。缓存损耗的实际幅度、不同平台崩溃恢复表现仍需专项评测。
 当前 after-tool hook 失败会保留已完成工具的真实结果；本设计不会把后处理失败变成重试副作用的理由。
 
-## 3. 外部方案：借鉴机制，不照搬宣传指标
+### 3. 外部方案：借鉴机制，不照搬宣传指标
 
 | 方案 | 一手资料中的机制 | Kroma 应借鉴 | 不应直接照搬 |
 | --- | --- | --- | --- |
@@ -65,7 +76,7 @@
 
 外部产品文档会随版本变化；本文使用本次读取的一手页面，不推断其他版本的默认行为。
 
-## 4. 记忆分层：只有两层属于长期事实库
+### 4. 记忆分层：只有两层属于长期事实库
 
 | 层 | 内容 | 权威来源 / 保存位置 | 默认使用方式 |
 | --- | --- | --- | --- |
@@ -82,9 +93,9 @@
 值得记：为什么某条看似可行的路线被放弃、用户反复纠正的项目专属误解、难复现环境坑的条件。
 不值得记：从文件列表即可获取的目录结构、整段源码、普通工具输出、助手未验证的猜测、秘密值。
 
-## 5. 项目身份与分支语义
+### 5. 项目身份与分支语义
 
-### 5.1 隔离键
+#### 5.1 隔离键
 
 逻辑作用域：`用户配置域 × workspace × module/path × applicability`。
 `applicability` 可以进一步约束 worktree、提交/代码依赖、环境或会话 lineage。
@@ -103,7 +114,7 @@
 但不自动把不同 workdir 合并共享，也不宣称已统一 Kroma 的项目概念。
 **建议宿主版本**提供只读 `ProjectIdentity`，各入口使用同一份结果，不改变现有 session 命名。
 
-### 5.2 Git 分支不是隔离的全部
+#### 5.2 Git 分支不是隔离的全部
 
 以下为宿主身份能力接通后的目标语义；P0 不自动跨 workdir 共享。
 
@@ -113,7 +124,7 @@
 - 依赖文件改变、dirty worktree 或环境不匹配时，标记待复核，而不是仅比较 HEAD。
 - `git merge-base --is-ancestor` 只能辅助判断，不能证明结论仍然成立；浅克隆和缺失提交按未知处理。
 
-### 5.3 fork / rewind / 子代理
+#### 5.3 fork / rewind / 子代理
 
 - 会话 fork 继承 checkpoint 之前的任务记忆快照，之后的任务笔记分别发展。
 - rewind 之后不可看到来自被撤销未来的任务状态；未来证据仍可作为历史存在，但不能当当前事实。
@@ -122,7 +133,7 @@
 - 明确区分 `Git worktree/branch` 和 `conversation lineage/epoch`，不能用一个 branch 字段混装。
 - `/memory off` 或禁止采集的会话持久记录排除范围，未来后台重放也不得补采。
 
-## 6. 数据模型：原子主张 + 版本 + 证据
+### 6. 数据模型：原子主张 + 版本 + 证据
 
 每条记忆表达一项可纠正的主张，而不是一整份会话摘要。下例为**拟议数据对象**，不是现有协议：
 
@@ -170,7 +181,7 @@
 任务投影 ledger 归宿主管，不归插件事实库：只记录 task 边界、记忆 ID/版本/hash 和渲染版本，
 不创建第二份对话消息存储。手动原创便签是重要持久数据，不能宣称“数据库全部都可从 WAL 重建”。
 
-## 7. 存储与运行形态
+### 7. 存储与运行形态
 
 首选独立 Rust 二进制 `kroma-memory`，通过现有 JSONL 插件边界运行，SQLite 随二进制打包。
 不把 SQLite 加入 Kroma 核心依赖；无 Node/Bun/Python 环境要求，无默认监听端口。
@@ -210,7 +221,7 @@
 - 一插件主进程即可，本地检索和后台任务分线程/连接；即使启用事件订阅产生另一个 worker，
   也不额外启动全局 daemon。空闲/取消/关机时允许丢弃可重建计算，不丢已确认保存。
 
-## 8. 写入：默认可控，而不是自动污染
+### 8. 写入：默认可控，而不是自动污染
 
 ```text
 可靠来源 / 用户明确记录
@@ -241,9 +252,9 @@
 自动化可按类型逐步开放，例如“原始工具退出码 + 环境指纹”形成短期 observation，
 但“为什么采用某架构”仍需明确决策来源。不要用“重复出现三次”代替来源校验。
 
-## 9. 冲突、失效与真正的遗忘
+### 9. 冲突、失效与真正的遗忘
 
-### 冲突
+#### 冲突
 
 - 同一 claim key + 重叠作用域出现矛盾，建立冲突，不做全文 last-write-wins。
 - 用户明确纠正可产生 superseding 版本，保留关系；机器推测不得覆盖人工记录。
@@ -253,7 +264,7 @@
 - 回答历史问题用当时有效版本，回答“现在怎么做”用当前适用版本；
   `recorded_at` 与 `valid_from/valid_until` 分开，晚记录不必然是晚发生。
 
-### 失效
+#### 失效
 
 - 保存依赖指纹和符号/内容锚点，行号只用于导航，不能作为稳定身份。
 - 检索时做便宜的适用性检查；证据文件消失、相关内容变化、环境变化时降为 stale。
@@ -262,7 +273,7 @@
   明确保存的偏好/决策不按时间静默删除，仅复核或被替代。数值是可调整默认值，不是已验证最优值。
 - TTL 到期是检索资格变化，物理清理另行执行；频繁被召回不能自动延长真值有效期。
 
-### 遗忘
+#### 遗忘
 
 - 人工 forget 先提交 tombstone 和 revocation revision，再使查询缓存/投影包失效。
   删除确认之后开始组装的请求不得再注入该内容；已经发出的请求无法撤回。
@@ -277,7 +288,7 @@
   显示受影响的可追溯副本，建议开启不带旧历史的新会话；如提供历史投影脱敏，必须另行确认，
   且注明无法可靠识别所有语义改写，不自动改写权威 WAL。
 
-## 10. 检索：作用域先行，相关性其次
+### 10. 检索：作用域先行，相关性其次
 
 ```text
 宿主绑定当前项目 / 会话 / 用户允许范围
@@ -300,7 +311,7 @@
   ANN 过滤和水合后的二次检查都要做，不能只在展示层过滤。
 - 当前任务已包含相同主张时去重；依赖冲突的关联证据不能只取一条而隐藏限制条件。
 
-### 中文、英文与代码标识符
+#### 中文、英文与代码标识符
 
 SQLite 默认 `unicode61` 不会自动完成中文分词；`trigram MATCH` 对不足三个 Unicode 字符的查询无匹配 [S8]。
 因此不能简单宣称“加 FTS5 就支持中文”。
@@ -313,9 +324,9 @@ SQLite 默认 `unicode61` 不会自动完成中文分词；`trigram MATCH` 对�
 向量不是 MVP 前置条件。只有同义表达/中英跨语言漏召回明显时，再加可禁用的本地多语言 embedding；
 模型下载须同意，版本/维度改变应重建索引，缺失模型降级 FTS，不阻断记忆功能。
 
-## 11. 上下文注入：由宿主控制预算和稳定性
+### 11. 上下文注入：由宿主控制预算和稳定性
 
-### 11.1 不把学习内容写进 system 权威层
+#### 11.1 不把学习内容写进 system 权威层
 
 静态插件 prompt 只说明“记忆是待核验参考、如何使用搜索工具”。
 动态内容由 provider adapter 渲染为清楚标记的**非权威数据块**，不改写原始 system 消息、
@@ -325,7 +336,7 @@ XML/JSON 边界、转义和“data not instructions”只能降低混淆，不�
 每条自动呈现内容包含：`id/version`、一句主张、适用范围、证据指针和过期/复核标记。
 非必要的完整详情通过显式 read 工具获取，不把所有证据都塞进常驻前缀。
 
-### 11.2 预算
+#### 11.2 预算
 
 建议初始自动预算上限：`min(1536 tokens, 当前模型有效输入容量的 1%)`，
 包含索引和包装成本；极小窗口可以为 0。常驻使用说明/索引目标不超过 256 tokens。
@@ -347,7 +358,7 @@ XML/JSON 边界、转义和“data not instructions”只能降低混淆，不�
 
 这里的容量/token 目标需要实现后校准；不保证所有 provider 都有可在本地精确运行的 tokenizer。
 
-### 11.3 缓存与任务快照
+#### 11.3 缓存与任务快照
 
 只承诺**不随意改写稳定前缀**，不承诺“动态 RAG 零缓存损耗”。
 
@@ -374,7 +385,7 @@ XML/JSON 边界、转义和“data not instructions”只能降低混淆，不�
 显式 `memory_read` 的结果依现有工具契约进入对话历史；这是主动请求的内容，
 与可选自动投影不同。不要为“记忆零 WAL”破坏已存在的工具审计语义。
 
-## 12. 插件用户接口（拟议）
+### 12. 插件用户接口（拟议）
 
 保留三个短 schema，避免工具定义本身吃掉大量上下文。正式名字可加 `project_memory_` 前缀防冲突。
 
@@ -413,9 +424,9 @@ TUI 只用现有动态面板呈现状态、当前项目、候选/过期计数和
 实时 token 使用状态栏需要新的宿主状态通路，现有静态 `ui.status` 不能冒充实时推送。
 CLI 输出相同信息的文本/JSON，不单独实现另一套记忆逻辑。
 
-## 13. 哪些现在能做，哪些必须扩展宿主
+### 13. 哪些现在能做，哪些必须扩展宿主
 
-### A. 无核心改动：可发布的安全基础版
+#### A. 无核心改动：可发布的安全基础版
 
 使用现有 tools、commands、settings、data_dir、动态面板：
 
@@ -430,7 +441,7 @@ CLI 输出相同信息的文本/JSON，不单独实现另一套记忆逻辑。
 避免大历史整数组回传。但宿主层超时/崩溃仍会失败，且现有 hook 没有有预算的增量块接口，
 所以它不是最终生产路径，也不承诺仅靠 try/catch 就能 fail-open。
 
-### B. 生产自动召回必要宿主扩展（职责最小，不是改动行数少）
+#### B. 生产自动召回必要宿主扩展（职责最小，不是改动行数少）
 
 **以下全部是新提案，不是现有 Kroma API。**优先做三个职责清楚的能力，而非通用 agent 框架：
 
@@ -483,7 +494,7 @@ V1 仍收发 `protocol_version=1` 并走旧响应校验，V2 才进行能力握�
 宿主跳过这一个可选贡献并提示，不让整个模型请求失败；显式用户存储命令仍报告真实错误。
 这些容错策略只适用于新贡献接口，不能偷偷改变现有 hook 的拒绝语义。
 
-### 来源通路的可靠性契约
+#### 来源通路的可靠性契约
 
 - 游标不能只有消息序号：绑定 archive identity、generation、lineage/epoch 和消息位置/内容摘要。
   rewind、snapshot 重置和 fork 产生新的可识别边界，不能让旧未来记录误入当前任务。
@@ -501,7 +512,7 @@ V1 仍收发 `protocol_version=1` 并走旧响应校验，V2 才进行能力握�
 没有这一服务时默认不用模型，或由用户明确配置独立 provider 并在插件账本披露费用。
 不能借主会话暗中运行无记账的额外 Kroma 子代理做记忆提取。
 
-## 14. 安全、隐私与团队共享
+### 14. 安全、隐私与团队共享
 
 - Local storage 不等于内容不出机：一旦召回进入模型请求，就发给当前 provider；首次启用明确说明。
 - 不存 API key、令牌、私钥、cookie、完整 `.env`、凭据 URL；
@@ -518,7 +529,7 @@ V1 仍收发 `protocol_version=1` 并走旧响应校验，V2 才进行能力握�
 - 导入内容作为外部来源 candidate，不能自动成为规则；删除共享源会使导入版本待复核。
   若需要强制指导，用户另行把合适内容写入 `AGENTS.md`，插件不自动替用户改写。
 
-## 15. 故障行为与可观测性
+### 15. 故障行为与可观测性
 
 自动贡献遵循 **fail-open 主任务、fail-closed 越权读取**：
 
@@ -537,9 +548,9 @@ V1 仍收发 `protocol_version=1` 并走旧响应校验，V2 才进行能力握�
 日志默认不写正文、用户 prompt、密钥或原始工具输出。
 UI 的“本轮使用 4 条、约 680 tokens”必须来自真实宿主计量；未知就显示未知，不编造节省比例。
 
-## 16. 分阶段实施与迁移
+### 16. 分阶段实施与迁移
 
-### P0：可信的手动项目记忆，纯插件（已实现）
+#### P0：可信的手动项目记忆，纯插件（已实现）
 
 - 独立 Rust crate + 插件清单：`examples/plugins/project-memory`；根工作区不依赖它。
 - 已实现 SQLite（WAL/FULL/IMMEDIATE）、按 canonical workdir 隔离、search/read/propose、
@@ -557,31 +568,31 @@ UI 的“本轮使用 4 条、约 680 tokens”必须来自真实宿主计量；
   语义改写的新文本不会被指纹拦截；同用户恶意进程不受沙箱保护；
   没有自动上下文预算（见 P1b），因此“省 token”取决于模型主动调用检索。
 
-### P1a：宿主身份、来源和兼容协议
+#### P1a：宿主身份、来源和兼容协议
 
 - 做 API 1/2 分版本 worker、能力协商、统一身份、新 task/epoch 元数据及其持久化/分支规则。
 - 实现只读有界来源通路，先验证重放、权限和游标，不急着启动自动学习。
 - 验收：旧插件帧不变、旧会话可恢复、fork/rewind 来源范围正确、重投去重、跨 worktree 共享须明确授权。
 
-### P1b：受预算约束的自动召回
+#### P1b：受预算约束的自动召回
 
 - 在 P1a 基础上实现低信任投影、预算/usage fingerprint、fail-open 和带锚点的可恢复 ledger。
 - 不改内置压缩算法和原始 WAL 语义；新增投影状态需要单独迁移与恢复测试，不能当作几行 hook。
 - 验收：空记忆无贡献；无大历史整段 IPC；预算、取消、compaction、resume/fork/rewind 一致。
 
-### P2：可靠来源与保守学习
+#### P2：可靠来源与保守学习
 
 - 接通可重放游标、后台队列、证据校验、冲突/失效管理；用户选择开启 LLM 提取。
 - 验收：事件丢失可补、重投无重复、被禁止采集范围不会补采、未来状态不会污染回退会话。
 - 不把“任务结束”当“所有结论正确”；需要用户认可或明确类型的强证据策略。
 
-### P3：有证据再优化
+#### P3：有证据再优化
 
 - 用真实漏召回样例决定是否添加本地多语言 embedding、重排或更细的模块激活。
 - 团队导出审核、过期治理、批量压缩只在质量指标支持时加入。
 - 只有实际编码任务的净收益成立才宣传效率；不以数据库行数、向量数量或 QA 命中率代替。
 
-### 现有 `memory.json` 迁移
+#### 现有 `memory.json` 迁移
 
 1. 用户选择源文件并先备份/导出；迁移成功前不要卸载旧插件，其数据目前位于安装目录。
 2. 旧数据没有可靠 project/source 元数据，必须选择目标 workspace；
@@ -592,9 +603,9 @@ UI 的“本轮使用 4 条、约 680 tokens”必须来自真实宿主计量；
    应提示使用稳定 ID，而不是冒险删除另一条。
 6. 卸载新代码保留 data_dir；清除记忆必须是独立、明确确认的数据操作。
 
-## 17. 评测与验收：先证正确，再谈“最棒”
+### 17. 评测与验收：先证正确，再谈“最棒”
 
-### 确定性回归矩阵
+#### 确定性回归矩阵
 
 这是完整方案矩阵，不是 P0 全部已具备的能力。P0 验 workdir 隔离/手动读写/存储；
 宿主身份、投影、分支、API V2 等行在 P1a/P1b 分别验收，后台学习在 P2 验收。
@@ -612,7 +623,7 @@ UI 的“本轮使用 4 条、约 680 tokens”必须来自真实宿主计量；
 | 上下文 | 最终预算、图像/tool schema、极小窗口、实际 token 校准、缓存诊断、compaction/checkpoint 一致性 |
 | 前端 | CLI/TUI/Desktop 共用核心行为，动态面板失败不进入对话，不暗中增加模型调用 |
 
-### 真实任务实验
+#### 真实任务实验
 
 建议建立至少 200 个带时间顺序的项目任务样例，覆盖多个语言/项目，人工标注应该记住、
 应该召回、必须拒绝及已过期的主张。未来任务/最终解法不得进入较早任务的索引。
@@ -640,7 +651,7 @@ UI 的“本轮使用 4 条、约 680 tokens”必须来自真实宿主计量；
   跨项目泄漏、撤销后复活、伪造工具成功在确定性/对抗测试集中必须为 0。
 - 没有足够证据证明端到端任务收益和成本优势，就不默认启用自动学习或向量组件。
 
-### 本次研究实际做了什么
+#### 本次研究实际做了什么
 
 - 静态阅读当前插件、模型请求、会话/WAL、审批、上下文与生命周期契约；没有改动实现。
 - 委托审计运行现有 `node --test examples/plugins/memory/memory.test.js`，1/1 通过；
@@ -655,7 +666,7 @@ UI 的“本轮使用 4 条、约 680 tokens”必须来自真实宿主计量；
   均通过；`kroma plugins check` 的 ping 冒烟通过。
 - V2 协议、自动注入、延迟目标、缓存收益和真实编码收益均尚未实现/测量。
 
-## 18. 建议的改动边界与源码导航
+### 18. 建议的改动边界与源码导航
 
 后续实现优先落插件，核心只增加前述通用边界，不让 `agent.rs` 承担记忆业务逻辑。
 
@@ -683,7 +694,7 @@ UI 的“本轮使用 4 条、约 680 tokens”必须来自真实宿主计量；
 - [上下文与缓存设计记录](design-notes.md)
 - [插件路线图](../PLUGIN_ROADMAP.md)
 
-## 19. 外部一手参考
+### 19. 外部一手参考
 
 - **[S1]** Claude Code, How Claude remembers your project：<https://code.claude.com/docs/en/memory>
 - **[S2]** OpenAI, Memories（本次请求由 developers.openai.com 重定向至此）：<https://learn.chatgpt.com/docs/customization/memories?surface=app>
@@ -694,3 +705,494 @@ UI 的“本轮使用 4 条、约 680 tokens”必须来自真实宿主计量；
 - **[S7]** SQLite, Write-Ahead Logging：<https://sqlite.org/wal.html>
 - **[S8]** SQLite, FTS5 / Tokenizers：<https://sqlite.org/fts5.html#tokenizers>
 - **[S9]** LongMemEval，原作者仓库与评测说明：<https://github.com/xiaowu0162/LongMemEval>
+
+
+## 二、V2 契约：Project Memory v2 contract（实现）
+
+Status: implemented for host and plugin (2026-11-06). Additive; V1 plugins unchanged.
+
+### Manifest
+
+```toml
+api_version = 2
+capabilities = ["provide_context", "task_finished"]
+```
+
+- Preferred generic capabilities: `provide_context`, `task_finished`.
+- Legacy V2 `request_context` and `task_summary` remain supported without a migration step.
+- Both require `command`.
+- A V2 plugin may also declare tools/commands; V2 only changes the worker protocol version
+  and enables the two host calls.
+- V1 manifests must not declare capabilities.
+
+### Worker protocol
+
+Every request envelope keeps `protocol_version`, `request_id`, `config`, `data_dir`,
+`workdir`; for V2 `protocol_version` is `2`. Responses echo the same `protocol_version`
+and `request_id`, with `content` and `is_error` as today.
+
+### Host -> plugin: provide_context (legacy: request_context)
+
+Sent at most once per user task, before the first model request of that task, only to
+enabled plugins declaring the capability.
+
+```json
+{
+  "type": "provide_context",
+  "name": "provide_context",
+  "arguments": {
+    "intent": "latest user request, bounded",
+    "paths": ["optional relative hints"],
+    "budget": {"max_tokens": 512, "max_bytes": 8192},
+    "project": {"workspace_id": "opaque", "git_root": null, "workdir": "..."},
+    "session": {"id": "...", "archive": "..."}
+  }
+}
+```
+
+Response `content` is a JSON string:
+
+```json
+{"blocks": [{"id": "opaque", "kind": "preference", "text": "bounded text", "paths": []}]}
+```
+
+Host rules:
+
+- max 6 blocks, max 1024 tokens, per-block text <= 1200 chars; whole entries only.
+- empty blocks => no injection, byte-identical request.
+- timeout/error/malformed/oversized => skip this plugin, never fail the model request.
+- inject as a low-trust `<plugin-context>` block appended to the last user
+  message (projection only; WAL untouched). Each block carries the originating
+  plugin ID, and text is escaped, not interpreted as instructions or markup.
+- `conflict` and `last_activity` ephemeral notices can omit a durable ID;
+  normal rule/review entries must include one.
+- stable pack cache keyed by archive + boundary user-message digest; re-apply identical packs on
+  later tool rounds and later turns until compaction/rewind makes the boundary mismatch.
+- validate the final request; if the new pack breaks the budget, remove it and retry once.
+- do not set `usage_matches_projection=false` merely because a host pack was added; V1 hook
+  rewrites keep the existing conservative behavior.
+
+### Host -> plugin: task_finished (legacy: task_summary)
+
+Sent after the Agent finishes a task and the final WAL boundary has been
+committed or attempted, **not** after an intermediate model message without
+tool calls. Calls are non-blocking, bounded, best effort; a slow or crashed
+plugin does not delay the next user operation. The host captures the session
+ID and archive path before dispatch so switching sessions cannot retarget the
+notification. Model-only consumers should call the explicit lifecycle hook.
+
+```json
+{
+  "type": "task_finished",
+  "name": "task_finished",
+  "arguments": {
+    "status": "completed",
+    "recent_users": ["last up to 8 user messages, each <= 2000 chars, total <= 8192 bytes"],
+    "project": {"workspace_id": "opaque", "git_root": null, "workdir": "..."},
+    "session": {"id": "...", "archive": "..."}
+  }
+}
+```
+
+Response content: `{"ok": true}` or any JSON; host ignores content. Duplicate summaries are
+allowed; the plugin must be idempotent.
+
+### Plugin write semantics
+
+- `memory_remember(kind, text, quote?, core?, paths?, evidence?, supersedes?)`
+  - `preference` / `decision`: require `quote` 8..500 chars. Host-verified
+    current-user quotes become active immediately (up to five distinct rules
+    per user turn) only when the restatement shares a distinctive term with the
+    quote (one ASCII word of >= 4 chars or one two-character CJK run). A
+    restatement without a shared term, and any entry from a legacy host without
+    trusted turn context, is stored `pending` and is not searchable until later
+    promotion.
+  - `review`: require >=1 path and >=1 evidence reference. Store active with a 30-day expiry;
+    always labeled unverified in output.
+  - `core` (optional boolean, default `false`) pins the entry as one of at most
+    four active core project rules. A non-boolean value, `kind = "review"`, or
+    an entry that would only be stored `pending` is rejected with
+    `invalid_request`, since core status requires an accepted
+    `preference`/`decision`. A fifth core write fails with "Core project rules
+    are full (4); forget an obsolete rule first". The pin is written in the same
+    transaction as the memory, a `supersedes` replacement inherits the replaced
+    rule's core status, and core rows are exempt from the active-memory archive
+    limit. Only this compact pack bypasses task-keyword matching and is injected
+    on every task.
+  - Secret scan, size limits, path validation; no raw tool output.
+- `task_finished`: for each pending entry, normalize whitespace/case and promote only if its
+  quote is a contiguous substring of the current (latest) user message. Apply `supersedes` on
+  promotion. Drop a pending entry when that message does not match its quote; the 7-day bound only
+  applies to a database that never receives this call. Idempotent. The bounded user-request hint is
+  kept only when this task wrote a memory through `memory_remember` or promoted one here; otherwise
+  only the status is stored.
+- `memory_search` / `memory_read`: active, unexpired entries only.
+- `memory_forget(id)`: immediate tombstone; future search/read/request_context exclude it.
+  `/memory restore ID` is the explicit undo for an accidental forget (purge is irreversible).
+- `memory_remember` and `memory_forget` declare `invalidates_context=true` so
+  a same-turn follow-up model request re-fetches context after a mutation.
+- `/memory off` stops new writes and returns empty recall; `/memory on` restores.
+- Existing advanced commands may remain but are not required for normal use.
+
+### Plugin identity and storage
+
+- Git: resolve the common dir (handle `.git` file/worktree `commondir`), read or create
+  `kroma-memory-id` there. All worktrees share it; moving the repo keeps it; clones do not.
+- Non-Git: fall back to a user-level registry keyed by canonical workdir.
+- Database: `<host data_dir>/projects/<id>/memory.sqlite3`; private permissions; no repo writes.
+- Defaults: automation enabled; no approval queue for the tool path.
+
+### Failure policy
+
+Fail-open for recall and summary. Explicit remember/forget may return a structured error.
+No network. No raw tool output capture. No automatic execution of memory text.
+
+
+## 三、零维护流程：零维护项目记忆（Project Memory v2 设计）
+
+状态：**R0 + R1 已实现**（2026-11-06）。P0（`examples/plugins/project-memory`）是上一版
+“人工审核优先”的实现，存储、隔离、事务和隐私底座可以复用，但默认交互要按本文重做。
+本文取代本文「一、设计」中的产品默认值和 P1 路线。
+宿主 V2 能力、插件自动召回、原文锚定、pending 验证、Git 项目身份和 7/30 天过期已实现；
+R2（更完整的审查台账/维护）和 R3（embedding/团队）仍未启用。实现契约见
+本文「二、V2 契约」。
+
+### 1. 一句话
+
+**默认自动记、自动用、自动过期；用户正常使用零命令，只在记错时说一句。**
+
+好的项目记忆像靠谱的同事：平时不打扰，相关时提一句，错了改一次就记住。
+
+### 2. 产品承诺
+
+- 安装不超过一步，不需要 Rust、Node 或数据库运行时。
+- 正常使用一周，用户主动操作不超过一次。
+- 只记用户明确说过、或工具结果真正验证过的事；不记模型猜测。
+- 相关时自动出现；不确定时不出现；没有结果就什么都不加。
+- 记错一次即可纠正，之后不再犯。
+- 本地优先，无网络、无遥测、无后台账号。
+
+**非目标：**
+
+- 不是聊天归档、知识库、团队 wiki 或个人第二大脑。
+- 不追求“记住所有事”；宁可少记，也不制造维护负担。
+- 不做审批队列、标签体系、手动整理、定期清理。
+- 不自动执行记忆中的命令、建议或权限。
+
+### 3. 旧设计为什么不合格
+
+| 旧设计 | 用户实际感受 |
+| --- | --- |
+| 模型提案进入候选队列，等 `/memory accept` | 每次会话多出待办，几周后无人处理 |
+| 模型必须主动调用搜索，否则记忆不存在 | 用户不知道它有没有用，也不敢依赖 |
+| 15 个命令、5 种类型、use/capture 双开关 | 先读文档、再记命令，不是开箱即用 |
+| `cargo install` 并配置 PATH | 非 Rust 用户直接放弃 |
+| 完整版本、Git worktree 身份、V2 协议 | 工程复杂度高，但日常体验没变好 |
+| 让用户判断每条记忆对不对 | 把系统该做的质量工作转嫁给了用户 |
+
+根因：把“防止污染”实现成了“用户审批”。正确的做法是**提高自动准入的质量、默认过期、一步撤销**，
+而不是要求用户维护一个队列。
+
+### 4. “零维护”的量化定义
+
+| 指标 | 目标 |
+| --- | --- |
+| 安装到首次可用 | ≤ 2 分钟，1 个命令，无工具链 |
+| 正常使用主动操作 | ≤ 1 次/周；目标 0 |
+| 错误记忆率 | ≤ 1 次/50 个任务，且一次纠正后不再出现 |
+| 自动召回准确率 | 注入内容 ≥ 80% 与当前任务相关 |
+| 上下文开销 | 默认 ≤ 512 tokens/任务，硬上限 1024 |
+| 过期清理 | 100% 自动，无需用户操作 |
+| 记忆数量 | 每项目活跃 ≤ 200 条，自动合并/归档 |
+
+这些是验收目标，不是当前实测结果。
+
+### 5. 核心机制：四道闸
+
+自动记忆必须有闸门，否则“零维护”会变成“零信任”。
+
+1. **原文锚定准入**
+   模型想记一条用户规则，必须同时提交用户原话片段；插件校验片段确实出现在最近用户消息中。
+   对不上就不自动保存。这一条挡住大多数模型臆想。
+
+2. **默认过期**
+   偏好/决定长期有效，但可被新说法替代；审查发现、任务观察默认 7–30 天过期；
+   审查发现记录的文件变化后，只在该 worktree 内退出召回。用户永远不需要清理。
+
+3. **显式替代，不做语义猜测**
+   文本不同不等于冲突：同一主题下的两条规则可以同时有效。只有模型传入
+   `supersedes` 指向 `memory_search` 返回的具体 id 时，旧规则才被撤销。
+   判断语义属于模型，Harness 只记录模型给出的替换关系。
+
+4. **一步撤销**
+   用户说“忘掉刚才那条”或“不是 X，是 Y”，模型调用 forget/correct 立即生效；
+   无需确认、无需进设置页。删除留下指纹，防止同样内容被重新学回来。
+
+### 6. 写入：三种来源，一条主路径
+
+#### A. 用户明确规则（主路径）
+
+用户在对话中说出持久规则，例如“这个项目用 pnpm，不要 npm”“提交前先跑 clippy”。
+
+- 模型调用 `memory_remember(kind, text, quote)`。
+- 插件校验：
+  - `quote` 是最新用户消息的连续子串（只归一化空白和大小写）；
+  - 长度 8–500 字符；
+  - `kind` 只能是 `preference` 或 `decision`；
+  - 每条用户消息最多自动接受一条；
+  - 通过秘密扫描、长度和路径校验。
+- 通过后立即 active，**不排队、不要求确认**。
+- 用户界面上最多出现一行“记住了：提交前跑 clippy（说‘忘掉’可撤销）”，不阻塞对话。
+
+#### B. 用户纠正
+
+用户说“不对，应该用 bun”。模型调用 `memory_remember(kind, text, quote, supersedes=id)`。
+
+- 必须带原话锚定；
+- 旧条目立即 superseded，只保留上一版用于 undo；
+- 不弹确认框，不进入审核队列；
+- 指纹记录旧内容，防止重犯。
+
+#### C. 模型标记的审查发现
+
+模型在审查任务中调用 `memory_remember(kind=review, text, paths, evidence)`。
+
+- 必须带至少一个路径提示和一条证据引用（命令、文件、会话 id）；
+- 状态为 `provisional`，不是“已确认事实”；
+- 默认 30 天过期，或相关文件指纹变化后 stale；
+- 自动召回时明确标注“未验证的历史审查记录”；
+- 不把“未发现问题”记成“代码安全”。
+
+#### D. 任务摘要（可选，低风险）
+
+宿主在任务结束时发送有界的任务摘要（时间、用户请求、状态、提交号、变更文件）。
+插件只保存 `last_activity`，默认 7 天，用于回答“上次做到哪”，不自动升级为规则。
+只有本任务通过 `memory_remember` 写入、或在任务结束时提升了记忆，才保存有界的用户请求前缀；
+否则只保存任务状态。
+
+**一律不自动记：** 工具原始输出、网页/MCP 内容、模型猜测、助手总结、秘密值、
+与代码一眼可见的结构信息。
+
+### 7. 读取：任务开始时的一次注入
+
+- 只在**新用户任务开始**时召回一次；同一任务的工具轮次不重复注入。
+- 查询信号：当前用户请求 + 最近路径/符号 + 当前项目。
+- 过滤：active、未过期、未争议、路径存在；provisional 可以注入但必须标注。
+- 排序：精确路径/符号 > 全文检索 > 用户明确确认 > 新近程度。
+- 预算：默认 512 tokens，硬上限 1024；最多 6 条；单条 ≤ 400 字符。
+- 没有足够相关的结果就**什么都不注入**。
+- 失败（超时、插件崩溃、格式错误）直接跳过，不影响主任务。
+- 注入格式是低信任数据块，例如：
+
+```text
+<project-memory trust="unverified-reference" workspace="kroma">
+- [preference] 提交前先跑 clippy（用户明确要求）
+- [review, src/plugins.rs] 该模块的 hook 超时会让整个模型请求失败（2026-10-12，未验证）
+</project-memory>
+```
+
+- 模型仍可调用 search/read 深挖，但这是可选能力，不是日常路径。
+- 缓存：先接受“每次任务一次注入”的跨轮缓存损失；测量后如果损失大于收益，再做持久 pack ledger。
+
+### 8. 项目身份：把 ID 放进 `.git`，用户不用配置
+
+- Git 项目：在 Git common dir 写入 `kroma-memory-id`（worktree 的 `.git` 文件指向它；
+  只写本地 Git 元数据，不进仓库、不被提交）。
+  - 同一仓库的所有 worktree 共享 common dir，因此自动共享记忆。
+  - 移动/重命名仓库后 ID 仍在，记忆不丢。
+  - 重新 clone 得到新 ID；fork/副本不会自动继承原项目记忆。
+  - 子模块有自己的 `.git`，默认独立。
+- 非 Git 项目：在用户目录的 registry 里按 canonical root 记录一个 ID；移动目录视为新项目。
+- 数据放在 `~/.kroma/memory/<id>/memory.sqlite3`，不写项目仓库，不产生 Git 变更，
+  不触发插件审批指纹问题。
+- 用户无需选择项目根、无需 link/migrate、无需理解 worktree。
+- 子代理默认只读继承同一项目记忆，不自动写入，避免审查子任务污染主项目。
+
+这比“按 canonical workdir 隔离”更符合开箱即用：从任意子目录或 worktree 打开，都是同一个项目。
+
+### 9. 用户界面：正常路径零命令
+
+**模型工具（4 个，短 schema）：**
+
+| 工具 | 用途 |
+| --- | --- |
+| `memory_remember` | 记用户规则、审查发现；必须带原话或证据 |
+| `memory_search` | 深挖历史，不用于日常自动召回 |
+| `memory_read` | 按 id 读详情 |
+| `memory_forget` | 用户说“忘掉”时撤销 |
+
+**用户命令（只保留 3 个）：**
+
+```text
+/memory                  # 一屏状态：最近记忆、是否开启、是否有冲突
+/memory forget <id|文本>  # 忘掉
+/memory off|on           # 总开关
+```
+
+- 主要交互是自然语言；“记住这个”“忘掉刚才那条”由模型翻译成工具调用。
+- 不暴露 kind、路径、版本、候选队列、冲突列表。
+- 冲突只在相关话题再次出现时提示一次，例如：
+  “关于包管理器有两条冲突记忆（pnpm / bun），已暂停自动使用。说‘用 bun’即可解决。”
+- `/memory` 默认只显示 5 条最近记忆和一行健康状态，不要求整理。
+- 旧的 accept/correct/candidates/export/doctor 不作为日常入口；最多放在 `/memory all` 的只读视图。
+
+### 10. 数据模型：保留可纠正性，去掉档案学
+
+```text
+memories(
+  id, kind, text, state, paths, evidence,
+  fingerprint, supersedes, created_at, updated_at, last_used_at, expires_at
+)
+```
+
+- `state`：`active` / `provisional` / `removed`（`stale` 是按 worktree 记录的证据结论，
+  不再是全局记忆状态）。
+- 不保存完整版本历史；只保留上一版用于 undo，purge 时一并删除。
+- `evidence` 是有界引用和短摘录，不是任意可读路径能力。
+- `fingerprint` 用于去重和防止已忘内容复活。
+- 索引：FTS5 + 路径/符号精确匹配；第一版不做向量。
+- 每项目活跃上限 200 条；超出时归档最久未用、非用户确认的条目。
+- 合并：相同 kind、相同路径、文本高度相似时合并证据和时间戳。
+
+### 11. 最小宿主改动：两个能力，不做 V2 全家桶
+
+只需要两个窄接口，不引入完整协议框架：
+
+1. **`provide_context`**（旧称 `request_context`）：任务开始时，宿主带预算和最小上下文调用插件，插件返回低信任块；
+   宿主负责预算、格式、超时、失败跳过、缓存测量。
+2. **`task_finished`**（旧称 `task_summary`）：WAL 任务结束后，宿主非阻塞发送有界摘要，插件幂等保存 `last_activity`
+   和可选的审查运行记录；失败不影响任务。
+
+实现方式：
+
+- 在现有插件清单增加 `api_version = 2` 和 `capabilities = ["provide_context", "task_finished"]`（兼容旧名称）；
+- 宿主只对声明了能力的 V2 插件调用；V1 插件完全不变；
+- 不做握手、不做字段级协议框架、不做来源分页、不做持久 ledger；
+- 两个调用都有硬超时，失败只记本地诊断，不向用户报错；
+- 注入由宿主在最终投影层完成，不伪装成用户或工具消息。
+
+这比旧 P1a/P1b 的“API V2 + 身份 + 来源 + ledger”小一个数量级，也足够支撑零维护体验。
+
+### 12. 生命周期：自动维护，不建后台服务
+
+在插件启动、任务结束、下一次召回前做廉价维护，毫秒级完成：
+
+- 过期：`provisional` 7–30 天；用户规则不按时间删除，只被新说法替代。
+- 失效：审查发现记录的文件变化或消失时，仅在该 worktree 退出召回；其他 worktree 保留自己的结论。
+- 合并：重复内容合并，保留最早来源和最近使用时间。
+- 限额：活跃 200 条、单条 4KB、单项目数据库有界；超出归档，不弹窗。
+- 删除：forget 留指纹；purge 删除正文、证据和上一版，留最小 tombstone。
+  误删可用 `/memory restore ID` 显式恢复当前措辞；purge 不可恢复。
+- 没有后台 daemon、没有定时任务、没有用户清理入口。
+
+### 13. 信任、隐私与安全
+
+- 记忆是**数据**，不是指令、不是权限、不是已执行的事实。
+- 记忆不能授权命令、不能突破权限、不能覆盖当前用户请求和仓库规则。
+- 只存用户原话和工具证据；默认不存原始工具输出、网页正文、MCP 返回。
+- 秘密扫描是准入的一部分，但只是防线，不是数学保证；高敏感内容仍靠本地存储和用户判断。
+- 本地数据库 0700/0600；Windows 当前用户 DACL；不写仓库、不上传、不遥测。
+- 召回内容会进入模型请求，因此会发给当前 provider；安装时说明一次，不每次打扰。
+- 忘掉/清除不修改历史对话、摘要、provider 日志或已发出的请求；界面必须说明这一边界。
+- 同用户恶意进程不受沙箱保护；插件不是安全边界。
+
+### 14. 分发：开箱即用的另一半
+
+功能默认再好，需要 `cargo install` 就不算开箱即用。
+
+- 发布预编译二进制：Windows x64/arm64、macOS x64/arm64、Linux x64/arm64；
+  校验和 + 签名；SQLite 静态编译，无运行时依赖。
+- 安装入口做成一件事：`kroma plugins install project-memory` 自动下载匹配产物并启用；
+  如果 Kroma 安全策略要求显式启用，这是唯一不可省的一步。开发者仍可从源码构建。
+- 若 Kroma 插件管理暂时不支持下载，则随 Kroma 发行包附带二进制，避免用户装工具链。
+- 版本不兼容时明确拒绝并保持主任务可用，不静默降级。
+- 项目级安装不需要审批第三方代码；二进制来源和校验和应可检查。
+
+### 15. 一个典型的一天
+
+- 09:00 安装并启用，没有任何配置。
+- 09:05 用户说“以后用 pnpm，不要 npm”。模型调用 remember，插件校验原话后保存；
+  界面最多一行提示，用户不审批。
+- 10:00 新会话让模型审查改动。宿主自动注入 3 条相关记忆，用户不需要提醒它去查。
+- 11:00 用户发现一条记错：“不是 pnpm，是 bun”。模型调用 remember + supersedes；
+  旧条目失效，之后不会再出现。
+- 一周后：用户没有打开过 `/memory`，没有清理过任何东西；过期条目已自动归档。
+
+### 16. 评测：先证明不用维护，再证明省 token
+
+本地计数，不做遥测：
+
+| 维度 | 指标 |
+| --- | --- |
+| 维护负担 | 用户命令/周、纠正次数/周、安装耗时 |
+| 写入质量 | 自动接受准确率、误记率、冲突率、过期率 |
+| 召回质量 | 注入任务占比、相关率、模型引用/采纳率、空注入率 |
+| 成本 | 注入 tokens、检索延迟 p95、缓存前缀变化、额外模型调用 |
+| 结果 | 重复纠正次数、任务成功率、审查准备时间 |
+
+验收门槛建议：
+
+- 两周 dogfood：用户主动操作 ≤ 2 次/周，错误记忆 ≤ 1 次/50 任务。
+- 100+ 真实任务 A/B（有记忆/无记忆）：任务成功率不下降，重复纠正和准备时间有改善。
+- 上下文开销 ≤ 1%；若缓存损失超过收益，再考虑持久 pack ledger。
+- 自动学习/向量检索只有在漏召回样本足够多时才引入。
+
+没有达到门槛，就不宣传“省 token”，也不默认开启更激进的自动写入。
+
+### 17. 路线图与“不做什么”
+
+**R0：把 P0 变成零维护（已实现）**
+
+- 去掉审批队列：quote 锚定的自动接受；
+- `/memory` 缩成状态 + forget + off；自然语言为主；
+- 预编译二进制和一步安装；
+- 保留现有 SQLite/隔离/事务/隐私底座；
+- 不碰核心协议。
+
+**R1：最小自动召回（已实现）**
+
+- `provide_context` + `task_finished` 两个能力；
+- 硬预算、失败跳过、低信任注入、任务级一次注入；
+- 用真实使用测量相关率和 token 开销。
+
+**R2：自动维护与审查台账**
+
+- 过期/合并/限额自动执行；
+- 审查运行记录：时间、提交、变更文件、未解决问题；
+- 冲突隔离和一次性提示。
+
+**R3：只有数据支持才做**
+
+- 本地多语言 embedding / 重排；
+- 跨机器/团队共享；
+- 更激进的自动提取。
+
+**明确不做：**
+
+- 完整 API V2 框架、持久 projection ledger、source 分页；
+- 审批队列、候选列表、标签体系；
+- 自动 LLM 总结每个任务；
+- 向量库作为默认依赖；
+- 云端同步和遥测。
+
+### 18. 主要风险与对策
+
+| 风险 | 对策 |
+| --- | --- |
+| 模型不调用 remember，记不住 | 静态 prompt 明确“用户说持久规则时调用”；用真实使用测量漏记率，必要时在任务结束做一次轻量提醒 |
+| 自动接受错误规则 | 原话锚定 + 只允许 preference/decision + 一条/轮 + 一步撤销 |
+| 记忆污染上下文 | 硬预算、相关度门槛、空结果不注入、低信任标注 |
+| 过期规则误导 | 文件/环境指纹、默认过期、stale 不注入 |
+| 秘密进入记忆 | 准入扫描、只存用户原话、不存原始工具输出、本地权限 |
+| 缓存损失抵消收益 | 任务级一次注入；先测量再决定是否做 ledger |
+| 分发失败 | 预编译 + 校验和 + 明确错误；不从源码偷偷构建 |
+| 跨项目泄漏 | `.git` 项目 ID + 每项目独立数据库；查询只绑定当前项目 |
+
+### 19. 参考
+
+- Claude Code, How Claude remembers your project：<https://code.claude.com/docs/en/memory>
+- OpenAI, Memories：<https://learn.chatgpt.com/docs/customization/memories?surface=app>
+- Cursor, Rules：<https://cursor.com/docs/rules>
+- claude-mem, Smart Memory Search（渐进披露）：<https://raw.githubusercontent.com/thedotmack/claude-mem/main/docs/public/usage/search-tools.mdx>
+- LongMemEval（更新、时间推理、拒答）：<https://github.com/xiaowu0162/LongMemEval>
+- SQLite FTS5：<https://sqlite.org/fts5.html>

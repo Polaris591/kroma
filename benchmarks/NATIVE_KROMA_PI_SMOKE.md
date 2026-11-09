@@ -1,5 +1,14 @@
 # 原生 Kroma / Pi 简单竞赛
 
+**可复现性声明。** 文中证据目录 `D:/Kroma/experiments/...` 位于 git 仓库之外（仓库根为
+`D:/Kroma/kroma`），未入库；clone 本仓库无法复算文中数字，只能按本文件的命令重新生成新的
+实验目录。运行方式：标准库 Python 3.12，经 `uv run --no-project --python 3.12 python ...`
+执行；Rust 侧使用仓库自带工具链（`cargo build --locked`）。文中未记录 uv 版本，因此通过率、
+耗时与 Token 均为历史记录，不能仅凭本仓库重算。
+
+此外，本文引用了本机绝对路径（如 `C:/Users/24524/.cargo/bin/kroma.exe`）与本地安装的 Pi 1.4.0，
+这些既不在仓库中也不可复现；只能凭记录判断当时的版本，不能当作当前环境。
+
 本次使用已安装的原生 CLI，不用 `tool_ablation` 示例、不用提示词消融二进制、不替换系统提示词，不修改 Agent Loop。
 
 - Kroma：`C:/Users/24524/.cargo/bin/kroma.exe`，0.4.0 (3ae32d69060e-dirty)。这是已安装版本，并非声称等于当前仓库提交。

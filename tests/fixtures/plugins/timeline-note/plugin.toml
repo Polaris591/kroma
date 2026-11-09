@@ -1,0 +1,50 @@
+# A plugin Kroma's source has never heard of: nothing here is special-cased in
+# the runtime, so installing it is the whole integration.
+id = "timeline-note"
+name = "Timeline Note"
+version = "1.0.0"
+description = "Record short notes while working; never leaves the machine"
+command = "node"
+args = ["note.js"]
+prompt = "\nPlugin timeline-note: note_thread records a short note and returns the notes recorded so far."
+
+[settings]
+limit = 20
+
+[[tools]]
+name = "note_thread"
+description = "Record one short note and return the notes kept for this project."
+streaming = false
+
+[tools.parameters]
+type = "object"
+required = ["text"]
+additionalProperties = false
+
+[tools.parameters.properties.text]
+type = "string"
+description = "The note to record"
+
+[tools.parameters.properties.tag]
+type = "string"
+description = "Optional short tag"
+
+[[commands]]
+name = "/note"
+description = "List or add timeline notes"
+
+[ui]
+status = "线索笔记已就绪"
+panel_title = "线索笔记"
+panel_text = "note_thread 记录一条线索；/note 查看当前项目已记录的内容。"
+dynamic_panel = true
+activity_frames = ["·", "・", "•"]
+tool_labels = { note_thread = "记录线索" }
+colors = { accent = "#8fc79a", text = "#e6edf5" }
+
+[ui.layout]
+composer_max_rows = 5
+
+[[ui.shortcuts]]
+key = "Alt+N"
+command = "/note"

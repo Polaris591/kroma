@@ -63,6 +63,9 @@ async fn output_before(workdir: &Path, args: &[&str], deadline: Duration) -> Opt
     command
         .args(args)
         .current_dir(workdir)
+        // Presentation reads must never race the agent's own git commands for
+        // index.lock.
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
     #[cfg(windows)]

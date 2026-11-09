@@ -26,7 +26,9 @@ use windows_sys::Win32::{
             TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         },
-        Threading::{OpenThread, ResumeThread, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME},
+        Threading::{
+            OpenThread, ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
+        },
     },
 };
 
@@ -48,6 +50,8 @@ pub(crate) struct ChildTreeGuard {
 /// outlives its shell command but not Kroma; a force-killed Kroma still closes
 /// every handle and terminates contained descendants.
 static DISARMED_JOBS: OnceLock<Mutex<Vec<OwnedHandle>>> = OnceLock::new();
+/// Held handles before the registry sweeps for finished jobs.
+const DISARMED_JOB_SWEEP: usize = 32;
 
 /// Running processes inside a job. `Some(0)` proves the job is finished and its
 /// handle can be released; `None` means the query failed and the handle must be
@@ -79,7 +83,12 @@ fn retain_disarmed_job(job: OwnedHandle) {
     // Release handles for jobs whose background work has finished. A job that
     // still contains a running process is kept until Kroma exits: closing it
     // would terminate a background task the user started.
-    jobs.retain(|held| active_processes(held) != Some(0));
+    // Reclaiming finished jobs is one query per held handle, so sweep only once
+    // the registry is large enough to matter: a long session then pays an
+    // amortized cost instead of growing quadratically.
+    if jobs.len() >= DISARMED_JOB_SWEEP {
+        jobs.retain(|held| active_processes(held) != Some(0));
+    }
     jobs.push(job);
 }
 
@@ -122,7 +131,12 @@ impl ChildTreeGuard {
         if set == 0 {
             return Err(io::Error::last_os_error());
         }
-        command.creation_flags(CREATE_SUSPENDED).kill_on_drop(true);
+        // Shell/MCP/checkpoint children are non-interactive and their output
+        // is captured. Do not pop a terminal from the GUI; keep the suspended
+        // start so job assignment still happens before any user code runs.
+        command
+            .creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW)
+            .kill_on_drop(true);
         let mut child = command.spawn()?;
         let setup = (|| {
             let process = child
