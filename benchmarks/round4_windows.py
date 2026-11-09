@@ -245,15 +245,79 @@ def initial_report(lab: Path, kroma: Path) -> dict:
     }
 
 
+def prepare_rust_wal_fixture(project: Path):
+    """Inject an independently tested WAL-ordering regression into HEAD sources.
+
+    The archived 2026-10-28 fixture depended on a removed literal expression.
+    Current versions use session::journal_path; the behavior under test is
+    unchanged. Source comes from the committed HEAD, not this dirty worktree.
+    """
+    import io
+    import tarfile
+    archive = subprocess.check_output(["git", "archive", "HEAD"], cwd=ROOT)
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as jar:
+        jar.extractall(project, filter="data")
+    path = project / "src" / "sessions.rs"
+    source = path.read_text(encoding="utf-8")
+    original = (
+        "                // The JSON checkpoint can be old while the WAL contains the\n"
+        "                // latest turns; order by the most recent durable write.\n"
+        "                let wal = crate::session::journal_path(&path);\n"
+        "                let modified = entry\n"
+        "                    .metadata()?\n"
+        "                    .modified()\n"
+        "                    .ok()\n"
+        "                    .into_iter()\n"
+        "                    .chain(fs::metadata(wal).and_then(|meta| meta.modified()).ok())\n"
+        "                    .max();"
+    )
+    broken = (
+        "                // Regression: recent sessions incorrectly ignore the WAL.\n"
+        "                let modified = entry.metadata()?.modified().ok();"
+    )
+    if source.count(original) != 1:
+        raise RuntimeError("fixture drift: cannot find current WAL-ordering implementation")
+    regression = """
+#[cfg(test)]
+mod engineering_regression {
+    use super::*;
+
+    #[test]
+    fn wal_append_controls_recent_session_order() {
+        let root = std::env::temp_dir().join(format!(
+            "kroma-round5-wal-{}-{}", std::process::id(),
+            NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog = SessionCatalog::from_default(root.join("sample.json")).unwrap();
+        let alpha = root.join("sample--alpha.json");
+        let bravo = root.join("sample--bravo.json");
+        fs::write(&alpha, "checkpoint").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(&bravo, "checkpoint").unwrap();
+        assert_eq!(catalog.list().unwrap()[0].id, "bravo");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(crate::session::journal_path(&alpha), "newer WAL entry").unwrap();
+        assert_eq!(catalog.list().unwrap()[0].id, "alpha");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+"""
+    path.write_text(source.replace(original, broken) + regression, encoding="utf-8")
+
+
 def run_one(lab: Path, kroma: Path, task: dict, repeat: int, runner: str, timeout: int) -> dict:
     trial = lab / task["id"] / str(repeat) / runner
     project = trial / "project"
     project.mkdir(parents=True, exist_ok=False)
+    frozen_regression = None
     if task["id"] == "rust_wal_regression":
-        import engineering_compare as engineering
-        engineering.make_copy(project, "A", repeat)
-        assert "fn wal_append_controls_recent_session_order()" in (
-            project / "src" / "sessions.rs").read_text(encoding="utf-8")
+        prepare_rust_wal_fixture(project)
+        source = (project / "src" / "sessions.rs").read_text(encoding="utf-8")
+        marker = "\n#[cfg(test)]\nmod engineering_regression"
+        assert marker in source, "injected regression fixture missing"
+        frozen_regression = marker + source.split(marker, 1)[1]
+        assert "fn wal_append_controls_recent_session_order()" in frozen_regression
     else:
         suite.create_fixture(project, task)
     env = {key: value for key, value in os.environ.items() if not key.startswith("KROMA_")}
@@ -305,7 +369,8 @@ def run_one(lab: Path, kroma: Path, task: dict, repeat: int, runner: str, timeou
     try:
         if task["id"] == "rust_wal_regression":
             source = (project / "src" / "sessions.rs").read_text(encoding="utf-8")
-            if source.count("fn wal_append_controls_recent_session_order()") != 1:
+            if source.count("fn wal_append_controls_recent_session_order()") != 1 \
+                    or source.count(frozen_regression) != 1:
                 verified = False
             else:
                 oracle = subprocess.run(
