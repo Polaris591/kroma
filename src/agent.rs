@@ -2384,12 +2384,11 @@ impl Agent {
             // result retains its own tool_call_id and is saved before the
             // next call; no concurrency or command-safety classifier.
             for call in calls {
-                // Snapshot right before the first tool that can change the
-                // working tree. A checkpoint taken before a read only scanned
-                // the whole repository for nothing.
+                // Snapshot before the first potentially mutating call,
+                // including MCP/plugin tools and side-effectful interceptors.
                 if !checkpoint_ready
                     && self.checkpoints
-                    && matches!(call.function.name.as_str(), "shell" | "edit_file")
+                    && self.tools.may_mutate_worktree(&call.function.name)
                 {
                     checkpoint_ready = true;
                     self.snapshot_before_first_tool(stats).await;
@@ -2480,7 +2479,9 @@ impl Agent {
                 }
                 // A tool that waits for a person reports no output by design,
                 // so the silent-tool watchdog does not apply to it.
-                let idle_limit = if self.tools.waits_for_user(&call.function.name) {
+                let idle_limit = if self.tools.waits_for_user(&call.function.name)
+                    || self.tools.manages_timeout(&call.function.name)
+                {
                     None
                 } else {
                     tool_idle_limit()
@@ -2497,10 +2498,9 @@ impl Agent {
                         previous_user_images,
                         workdir: &self.workdir,
                         archive: self.session.archive_path(),
-                        on_output: self
-                            .events
-                            .as_ref()
-                            .map(|_| &output_event as &crate::shell::OutputCallback<'_>),
+                        // Heartbeats are required even for --print without a UI
+                        // event sink; the callback itself checks observer.
+                        on_output: Some(&output_event as &crate::shell::OutputCallback<'_>),
                         ask: self.asker.as_deref(),
                     },
                 );
@@ -2966,6 +2966,38 @@ fn add_reported(total: Option<u64>, next: Option<u64>, first: bool) -> Option<u6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tool_output_heartbeat_works_without_an_event_sink() {
+        let started = Instant::now();
+        let last_output = Arc::new(AtomicU64::new(0));
+        let writer = Arc::clone(&last_output);
+        let observer: Option<Arc<dyn EventSink>> = None;
+        let output = |stream: &str, chunk: &str| {
+            writer.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+            if let Some(events) = &observer {
+                events.on_event(RuntimeEvent::ToolOutput {
+                    id: "test",
+                    stream,
+                    chunk,
+                });
+            }
+        };
+        let command = async {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            output("stdout", "still working");
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            "finished"
+        };
+        let result = await_with_idle(
+            command,
+            Some(Duration::from_millis(100)),
+            last_output,
+            started,
+        )
+        .await;
+        assert_eq!(result, Ok("finished"));
+    }
 
     #[test]
     fn transient_tui_startup_does_not_create_an_empty_conversation() -> Result<()> {

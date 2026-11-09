@@ -21,16 +21,18 @@ goal is an autonomous agent that stays inspectable and recoverable.
 
 ## Automatic file snapshots
 
-Before the first tool call of a task, Kroma attempts a snapshot in a private bare Git repository under
+Before the first tool call that may change project files, Kroma attempts a snapshot in a private bare Git repository under
 `~/.kroma/checkpoints/<project-key>.git`. It uses its own `GIT_DIR`, work tree and
 index, so it never reads or writes the project's `.git`, HEAD, index, hooks or
 remotes. Common build/cache directories (`target`, `node_modules`, `dist`, `build`,
 `.next`, `.venv`, `vendor`, `.kroma`) are excluded, as are paths ignored by the
 project's `.gitignore`.
 
-Tasks answered without tools do not create a snapshot. Even a read-only tool
-causes an initial snapshot, so it can add latency; a snapshot is not a claim
-that remote or excluded side effects can be rolled back.
+Tasks answered without tools or with only declared read-only tools (such as
+history search/read or MCP discovery) do not create a snapshot. Unknown plugin
+and MCP execution tools are treated as potentially mutating, so they trigger
+a snapshot before execution. Hooks are also treated as potentially mutating.
+Snapshots do not roll back remote or excluded side effects.
 
 Snapshots are available only inside a real Git worktree. Outside Git, the feature is
 a silent no-op and `/checkpoints` explains that. The snapshot contains file contents,
@@ -76,6 +78,13 @@ Plugins execute with the current user's privileges; this scan is **not** a
 sandbox. Disable any plugin you no longer want to run. An invalid optional
 plugin does not block other plugins; an explicitly selected broken model or
 context plugin must not silently fall back to another backend.
+
+An MCP tool that has returned successfully remains successful even if Kroma
+cannot save an image from its response; the image is omitted and a warning
+is included rather than prompting a duplicate side effect. MCP calls use their
+own deadline (600 seconds by default). A timeout or lost response does not
+prove that a remote server stopped or that no side effects occurred; inspect
+the remote state before retrying.
 
 If an after-tool hook fails, the completed tool's result/status is preserved and
 the failed hook's partial patch is discarded. A separate warning is persisted
