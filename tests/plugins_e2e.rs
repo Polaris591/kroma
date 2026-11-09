@@ -4314,8 +4314,12 @@ async fn an_unseen_plugin_needs_no_core_change() -> Result<()> {
     let source =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plugins/timeline-note");
     let discover = || PluginCatalog::discover_at(user.clone(), state_path.clone(), &workspace);
-    let fingerprint =
-        || kroma::plugins::source_fingerprint_at(std::slice::from_ref(&user), Some(state_path.as_path()));
+    let fingerprint = || {
+        kroma::plugins::source_fingerprint_at(
+            std::slice::from_ref(&user),
+            Some(state_path.as_path()),
+        )
+    };
     let before_install = fingerprint();
     discover()?.install(&source)?;
     discover()?.set_enabled("timeline-note", true)?;

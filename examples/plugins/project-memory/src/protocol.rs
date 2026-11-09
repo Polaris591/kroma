@@ -2020,8 +2020,7 @@ mod tests {
         );
         let recalled = context(dir.path(), "unrelated task", 8192);
         assert_eq!(
-            recalled["blocks"][0]["text"],
-            quote,
+            recalled["blocks"][0]["text"], quote,
             "the rule keeps every condition and its final exception"
         );
     }
