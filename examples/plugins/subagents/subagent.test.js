@@ -124,11 +124,14 @@ test("evidence retention prunes aged runs but preserves active and resumed work"
   } finally { fs.rmSync(root, {recursive: true, force: true}); }
 });
 
-test("the tool returns before any child finishes and the answer lands on disk", async () => {
+test("startBatch hands back a run while its child is still working", async () => {
   const dir = workspace();
   const h = harness();
   try {
-    const started = await start(h, batch([{task: "do the thing", label: "thing"}], {workdir: dir}));
+    // A short deadline keeps a failing assertion from holding CI for the default
+    // 1800 s while this child is still running.
+    const started = await start(h, batch([{task: "do the thing", label: "thing"}], {workdir: dir}),
+      {taskTimeoutMs: 5000});
     assert.equal(h.calls.length, 1);
     assert.match(started.runId, /^\d{14}-[0-9a-f]{8}$/);
     assert.deepEqual(started.tasks.map(task => task.index), [0]);
@@ -136,11 +139,11 @@ test("the tool returns before any child finishes and the answer lands on disk", 
     assert.equal(read(started.tasks[0].artifacts, "state.json").status, "running");
     const call = h.calls[0];
     assert.deepEqual(call.args, ["--json"]);
-    assert.equal(call.options.cwd, dir);
+    assert.equal(call.options.cwd, fs.realpathSync(dir));
     assert.equal(call.stdin.text, "do the thing");
     assert.equal(call.options.env.KROMA_SESSION_FILE,
       path.join(started.tasks[0].artifacts, "session.json"));
-    assert.equal(call.options.env.KROMA_WORKDIR, dir);
+    assert.equal(call.options.env.KROMA_WORKDIR, fs.realpathSync(dir));
     assert.equal(call.options.env.KROMA_SUBAGENT_DEPTH, "1");
     const policy = read(started.tasks[0].artifacts, "policy.json");
     assert.deepEqual(policy.hostDeniedTools, ["subagent", "memory_remember", "memory_forget"]);
@@ -356,7 +359,7 @@ test("a resume copies the saved session into a new run and keeps the source inta
     const artifacts = started.tasks[0].artifacts;
     assert.equal(fs.readFileSync(path.join(artifacts, "session.json"), "utf8"),
       JSON.stringify({messages: ["earlier"]}));
-    assert.equal(h.calls[0].options.cwd, dir);
+    assert.equal(h.calls[0].options.cwd, fs.realpathSync(dir));
     assert.equal(h.calls[0].options.env.KROMA_SESSION_FILE, path.join(artifacts, "session.json"));
     assert.equal(h.calls[0].stdin.text, "keep going");
     assert.equal(read(artifacts, "state.json").resumed_from, "src001/0");
