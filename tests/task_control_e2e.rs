@@ -1506,10 +1506,10 @@ async fn explicit_cancel_is_one_terminal_commit_and_plain_chat_does_not_resume()
     Ok(())
 }
 
-/// The manifest is what a provider sees. An evidence object must be able to
-/// satisfy its own schema; the first version forbade `kind` and required it.
+/// The default model-facing Goal tool exposes only actionable fields; legacy
+/// evidence and source references remain supported by the host protocol.
 #[test]
-fn the_goal_tool_schema_accepts_the_evidence_it_asks_for() -> Result<()> {
+fn the_goal_tool_schema_is_compact_without_weakening_host_verification() -> Result<()> {
     let text = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/goal/plugin.toml"),
     )?;
@@ -1517,17 +1517,20 @@ fn the_goal_tool_schema_accepts_the_evidence_it_asks_for() -> Result<()> {
     let schema = serde_json::to_value(&manifest)?;
     let parameters = &schema["tools"][0]["parameters"];
     assert_eq!(parameters["required"], json!(["summary", "claim"]));
-    let evidence =
-        &parameters["properties"]["criteria"]["items"]["properties"]["evidence"]["items"];
+    let criteria = &parameters["properties"]["criteria"]["items"];
+    assert_eq!(criteria["required"], json!(["id", "text"]));
+    assert_eq!(criteria["additionalProperties"], false);
+    let evidence = &criteria["properties"]["evidence"]["items"];
     assert_eq!(evidence["additionalProperties"], false);
+    assert_eq!(evidence["required"], json!(["kind"]));
     assert_eq!(
         evidence["properties"]["kind"]["enum"],
         json!(["tool", "final_answer"])
     );
-    assert!(
-        evidence.get("anyOf").is_none(),
-        "no branch may re-require a forbidden field"
-    );
+    assert!(evidence["properties"]["call_id"].is_object());
+    assert!(criteria["properties"].get("source_ref").is_none());
+    assert!(criteria["properties"].get("check_ids").is_none());
+    assert!(parameters["properties"].get("revision").is_none());
     assert_eq!(parameters["properties"]["criteria"].get("maxItems"), None);
     assert_eq!(parameters["properties"]["checks"].get("maxItems"), None);
     Ok(())

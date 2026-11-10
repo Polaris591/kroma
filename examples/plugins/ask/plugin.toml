@@ -4,20 +4,7 @@ version = "0.1.0"
 description = "Let the model ask the user to pick between concrete options, single or multiple choice"
 
 prompt = """
-Ask only when both are true: you are genuinely unsure which path the person wants, and
-guessing wrong would mean redoing the work or leaving something hard to undo. Read the
-project instead of asking whenever the answer is already there.
-
-- One question at a time, asked before you start the work it decides.
-- Two to four options, written as the concrete values you would use next: a file, a
-  branch, a dependency, a config key. Never a vague style preference.
-- Never ask for passwords, tokens or other secrets; the person sets those in their own
-  configuration.
-- The answer settles that one question only. It is not approval of anything else, so
-  keep showing what you did and why.
-- If the question is dismissed, decide from the evidence you have and say what you chose.
-- A question without options is not this tool: ask it in plain text, which leaves the
-  person free to answer however they like.
+Ask only when project evidence cannot resolve a consequential choice. Ask one question with 2-4 concrete options before proceeding; never request secrets or treat the answer as approval. If dismissed, decide from evidence. Otherwise act without asking.
 """
 
 # No command: the host runs this tool itself, so there is no process to start.

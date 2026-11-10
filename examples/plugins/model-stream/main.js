@@ -12,8 +12,13 @@ const send = (request, payload) => {
 };
 readline.createInterface({ input: process.stdin, crlfDelay: Infinity })
   .on("line", async line => {
+    let request;
     try {
-      const request = JSON.parse(line);
+      request = JSON.parse(line);
+      if (request.type === "ping") {
+        send(request, { content: "pong" });
+        return;
+      }
       if (request.type === "model_generate") {
         send(request, { content: JSON.stringify({
           text: "Stream summary", requests: 1, usage: { input: 8, output: 3 }
@@ -77,7 +82,11 @@ readline.createInterface({ input: process.stdin, crlfDelay: Infinity })
         usage: { input: 100, output: 12, cached: 75, reasoning: 2 }
       } });
     } catch (error) {
-      try { send({ request_id: null }, { event: "error", message: String(error.message) }); }
-      catch { process.stderr.write(String(error) + "\n"); }
+      if (request) {
+        try { send(request, { event: "error", message: String(error.message) }); }
+        catch { process.stderr.write(String(error) + "\n"); }
+      } else {
+        process.stderr.write(String(error) + "\n");
+      }
     }
   });

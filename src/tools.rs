@@ -478,22 +478,9 @@ fn raw_execution(name: &str, arguments: &str, result: &ToolResult, is_error: boo
     raw
 }
 
-// Benchmark-only wire-name experiment: the executor and command schema stay
-// identical. The production default is always `shell`.
-fn shell_name_for(experiment: Option<&str>) -> &'static str {
-    if experiment == Some("bash") {
-        "bash"
-    } else {
-        "shell"
-    }
-}
-
+// One stable wire name independent of the selected platform shell dialect.
 pub(crate) fn builtin_shell_tool_name() -> &'static str {
-    shell_name_for(
-        std::env::var("KROMA_EXPERIMENT_SHELL_TOOL_NAME")
-            .ok()
-            .as_deref(),
-    )
+    "shell"
 }
 
 pub struct BuiltinShell;
@@ -760,11 +747,8 @@ mod tests {
     use crate::provider::FunctionCall;
 
     #[test]
-    fn shell_tool_wire_name_experiment_defaults_to_shell() {
-        assert_eq!(shell_name_for(None), "shell");
-        assert_eq!(shell_name_for(Some("")), "shell");
-        assert_eq!(shell_name_for(Some("true")), "shell");
-        assert_eq!(shell_name_for(Some("bash")), "bash");
+    fn shell_wire_name_is_stable_across_platform_dialects() {
+        assert_eq!(builtin_shell_tool_name(), "shell");
         let schema = definitions();
         assert_eq!(schema[0]["function"]["name"], builtin_shell_tool_name());
         assert_eq!(

@@ -7,68 +7,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const BASELINE_EXECUTION_GUIDANCE: &str = "\nFor coding tasks, locate relevant symbols before reading large files and keep inspections focused on relevant files and ranges; prefer focused ranges and diagnostic excerpts over dumping entire files or logs unless full context is necessary; once the needed evidence is found, edit rather than re-inspecting unchanged files. When necessary inspections are independent, request them together as separate shell calls (or one concise command); keep dependent edits and checks in order. After implementing the requested changes, run the requested tests and relevant regression checks. If all requirements are met and those checks pass, finish with a concise result rather than running unrelated doctests, broad exploratory checks or repeated successful tests. If a check fails, investigate its actual cause and re-run after a meaningful fix. Do not omit required verification just to save calls.";
-
-// Experimental legacy alternative to the first evidence-gathering sentence only.
-// Its verification and completion rules match the historical baseline.
-pub const COMPLETE_FUNCTION_GUIDANCE: &str = "\nFor coding tasks, locate relevant symbols before reading large files; once the relevant implementation is found, inspect its complete function and directly needed callers or types in as few useful requests as possible, rather than repeatedly reading tiny fragments. Do not dump unrelated large files or logs. Once the needed evidence is found, edit rather than re-inspecting unchanged files. When necessary inspections are independent, request them together as separate shell calls (or one concise command); keep dependent edits and checks in order. After implementing the requested changes, run the requested tests and relevant regression checks. If all requirements are met and those checks pass, finish with a concise result rather than running unrelated doctests, broad exploratory checks or repeated successful tests. If a check fails, investigate its actual cause and re-run after a meaningful fix. Do not omit required verification just to save calls.";
-
-pub const FINISH_ON_EVIDENCE_GUIDANCE: &str = concat!(
+// Single production instruction. The concatenated bytes intentionally match
+// the previously tested evidence-based completion + quality guidance.
+pub const EXECUTION_GUIDANCE: &str = concat!(
     "\nFor coding tasks, locate relevant symbols before reading large files and keep inspections focused on relevant files and ranges; prefer focused ranges and diagnostic excerpts over dumping entire files or logs unless full context is necessary; once the needed evidence is found, edit rather than re-inspecting unchanged files. When necessary inspections are independent, request them together as separate shell calls (or one concise command); keep dependent edits and checks in order. ",
     "After repairing the failure, run the requested tests and relevant checks; if the requirements are met and those checks pass, finish concisely. Do not intentionally revert a passing fix just to recreate the old failure unless the user asks for a negative control or unresolved evidence makes it necessary. If a passing test leaves a concrete requirement unverified, check that requirement before finishing.",
-    " If a check fails, investigate its actual cause and re-run after a meaningful fix. Do not omit required verification just to save calls."
-);
-
-// Evidence-based completion is the production default; baseline remains
-// available for reproducible A/B experiments without extra prompt paragraphs.
-pub const EXECUTION_GUIDANCE: &str = FINISH_ON_EVIDENCE_GUIDANCE;
-
-// Multi-arm research only. The default uses EXECUTION_GUIDANCE.
-// Never emit multiple competing execution paragraphs in the same request.
-pub const LEAN_GUIDANCE: &str = "\nFor coding tasks, locate the responsible code, make a correct focused change, and run all requested checks plus relevant regression tests. Investigate concrete failures or unverified requirements. Once those checks pass and the requested behavior is covered, finish instead of exploring unrelated possibilities.";
-
-pub const FOCUS_GUIDANCE: &str = concat!(
-    "\nFor coding tasks, first locate the named failure and owning implementation. Inspect the complete relevant function and directly needed callers or types in one useful pass. If evidence supports a fix, edit; otherwise inspect only the missing evidence. ",
-    "When necessary inspections are independent, request them together as separate shell calls (or one concise command); keep dependent edits and checks in order. After implementing the requested changes, run the requested tests and relevant regression checks. If all requirements are met and those checks pass, finish with a concise result rather than running unrelated doctests, broad exploratory checks or repeated successful tests. If a check fails, investigate its actual cause and re-run after a meaningful fix. Do not omit required verification just to save calls."
-);
-
-pub const FOCUS_FINISH_GUIDANCE: &str = concat!(
-    "\nFor coding tasks, first locate the named failure and owning implementation. Inspect the complete relevant function and directly needed callers or types in one useful pass. If evidence supports a fix, edit; otherwise inspect only the missing evidence. ",
-    "When necessary inspections are independent, request them together as separate shell calls (or one concise command); keep dependent edits and checks in order. ",
-    "After repairing the failure, run the requested tests and relevant checks; if the requirements are met and those checks pass, finish concisely. Do not intentionally revert a passing fix just to recreate the old failure unless the user asks for a negative control or unresolved evidence makes it necessary. If a passing test leaves a concrete requirement unverified, check that requirement before finishing. ",
-    "If a check fails, investigate its actual cause and re-run after a meaningful fix. Do not omit required verification just to save calls."
-);
-
-fn execution_guidance_for(mode: Option<&str>) -> &'static str {
-    match mode {
-        Some("baseline") => BASELINE_EXECUTION_GUIDANCE,
-        Some("finish") => FINISH_ON_EVIDENCE_GUIDANCE,
-        Some("complete") => COMPLETE_FUNCTION_GUIDANCE,
-        Some("lean") => LEAN_GUIDANCE,
-        Some("focus") => FOCUS_GUIDANCE,
-        Some("focus_finish") => FOCUS_FINISH_GUIDANCE,
-        _ => EXECUTION_GUIDANCE,
-    }
-}
-
-fn selected_execution_guidance() -> &'static str {
-    if let Ok(arm) = std::env::var("KROMA_EXPERIMENT_PROMPT_ARM") {
-        return execution_guidance_for(Some(&arm));
-    }
-    if std::env::var("KROMA_EXPERIMENT_FINISH_ON_EVIDENCE").as_deref() == Ok("1") {
-        return execution_guidance_for(Some("finish"));
-    }
-    if std::env::var("KROMA_EXPERIMENT_COMPLETE_FUNCTION_READ").as_deref() == Ok("1") {
-        return execution_guidance_for(Some("complete"));
-    }
-    EXECUTION_GUIDANCE
-}
-
-// V7 (F+C+E) keeps its instruction order; the quality paragraph incorporates
-// B (reuse-first) as the production default. C remains an experiment only. Do not repeat
-// execution guidance here: the final response should be concise without a
-// fixed sentence limit, so complex work can explain verification and risk.
-pub const V7_GUIDANCE: &str = concat!(
+    " If a check fails, investigate its actual cause and re-run after a meaningful fix. Do not omit required verification just to save calls.",
     "\nGive a brief user-facing progress update when starting substantial work, making an important confirmed discovery or changing direction, and starting validation. Describe actions or verified results, not internal reasoning. Skip routine tool-by-tool narration and progress updates for simple questions; do not add model requests or split batchable operations just to report progress. When you finish, reply concisely and accurately about what changed and what was verified. Complex tasks may warrant a fuller explanation of the modifications, verification evidence, failure causes and remaining risks; report uncertainty rather than hiding it.",
     "\nPrefer the simplest correct implementation consistent with the existing codebase. Before adding code, prefer suitable project implementations, then standard-library or platform capabilities and existing dependencies, before writing new code. Avoid redundant comments, explanatory boilerplate, unnecessary helper layers, and unrelated refactoring. Preserve required APIs, edge cases, tests, and non-obvious invariants. Never sacrifice correctness just to reduce code length.",
     "\nInvestigate tooling internals only when the evidence points there."
@@ -94,10 +38,7 @@ impl Default for PromptComposer {
         Self {
             system_override: None,
             initial_system_override: None,
-            additions: vec![
-                selected_execution_guidance().to_owned(),
-                V7_GUIDANCE.to_owned(),
-            ],
+            additions: vec![EXECUTION_GUIDANCE.to_owned()],
             instruction_files: Vec::new(),
             nested_paths: BTreeSet::new(),
             trailing: Vec::new(),
@@ -262,19 +203,19 @@ impl PromptComposer {
         Ok(())
     }
 
-    /// Experimental hosts may replace, rather than append to, the default
-    /// execution guidance. The production default remains unchanged.
+    /// Embedding hosts may replace the default guidance in their own runtime.
+    /// This is a generic API, not a production experiment switch.
     pub fn replace_execution_guidance(&mut self, guidance: impl Into<String>) -> Result<()> {
         let guidance = guidance.into();
         if guidance.trim().is_empty() {
             bail!("replacement execution guidance must not be empty");
         }
-        let default = self
+        let original = self
             .additions
             .iter_mut()
-            .find(|segment| segment.as_str() == EXECUTION_GUIDANCE)
-            .context("default execution guidance is not present")?;
-        *default = guidance;
+            .find(|value| value.as_str() == EXECUTION_GUIDANCE)
+            .context("default guidance is not present")?;
+        *original = guidance;
         Ok(())
     }
 
@@ -407,24 +348,16 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn replacing_execution_guidance_keeps_other_instructions_and_default_unchanged() {
-        let mut experimental = PromptComposer::default();
-        experimental
-            .replace_execution_guidance("\nFind evidence, edit, run required tests.")
+    fn plugin_extra_guidance_preserves_the_single_default_instruction() {
+        let composer = PromptComposer::default()
+            .with_extra("\nPlugin-specific extra instruction.")
             .unwrap();
-        let mut view = experimental.initial_history(Path::new("."));
-        experimental.apply(&mut view);
+        let mut view = composer.initial_history(Path::new("."));
+        composer.apply(&mut view);
         let system = view[0].content.as_deref().unwrap();
-        assert!(system.contains("Find evidence, edit, run required tests."));
-        assert!(system.contains(V7_GUIDANCE));
-        assert!(!system.contains(EXECUTION_GUIDANCE));
-        assert_eq!(
-            PromptComposer::default()
-                .initial_history(Path::new("."))
-                .len(),
-            1
-        );
-        assert!(experimental.replace_execution_guidance("").is_err());
+        assert!(system.contains("Plugin-specific extra instruction."));
+        assert_eq!(system.matches(EXECUTION_GUIDANCE).count(), 1);
+        assert!(composer.with_extra("").is_err());
     }
 
     #[test]
@@ -465,114 +398,41 @@ mod tests {
     }
 
     #[test]
-    fn complete_function_read_is_opt_in_and_preserves_verification_rules() {
-        assert_eq!(execution_guidance_for(None), EXECUTION_GUIDANCE);
-        assert_eq!(
-            execution_guidance_for(Some("baseline")),
-            BASELINE_EXECUTION_GUIDANCE
-        );
-        assert_eq!(execution_guidance_for(Some("true")), EXECUTION_GUIDANCE);
-        assert_eq!(
-            execution_guidance_for(Some("complete")),
-            COMPLETE_FUNCTION_GUIDANCE
-        );
-        let anchor = "When necessary inspections are independent";
-        assert_eq!(
-            BASELINE_EXECUTION_GUIDANCE.split_once(anchor).unwrap().1,
-            COMPLETE_FUNCTION_GUIDANCE.split_once(anchor).unwrap().1
-        );
-        assert!(COMPLETE_FUNCTION_GUIDANCE.contains("inspect its complete function"));
-        assert!(COMPLETE_FUNCTION_GUIDANCE.contains("Do not omit required verification"));
-    }
-
-    #[test]
-    fn finish_on_evidence_preserves_diagnostics_and_verification() {
-        assert_eq!(execution_guidance_for(None), EXECUTION_GUIDANCE);
-        assert_eq!(
-            execution_guidance_for(Some("finish")),
-            FINISH_ON_EVIDENCE_GUIDANCE
-        );
-        let before = "When necessary inspections are independent, request them together as separate shell calls (or one concise command); keep dependent edits and checks in order.";
-        assert_eq!(
-            BASELINE_EXECUTION_GUIDANCE.split_once(before).unwrap().0,
-            FINISH_ON_EVIDENCE_GUIDANCE.split_once(before).unwrap().0
-        );
-        let after = "If a check fails, investigate its actual cause";
-        assert_eq!(
-            BASELINE_EXECUTION_GUIDANCE.split_once(after).unwrap().1,
-            FINISH_ON_EVIDENCE_GUIDANCE.split_once(after).unwrap().1
-        );
-        assert!(FINISH_ON_EVIDENCE_GUIDANCE.contains("concrete requirement unverified"));
-    }
-
-    #[test]
-    fn multi_arm_guidance_is_exclusive_and_keeps_verification() {
-        for arm in ["lean", "focus", "focus_finish", "finish", "complete"] {
-            let text = execution_guidance_for(Some(arm));
-            assert!(text.contains("requested"));
-            assert!(text.contains("check"));
-            assert!(text.contains("finish"));
-            assert!(!text.contains("KROMA_EXPERIMENT"));
+    fn one_default_guidance_contains_completion_and_quality_rules() {
+        for rule in [
+            "Do not intentionally revert a passing fix",
+            "If a passing test leaves a concrete requirement unverified",
+            "Prefer the simplest correct implementation",
+            "Never sacrifice correctness",
+            "Give a brief user-facing progress update",
+        ] {
+            assert!(EXECUTION_GUIDANCE.contains(rule), "{rule}");
         }
-        assert_eq!(execution_guidance_for(None), EXECUTION_GUIDANCE);
-        assert_eq!(execution_guidance_for(Some("invalid")), EXECUTION_GUIDANCE);
-        assert_eq!(EXECUTION_GUIDANCE, FINISH_ON_EVIDENCE_GUIDANCE);
-        assert_ne!(BASELINE_EXECUTION_GUIDANCE, EXECUTION_GUIDANCE);
-        assert_ne!(LEAN_GUIDANCE, FOCUS_FINISH_GUIDANCE);
+        assert!(!EXECUTION_GUIDANCE.contains("KROMA_EXPERIMENT_"));
     }
 
     #[test]
-    fn built_in_quality_defaults_to_b_and_preserves_safety_without_persona() {
-        assert!(V7_GUIDANCE.contains("prefer suitable project implementations"));
-        assert!(V7_GUIDANCE.contains("Preserve required APIs, edge cases, tests"));
-        assert!(V7_GUIDANCE.contains("Never sacrifice correctness"));
-        assert!(!V7_GUIDANCE.contains("make the smallest complete change across that scope"));
-        for marker in ["lazy senior", "lite/full/ultra", "shortcut:", "Ponytail"] {
-            assert!(!V7_GUIDANCE.contains(marker));
-        }
-    }
-
-    #[test]
-    fn v7_is_projected_once_without_mutating_persisted_history() {
+    fn production_guidance_is_projected_once_without_mutating_history() {
         let composer = PromptComposer::default();
-        let original = composer.initial_history(Path::new("/tmp/kroma-v7-test"));
-        assert!(!original[0]
-            .content
-            .as_deref()
-            .unwrap()
-            .contains(V7_GUIDANCE));
-        let mut outbound = original.clone();
-        composer.apply(&mut outbound);
-        let projected = outbound[0].content.as_deref().unwrap().to_owned();
-        assert!(projected.contains(EXECUTION_GUIDANCE));
-        assert!(projected.ends_with(V7_GUIDANCE));
-        assert!(
-            !V7_GUIDANCE.contains("at most two")
-                && !V7_GUIDANCE.contains("two concise")
-                && !V7_GUIDANCE.to_ascii_lowercase().contains("sentences"),
-            "the default prompt must not impose a fixed sentence limit"
-        );
-        assert!(V7_GUIDANCE.contains("Complex tasks may"));
-        assert!(V7_GUIDANCE.contains("remaining risks"));
-        assert_eq!(outbound[0].content.as_deref(), Some(projected.as_str()));
-        let expected = projected.len() - original[0].content.as_deref().unwrap().len();
+        let original = composer.initial_history(Path::new("/tmp/kroma-guidance-test"));
+        let stored = original[0].content.clone().unwrap();
+        assert!(!stored.contains(EXECUTION_GUIDANCE));
+        let mut view = original.clone();
+        composer.apply(&mut view);
+        let projected = view[0].content.clone().unwrap();
+        assert!(projected.ends_with(EXECUTION_GUIDANCE));
+        assert_eq!(projected.matches(EXECUTION_GUIDANCE).count(), 1);
+        composer.apply(&mut view);
+        assert_eq!(view[0].content.as_deref(), Some(projected.as_str()));
+        assert_eq!(original[0].content.as_deref(), Some(stored.as_str()));
         assert_eq!(
             composer.extra_estimated_tokens(&original[0]),
-            expected.div_ceil(3),
-            "built-in guidance must be included in the compaction budget"
-        );
-        assert!(composer.extra_estimated_tokens(&original[0]) > 0);
-        composer.apply(&mut outbound);
-        assert_eq!(
-            outbound[0].content.as_deref(),
-            Some(projected.as_str()),
-            "repeated projections must not duplicate guidance"
+            (projected.len() - stored.len()).div_ceil(3)
         );
     }
 
     #[test]
-    fn built_in_guidance_does_not_repeat_core_execution_directives() {
-        let combined = format!("{EXECUTION_GUIDANCE}{V7_GUIDANCE}");
+    fn built_in_guidance_does_not_repeat_execution_directives() {
         for directive in [
             "If a check fails",
             "Do not intentionally revert a passing fix",
@@ -580,28 +440,8 @@ mod tests {
             "requested tests",
             "re-inspecting unchanged files",
         ] {
-            assert_eq!(
-                combined.matches(directive).count(),
-                1,
-                "{directive:?} must have one authoritative instruction"
-            );
+            assert_eq!(EXECUTION_GUIDANCE.matches(directive).count(), 1);
         }
-    }
-
-    #[test]
-    fn default_guidance_is_counted_once_in_the_projection_budget() {
-        let composer = PromptComposer::default();
-        let stored = composer.initial_history(Path::new("/tmp/kroma-budget-test"));
-        let mut projected = stored.clone();
-        composer.apply(&mut projected);
-        let added = projected[0].content.as_deref().unwrap().len()
-            - stored[0].content.as_deref().unwrap().len();
-        assert!(added > 0);
-        assert_eq!(
-            composer.extra_estimated_tokens(&stored[0]),
-            added.div_ceil(3)
-        );
-        assert!(V7_GUIDANCE.len() > 100);
     }
 
     #[test]

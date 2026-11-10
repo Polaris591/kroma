@@ -1402,6 +1402,22 @@ impl ModelClient {
         self
     }
 
+    // Use one capability decision for the on-wire replay, compression budget,
+    // and low-cost summary request. Prefer exact official catalog identity,
+    // while preserving explicit profile settings and legacy proxy model IDs.
+    // Unlisted reverse-proxy names cannot be inferred from the catalog alone.
+    fn uses_deepseek_tool_reasoning(&self) -> bool {
+        if self.deepseek_thinking.is_some() {
+            return true;
+        }
+        if let Ok(Some(record)) = crate::model_catalog::select(&self.base_url, &self.model, None) {
+            return record.provider == "deepseek";
+        }
+        // Compatibility fallback for arbitrary proxy model IDs. This cannot
+        // be removed until proxy profiles declare an explicit protocol trait.
+        self.model.to_ascii_lowercase().contains("deepseek")
+    }
+
     // Bind replayable Chat reasoning to its originating endpoint and model.
     // Store only a fingerprint, never the endpoint URL or API credentials in
     // the transcript metadata. This survives session resume and model swaps.
@@ -1511,8 +1527,7 @@ impl ModelClient {
                 .map_or(0, |index| index + 1)
         });
         let replay_reasoning = !tools.is_empty()
-            && (self.deepseek_thinking.is_some()
-                || self.model.to_ascii_lowercase().contains("deepseek"))
+            && self.uses_deepseek_tool_reasoning()
             && self.reasoning_level().as_deref() != Some("off");
         let expected_origin = self.chat_reasoning_origin();
         if let Some(items) = payload.get_mut("messages").and_then(Value::as_array_mut) {
@@ -1960,9 +1975,7 @@ impl ModelClient {
             // the coding task's High reasoning budget. DeepSeek defaults to
             // High unless an effort is explicitly requested. For generic
             // OpenAI-compatible models avoid sending a nonstandard field.
-            if self.deepseek_thinking.is_some()
-                || self.model.to_ascii_lowercase().contains("deepseek")
-            {
+            if self.uses_deepseek_tool_reasoning() {
                 payload["reasoning_effort"] = json!("low");
             }
             match self.protocol {
@@ -2350,9 +2363,8 @@ impl ModelBackend for ModelClient {
             .unwrap_or(0);
         let expected_chat = self.chat_reasoning_origin();
         let expected_opaque = self.opaque_reasoning_origin();
-        let deepseek_replay = (self.deepseek_thinking.is_some()
-            || self.model.to_ascii_lowercase().contains("deepseek"))
-            && self.reasoning_level().as_deref() != Some("off");
+        let deepseek_replay =
+            self.uses_deepseek_tool_reasoning() && self.reasoning_level().as_deref() != Some("off");
         for (index, message) in messages.iter_mut().enumerate() {
             if message.role == "tool" {
                 // The tool's error bit is used by some adapters but its
@@ -3095,6 +3107,37 @@ mod tests {
             message: "image input is not supported".into(),
         });
         assert!(image_capability_rejection(&unsupported));
+    }
+
+    #[test]
+    fn deepseek_capability_is_consistent_for_catalog_models_and_proxies() {
+        let official =
+            ModelClient::new("https://api.deepseek.com/v1", None, "deepseek-flash".into()).unwrap();
+        assert!(crate::model_catalog::select(
+            "https://api.deepseek.com/v1",
+            "deepseek-flash",
+            None
+        )
+        .unwrap()
+        .is_some());
+        assert!(official.uses_deepseek_tool_reasoning());
+
+        let proxy = ModelClient::new(
+            "https://proxy.example/v1",
+            None,
+            "deepseek-v4.1-flash".into(),
+        )
+        .unwrap();
+        assert!(proxy.uses_deepseek_tool_reasoning());
+        let ordinary = ModelClient::new("https://proxy.example/v1", None, "gpt-6".into()).unwrap();
+        assert!(!ordinary.uses_deepseek_tool_reasoning());
+        let configured = ordinary.with_deepseek_thinking(Some("high".into()));
+        assert!(configured.uses_deepseek_tool_reasoning());
+        assert!(
+            !ModelClient::new("https://api.openai.com/v1", None, "gpt-6".into(),)
+                .unwrap()
+                .uses_deepseek_tool_reasoning()
+        );
     }
 
     #[test]
