@@ -248,6 +248,13 @@ JSONL 保留旧事件，新增可忽略的控制事件；事件只是展示，�
 
 必填字段：`summary`、`claim`。`revision` 缺省等于当前修订；其余字段按当前状态继承，全部可选。
 
+**模型可见的是精简 schema**：实际下发的 `goal_checkpoint` 只声明 `summary`、`claim` 与可选的
+`criteria`/`checks`/`next_step`/`block_reason`/`unverified`（验收点仅 `id`、`text`、`assessment`、`evidence`；
+检查项仅 `id`、`command`），字段说明不再随请求下发。`revision`、`source`、`source_ref`、`kind`、
+`check_ids`、`notes`、`rationale` 仍由插件与宿主接受并校验，只是不再向模型宣传。
+因此下文的字段表是**协议契约**，不等于模型的完整可见表单；取舍理由见
+[插件边界](plugin-boundaries.md)。
+
 | 字段 | 规则 |
 | --- | --- |
 | `criteria` | 可选的要求列表；省略表示继承，空数组表示清空。模型可随时修正自己的理解 |
