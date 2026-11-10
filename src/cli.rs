@@ -12,6 +12,7 @@ pub enum Command {
     Update { check: bool, channel: String },
     Config(Vec<String>),
     Plugins(Vec<String>),
+    Sessions(Vec<String>),
     Diagnostics(Option<PathBuf>),
     TrustProject { revoke: bool },
     RecoverContext(Option<String>),
@@ -163,6 +164,7 @@ fn is_subcommand(arg: &str) -> bool {
         "update"
             | "config"
             | "plugins"
+            | "sessions"
             | "diagnostics"
             | "trust-project"
             | "recover-context"
@@ -182,6 +184,7 @@ fn subcommand(head: &str, args: &[String]) -> Result<Command, CliError> {
         "update" => parse_update(args),
         "config" => Ok(Command::Config(args.to_vec())),
         "plugins" => Ok(Command::Plugins(args.to_vec())),
+        "sessions" => Ok(Command::Sessions(args.to_vec())),
         "diagnostics" => parse_diagnostics(args),
         "trust-project" => parse_trust(args),
         "recover-context" => parse_recover(args),
@@ -525,6 +528,10 @@ Docs: docs/quickstart.md - docs/security.md"
 pub fn help_for(topic: &str) -> &'static str {
     match topic {
         "config" => "Usage: kroma config [list|show|set <name>|use <name>|delete <name>|test <name>]\n\nProfiles live in ~/.kroma/config.json (or KROMA_CONFIG_FILE).\nRun 'kroma setup' for a guided first-run flow.",
+        "sessions" => "Usage: kroma sessions prune --older-than DAYS
+
+Removes saved conversations whose newest file is older than DAYS (minimum 1).
+A conversation used recently always survives any cutoff; nothing else in the directory is touched.",
         "plugins" => "Usage: kroma plugins [list|enable <id>|disable <id>|install <path>|check <path>|uninstall <id>|config <id>|set <id> <key> <value>|reset <id> <key>]\n\nInstalled plugins are disabled until enabled; restart or /plugins reload after enabling.\nPlugins with a [settings] table reject unknown keys; 'set' converts the value to the type of that key's manifest default (bool, integer, string array, string).",
         "diagnostics" => "Usage: kroma diagnostics [--output <new-directory>]\n\nWrites a local-only allowlisted bundle. No upload, model request or plugin process.",
         "trust-project" => "Usage: kroma trust-project [--revoke]\n\nApproves or revokes this project's .kroma/mcp.json. The approval is bound to its content.",

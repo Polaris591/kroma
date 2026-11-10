@@ -18,12 +18,12 @@ use std::{
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(10);
 
 /// A checkpoint is a non-streaming summary request made while the user waits,
-/// so it is bounded twice: each attempt gets 75 seconds and one retry, and the
-/// outer guard caps the whole thing at three minutes. A summary is never worth
-/// a silent quarter-hour. Session titles stay short with their own deadline.
-pub(crate) const CHECKPOINT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(75);
+/// so it is bounded twice: each attempt gets three minutes and one retry, and
+/// the outer guard caps the whole thing at seven. A summary is never worth a
+/// silent quarter-hour. Session titles stay short with their own deadline.
+pub(crate) const CHECKPOINT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(180);
 pub(crate) const CHECKPOINT_MAX_TIMEOUT_RETRIES: usize = 1;
-pub(crate) const CHECKPOINT_TOTAL_TIMEOUT: Duration = Duration::from_secs(180);
+pub(crate) const CHECKPOINT_TOTAL_TIMEOUT: Duration = Duration::from_secs(400);
 const TITLE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn text_attempt_timeout(short: bool) -> Duration {
@@ -2630,10 +2630,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checkpoint_attempts_allow_three_six_minute_retries() {
-        assert_eq!(CHECKPOINT_ATTEMPT_TIMEOUT, Duration::from_secs(75));
+    fn checkpoint_attempts_allow_long_attempts_and_one_retry() {
+        assert_eq!(CHECKPOINT_ATTEMPT_TIMEOUT, Duration::from_secs(180));
         assert_eq!(CHECKPOINT_MAX_TIMEOUT_RETRIES, 1);
-        assert_eq!(CHECKPOINT_TOTAL_TIMEOUT, Duration::from_secs(180));
+        assert_eq!(CHECKPOINT_TOTAL_TIMEOUT, Duration::from_secs(400));
         assert_eq!(text_attempt_timeout(false), CHECKPOINT_ATTEMPT_TIMEOUT);
         assert_eq!(text_attempt_timeout(true), TITLE_ATTEMPT_TIMEOUT);
     }

@@ -37,7 +37,7 @@ use std::{
 fn tool_idle_limit_from(value: Option<&str>) -> Option<Duration> {
     let secs = value
         .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .unwrap_or(300);
+        .unwrap_or(600);
     (secs > 0).then(|| Duration::from_secs(secs))
 }
 
@@ -3511,8 +3511,8 @@ mod idle_watchdog_tests {
     use super::*;
 
     #[test]
-    fn the_idle_limit_defaults_to_five_minutes() {
-        assert_eq!(tool_idle_limit_from(None), Some(Duration::from_secs(300)));
+    fn the_idle_limit_defaults_to_ten_minutes() {
+        assert_eq!(tool_idle_limit_from(None), Some(Duration::from_secs(600)));
         assert_eq!(tool_idle_limit_from(Some("0")), None);
         assert_eq!(
             tool_idle_limit_from(Some(" 60 ")),
@@ -3520,7 +3520,7 @@ mod idle_watchdog_tests {
         );
         assert_eq!(
             tool_idle_limit_from(Some("junk")),
-            Some(Duration::from_secs(300))
+            Some(Duration::from_secs(600))
         );
     }
 

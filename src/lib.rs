@@ -31,6 +31,7 @@ pub mod protocol;
 pub mod provider;
 pub mod session;
 pub mod sessions;
+pub mod sessions_prune;
 pub mod setup;
 pub mod shell;
 pub mod skills;

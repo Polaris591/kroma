@@ -709,6 +709,50 @@ async fn dispatch(command: kroma::cli::Command) -> Result<()> {
             }
             kroma::plugins::PluginCatalog::cli(&args)
         }
+        Command::Sessions(args) => {
+            if wants_help(&args) || args.is_empty() {
+                kroma::cli_println!("{}", cli::help_for("sessions"));
+                return Ok(());
+            }
+            let usage = cli::help_for("sessions");
+            let [command, flag, days] = args.as_slice() else {
+                bail!("{usage}");
+            };
+            if command != "prune" || flag != "--older-than" {
+                bail!("{usage}");
+            }
+            let days: u64 = days
+                .parse()
+                .with_context(|| format!("'{days}' is not a number of days"))?;
+            if days == 0 {
+                bail!("Use at least 1 day: deleting every conversation at once is not what prune is for.");
+            }
+            let home = env::var_os("HOME")
+                .or_else(|| env::var_os("USERPROFILE"))
+                .context("HOME is unset; cannot find saved conversations")?;
+            let dir = PathBuf::from(home).join(".kroma").join("sessions");
+            let report = kroma::sessions_prune::prune(
+                &dir,
+                std::time::Duration::from_secs(days * 24 * 60 * 60),
+                std::time::SystemTime::now(),
+            )?;
+            let unit = if days == 1 { "day" } else { "days" };
+            if report.sessions == 0 {
+                kroma::cli_println!("No saved conversation is older than {days} {unit}.");
+            } else {
+                let size = if report.bytes >= 1_048_576 {
+                    format!("{:.1} MB", report.bytes as f64 / 1_048_576.0)
+                } else {
+                    format!("{} KB", report.bytes.div_ceil(1024))
+                };
+                kroma::cli_println!(
+                    "Pruned {} conversations ({} files, {size}).",
+                    report.sessions,
+                    report.files
+                );
+            }
+            Ok(())
+        }
         Command::Diagnostics(output) => {
             let path = kroma::diagnostics_bundle::generate(output)?;
             kroma::cli_println!(

@@ -2615,11 +2615,11 @@ mod tests {
     }
 
     #[test]
-    fn default_checkpoint_deadline_caps_the_user_wait_at_three_minutes() {
+    fn default_checkpoint_deadline_fits_two_long_attempts() {
         assert_eq!(
             compression().checkpoint_timeout,
-            Duration::from_secs(180),
-            "a summary attempt plus one retry must still fit inside three minutes"
+            Duration::from_secs(400),
+            "two three-minute attempts and one retry must fit, with room to finish"
         );
     }
 

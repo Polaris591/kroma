@@ -7,6 +7,7 @@ The source currently declares version `0.4.0` in `Cargo.toml`. No public npm pac
 ## Unreleased
 
 ### Added
+- `kroma sessions prune --older-than DAYS` deletes saved conversations whose newest file is older than the cutoff. A conversation used recently always survives any cutoff, and no other file in the directory is touched.
 - Opt-in server-side `web_search` for Responses profiles (`native_web_search`): the endpoint runs the search, Kroma shows it through the existing tool activity view, keeps real source URLs with the turn and reports provider-supplied search counts.
 - Opt-in Anthropic server-side search (`web_search_20250305`) behind the same `native_web_search` flag, keeping provider-reported search counts through partial streams and falling back to the local web plugin when the endpoint rejects the tool.
 - Public Beta CLI/TUI documentation, configuration and first-run setup.
@@ -23,6 +24,8 @@ The source currently declares version `0.4.0` in `Cargo.toml`. No public npm pac
 - Cross-platform CI, native npm-package staging tests and maintainer-gated release workflows.
 
 ### Changed
+- A silent tool now gets ten minutes instead of five before Kroma stops waiting (`KROMA_TOOL_IDLE_SECS` still overrides it, and 0 disables the guard).
+- A context summary gets three minutes per attempt with one retry, under a 400-second ceiling for the whole checkpoint, so a slow provider no longer loses the compaction.
 - Error messages name what broke and what to do: a plugin that answers a different request says which plugin and points at `kroma plugins check`, an MCP server returning the wrong shape names the content type it sent, a damaged conversation journal says nothing was deleted and how to continue, a malformed tool call from an endpoint suggests a retry or a model switch, and an unusable plugin id shows the allowed characters.
 - Goal plugin: the model-facing `goal_checkpoint` schema lists only `summary`, `claim` and the optional `criteria`/`checks`/`next_step`/`block_reason`/`unverified` fields, without per-field prose, shrinking the manifest's tool section from 5,266 to 2,277 bytes. `revision`, `source`, `source_ref`, `kind`, `check_ids`, `notes` and `rationale` remain accepted and validated by the host and plugin protocol; the host still rejects stale revisions and evidence it cannot match to a real execution.
 - One production execution guidance replaces seven parallel prompt texts. The shipped text is byte-identical to the previous two-paragraph default (2,209 characters), so behavior and per-request cost are unchanged while only one paragraph needs maintaining; the archived arms live in `benchmarks/legacy_prompt_arms.rs`.
