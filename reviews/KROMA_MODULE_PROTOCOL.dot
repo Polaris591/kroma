@@ -1,0 +1,37 @@
+digraph {
+
+    graph [
+        label="kroma",
+        labelloc=t,
+
+        pad=0.4,
+
+        // Consider rendering the graph using a different layout algorithm, such as:
+        // [dot, neato, twopi, circo, fdp, sfdp]
+        layout=neato,
+        overlap=false,
+        splines="line",
+        rankdir=LR,
+
+        fontname="Helvetica", 
+        fontsize="36",
+    ];
+
+    node [
+        fontname="monospace",
+        fontsize="10",
+        shape="record",
+        style="filled",
+    ];
+
+    edge [
+        fontname="monospace",
+        fontsize="10",
+    ];
+
+    "kroma" [label="crate|kroma", fillcolor="#5397c8"]; // "crate" node
+    "kroma::protocol" [label="pub mod|protocol", fillcolor="#81c169"]; // "mod" node
+
+    "kroma" -> "kroma::protocol" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+
+}
