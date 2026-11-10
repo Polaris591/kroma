@@ -45,6 +45,90 @@ fn tool_idle_limit() -> Option<Duration> {
     tool_idle_limit_from(std::env::var("KROMA_TOOL_IDLE_SECS").ok().as_deref())
 }
 
+// Experiment only: change the model request, never the authoritative WAL or
+// tool execution status. Other tools and unrecognized shell results stay raw.
+fn project_readable_shell_results(view: &mut [Message]) {
+    for message in view.iter_mut().filter(|message| message.role == "tool") {
+        let from_shell = message
+            .provider_items
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .any(|item| item["type"] == "kroma_tool_execution" && item["name"] == "shell");
+        if !from_shell {
+            continue;
+        }
+        let Some(raw) = message.content.as_deref() else {
+            continue;
+        };
+        let Ok(serde_json::Value::Object(fields)) = serde_json::from_str(raw) else {
+            continue;
+        };
+        if !fields.contains_key("exit_code")
+            || !fields.contains_key("stdout")
+            || !fields.contains_key("stderr")
+        {
+            continue;
+        }
+        let mut readable = String::from("Shell result:\n");
+        for key in ["exit_code", "stdout", "stderr"] {
+            if let Some(value) = fields.get(key) {
+                readable.push_str(key);
+                readable.push_str(":\n");
+                if let Some(stream) = value.as_str() {
+                    readable.push_str(stream);
+                } else {
+                    readable.push_str(&value.to_string());
+                }
+                readable.push('\n');
+            }
+        }
+        for (key, value) in &fields {
+            if matches!(key.as_str(), "exit_code" | "stdout" | "stderr") {
+                continue;
+            }
+            readable.push_str(key);
+            readable.push_str(": ");
+            readable.push_str(&value.to_string());
+            readable.push('\n');
+        }
+        message.content = Some(readable);
+    }
+}
+
+// A benchmark-only evidence check. A zero exit status without a named,
+// nonzero passing Cargo summary is not enough to trigger a stopping hint.
+fn is_passing_cargo_check(call: &ToolCall, result: &str) -> bool {
+    if call.function.name != "shell" {
+        return false;
+    }
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.function.arguments) else {
+        return false;
+    };
+    let Some(command) = args.get("command").and_then(|value| value.as_str()) else {
+        return false;
+    };
+    if !command.contains("cargo test") {
+        return false;
+    }
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(result) else {
+        return false;
+    };
+    if payload.get("exit_code").and_then(|value| value.as_i64()) != Some(0) {
+        return false;
+    }
+    let Some(stdout) = payload.get("stdout").and_then(|value| value.as_str()) else {
+        return false;
+    };
+    stdout.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("test result: ok.")
+            .and_then(|tail| tail.split_whitespace().next())
+            .and_then(|count| count.parse::<usize>().ok())
+            .is_some_and(|count| count > 0)
+    })
+}
+
 /// Run one tool call, but never wait forever on a silent one. Dropping the
 /// future also drops the child process, which `kill_on_drop` terminates.
 async fn await_with_idle<F, T>(
@@ -1818,10 +1902,21 @@ impl Agent {
         let mut base_extra_tokens =
             prompt_tokens.saturating_add(bytes_to_tokens(tool_schema_bytes));
 
+        // Temporary benchmark switch, intentionally not a product setting.
+        let readable_shell_results = matches!(
+            std::env::var("KROMA_EXPERIMENT_READABLE_SHELL_RESULTS").as_deref(),
+            Ok("1")
+        );
         let mut overflow_retries = 0;
         let mut truncation_retries = 0;
         let mut continuing_native_search = false;
         let mut checkpoint_ready = false;
+        // Experimental adaptive prompt. Never alters the durable transcript.
+        let adaptive_finish_hint =
+            std::env::var("KROMA_EXPERIMENT_ADAPTIVE_FINISH").as_deref() == Ok("1");
+        let mut observed_passing_test = false;
+        let mut additional_tools_after_pass = 0usize;
+        let mut adaptive_hint_sent = false;
         loop {
             // Steering is a durable new user instruction, delivered only
             // after the preceding model turn and all its tool results.
@@ -1860,6 +1955,20 @@ impl Agent {
                 .await?;
             self.session.ensure_writable()?;
             self.prompt.apply(&mut view);
+            if readable_shell_results {
+                project_readable_shell_results(&mut view);
+            }
+            if adaptive_finish_hint
+                && observed_passing_test
+                && additional_tools_after_pass >= 2
+                && !adaptive_hint_sent
+            {
+                view.push(Message::new(
+                    "user",
+                    "[Kroma execution checkpoint, not a new user request] An earlier Cargo test returned passing results, and more tool calls followed. If the user requirements are satisfied and no concrete case is unverified, finish with the result. If a requirement is still unverified or a check failed, continue only the needed investigation and verification. Do not revert a passing fix merely to recreate the original failure without a specific reason.",
+                ));
+                adaptive_hint_sent = true;
+            }
             // Host-private control and raw-execution metadata never reach a
             // provider; only this projection copy is stripped.
             crate::task_control::strip_host_metadata_all(&mut view);
@@ -2534,7 +2643,7 @@ impl Agent {
                 self.active_tool = None;
                 let tool_elapsed = tool_started.elapsed();
                 stats.tool_time += tool_elapsed;
-                if call.function.name == "shell" {
+                if call.function.name == crate::tools::builtin_shell_tool_name() {
                     stats.shell_time += tool_elapsed;
                 }
                 stats.tools += 1;
@@ -2544,6 +2653,13 @@ impl Agent {
                         stats.tools,
                         tool_started.elapsed().as_secs_f64() * 1_000.0
                     );
+                }
+                if adaptive_finish_hint && !adaptive_hint_sent {
+                    if is_passing_cargo_check(&call, &execution.result.content) {
+                        observed_passing_test = true;
+                    } else if observed_passing_test {
+                        additional_tools_after_pass += 1;
+                    }
                 }
                 let mut tool_failed = execution.result.is_error;
                 let mut message = Message::tool_with_status(
@@ -2988,6 +3104,48 @@ fn add_reported(total: Option<u64>, next: Option<u64>, first: bool) -> Option<u6
 mod tests {
     use super::*;
 
+    #[test]
+    fn readable_shell_projection_preserves_evidence_and_durable_history() {
+        let raw = serde_json::json!({
+            "exit_code": 7,
+            "stdout": "first line\nsecond line\n中文 \"quote\"",
+            "stderr": "failed: details\n",
+            "stdout_file": "C:/logs/out.txt",
+            "stderr_file": "C:/logs/err.txt",
+            "stdout_bytes": 20000,
+            "future_field": {"marker": [1, 2]}
+        })
+        .to_string();
+        let mut shell = Message::tool_with_status("shell-id".into(), raw.clone(), true);
+        shell
+            .provider_items
+            .as_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "type": "kroma_tool_execution", "name": "shell", "arguments": "{}"
+            }));
+        let plain = Message::tool_with_status("plugin-id".into(), raw.clone(), false);
+        let unsupported =
+            Message::tool_with_status("error-id".into(), "{\"error\":\"bad\"}".into(), true);
+        let durable = vec![shell, plain, unsupported];
+        let mut projected = durable.clone();
+        project_readable_shell_results(&mut projected);
+
+        let readable = projected[0].content.as_deref().unwrap();
+        assert!(readable.contains("exit_code:\n7"));
+        assert!(readable.contains("stdout:\nfirst line\nsecond line\n中文 \"quote\""));
+        assert!(readable.contains("stderr:\nfailed: details\n"));
+        assert!(readable.contains("stdout_file: \"C:/logs/out.txt\""));
+        assert!(readable.contains("stderr_file: \"C:/logs/err.txt\""));
+        assert!(readable.contains("stdout_bytes: 20000"));
+        assert!(readable.contains("future_field: {\"marker\":[1,2]}"));
+        assert_eq!(projected[0].tool_call_id.as_deref(), Some("shell-id"));
+        assert!(projected[0].tool_failed());
+        assert_eq!(projected[1].content, durable[1].content);
+        assert_eq!(projected[2].content, durable[2].content);
+        assert_eq!(durable[0].content.as_deref(), Some(raw.as_str()));
+    }
+
     #[tokio::test]
     async fn tool_output_heartbeat_works_without_an_event_sink() {
         let started = Instant::now();
@@ -3377,8 +3535,9 @@ mod tests {
             "once the needed evidence is found, edit rather than re-inspecting unchanged files"
         ));
         assert!(EXECUTION_GUIDANCE.contains("requested tests"));
-        assert!(EXECUTION_GUIDANCE.contains("relevant regression checks"));
-        assert!(EXECUTION_GUIDANCE.contains("unrelated doctests"));
+        assert!(EXECUTION_GUIDANCE.contains("requested tests and relevant checks"));
+        assert!(EXECUTION_GUIDANCE.contains("concrete requirement unverified"));
+        assert!(EXECUTION_GUIDANCE.contains("Do not intentionally revert a passing fix"));
         assert!(EXECUTION_GUIDANCE.contains("If a check fails"));
         assert!(EXECUTION_GUIDANCE.contains("Do not omit required verification"));
     }
@@ -3526,6 +3685,26 @@ mod idle_watchdog_tests {
             tool_idle_limit_from(Some("junk")),
             Some(Duration::from_secs(300))
         );
+    }
+
+    #[test]
+    fn adaptive_finish_hint_requires_real_passing_test_evidence() {
+        let call = ToolCall {
+            id: "abc".to_owned(),
+            kind: "function".to_owned(),
+            function: crate::provider::FunctionCall {
+                name: "shell".to_owned(),
+                arguments: r#"{"command":"cargo test --locked --offline --lib"}"#.to_owned(),
+            },
+        };
+        let ok = r#"{"exit_code":0,"stdout":"test result: ok. 10 passed; 0 failed; 0 ignored;","stderr":""}"#;
+        let zero = r#"{"exit_code":0,"stdout":"test result: ok. 0 passed; 0 failed;","stderr":""}"#;
+        let failed =
+            r#"{"exit_code":101,"stdout":"test result: ok. 10 passed; 0 failed;","stderr":""}"#;
+        assert!(is_passing_cargo_check(&call, ok));
+        assert!(!is_passing_cargo_check(&call, zero));
+        assert!(!is_passing_cargo_check(&call, failed));
+        assert!(!is_passing_cargo_check(&call, "not json"));
     }
 
     #[tokio::test]

@@ -262,7 +262,7 @@ impl ToolRegistry {
 
     pub fn is_builtin_only(&self) -> bool {
         self.tools.len() == 1
-            && self.tools[0].name() == "shell"
+            && self.tools[0].name() == builtin_shell_tool_name()
             && self.tools[0].definition() == definitions()[0]
             && self.interceptors.is_empty()
     }
@@ -460,7 +460,7 @@ fn raw_execution(name: &str, arguments: &str, result: &ToolResult, is_error: boo
         is_error,
         ..RawExecution::default()
     };
-    if name != "shell" {
+    if name != builtin_shell_tool_name() {
         return raw;
     }
     raw.command = serde_json::from_str::<Value>(arguments)
@@ -478,11 +478,29 @@ fn raw_execution(name: &str, arguments: &str, result: &ToolResult, is_error: boo
     raw
 }
 
+// Benchmark-only wire-name experiment: the executor and command schema stay
+// identical. The production default is always `shell`.
+fn shell_name_for(experiment: Option<&str>) -> &'static str {
+    if experiment == Some("bash") {
+        "bash"
+    } else {
+        "shell"
+    }
+}
+
+pub(crate) fn builtin_shell_tool_name() -> &'static str {
+    shell_name_for(
+        std::env::var("KROMA_EXPERIMENT_SHELL_TOOL_NAME")
+            .ok()
+            .as_deref(),
+    )
+}
+
 pub struct BuiltinShell;
 
 impl Tool for BuiltinShell {
     fn name(&self) -> &str {
-        "shell"
+        builtin_shell_tool_name()
     }
 
     fn definition(&self) -> Value {
@@ -535,7 +553,7 @@ pub fn definitions() -> Vec<serde_json::Value> {
     vec![json!({
         "type": "function",
         "function": {
-            "name": "shell",
+            "name": builtin_shell_tool_name(),
             "description": description,
             "parameters": {
                 "type": "object",
@@ -563,7 +581,7 @@ async fn execute_inner(
 ) -> Result<ShellExecution> {
     // The registry dispatches by name, but `execute` is also called directly
     // by hosts, so the name is checked here rather than trusted.
-    if call.kind != "function" || call.function.name != "shell" {
+    if call.kind != "function" || call.function.name != builtin_shell_tool_name() {
         bail!("unsupported tool: {}", call.function.name);
     }
     let args: ShellArgs = serde_json::from_str(&call.function.arguments)?;
@@ -740,6 +758,20 @@ fn format_answer(picked: &[String], typed: Option<&str>) -> String {
 mod tests {
     use super::*;
     use crate::provider::FunctionCall;
+
+    #[test]
+    fn shell_tool_wire_name_experiment_defaults_to_shell() {
+        assert_eq!(shell_name_for(None), "shell");
+        assert_eq!(shell_name_for(Some("")), "shell");
+        assert_eq!(shell_name_for(Some("true")), "shell");
+        assert_eq!(shell_name_for(Some("bash")), "bash");
+        let schema = definitions();
+        assert_eq!(schema[0]["function"]["name"], builtin_shell_tool_name());
+        assert_eq!(
+            schema[0]["function"]["parameters"]["required"][0],
+            "command"
+        );
+    }
 
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;

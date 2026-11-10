@@ -1,0 +1,107 @@
+digraph {
+
+    graph [
+        label="kroma",
+        labelloc=t,
+
+        pad=0.4,
+
+        // Consider rendering the graph using a different layout algorithm, such as:
+        // [dot, neato, twopi, circo, fdp, sfdp]
+        layout=neato,
+        overlap=false,
+        splines="line",
+        rankdir=LR,
+
+        fontname="Helvetica", 
+        fontsize="36",
+    ];
+
+    node [
+        fontname="monospace",
+        fontsize="10",
+        shape="record",
+        style="filled",
+    ];
+
+    edge [
+        fontname="monospace",
+        fontsize="10",
+    ];
+
+    "kroma" [label="crate|kroma", fillcolor="#5397c8"]; // "crate" node
+    "kroma::app" [label="pub mod|app", fillcolor="#81c169"]; // "mod" node
+    "kroma::tui" [label="pub mod|tui", fillcolor="#81c169"]; // "mod" node
+    "kroma::tui::ask" [label="pub(self) mod|tui::ask", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::attachments" [label="pub(self) mod|tui::attachments", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::command_catalog" [label="pub(self) mod|tui::command_catalog", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::editor" [label="pub(self) mod|tui::editor", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::event_queue" [label="pub(self) mod|tui::event_queue", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::gitinfo" [label="pub(self) mod|tui::gitinfo", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::help" [label="pub(self) mod|tui::help", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::highlight" [label="pub(self) mod|tui::highlight", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::links" [label="pub(self) mod|tui::links", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::logo" [label="pub(self) mod|tui::logo", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::markdown" [label="pub(self) mod|tui::markdown", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::picker" [label="pub(self) mod|tui::picker", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::preferences" [label="pub(self) mod|tui::preferences", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::runtime_events" [label="pub(self) mod|tui::runtime_events", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::terminal_feedback" [label="pub(self) mod|tui::terminal_feedback", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::theme" [label="pub(self) mod|tui::theme", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::title" [label="pub(self) mod|tui::title", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::tool_display" [label="pub(self) mod|tui::tool_display", fillcolor="#db5367"]; // "mod" node
+    "kroma::tui::view" [label="pub(self) mod|tui::view", fillcolor="#db5367"]; // "mod" node
+
+    "kroma" -> "kroma::app" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::app" -> "kroma" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui" -> "kroma" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui" -> "kroma::app" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui" -> "kroma::tui::attachments" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui" -> "kroma::tui::command_catalog" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui" -> "kroma::tui::editor" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui" -> "kroma::tui::event_queue" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui" -> "kroma::tui::picker" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui" -> "kroma::tui::preferences" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui" -> "kroma::tui::runtime_events" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui" -> "kroma::tui::terminal_feedback" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui" -> "kroma::tui::theme" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui" -> "kroma::tui::view" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::ask" -> "kroma" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::ask" -> "kroma::tui::preferences" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::ask" -> "kroma::tui::theme" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::command_catalog" -> "kroma::tui::picker" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::command_catalog" -> "kroma::tui::preferences" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::editor" -> "kroma::tui::preferences" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::event_queue" -> "kroma" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::event_queue" -> "kroma::tui::gitinfo" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::event_queue" -> "kroma::tui::runtime_events" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::help" -> "kroma::tui::preferences" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::highlight" -> "kroma::tui::theme" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::logo" -> "kroma::tui::theme" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::markdown" -> "kroma::tui::theme" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::picker" -> "kroma::tui::preferences" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::picker" -> "kroma::tui::theme" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::runtime_events" -> "kroma" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::runtime_events" -> "kroma::tui::event_queue" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::runtime_events" -> "kroma::tui::gitinfo" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::runtime_events" -> "kroma::tui::tool_display" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::title" -> "kroma" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::title" -> "kroma::tui::event_queue" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::title" -> "kroma::tui::runtime_events" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::tool_display" -> "kroma::tui::preferences" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::view" -> "kroma" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::view" -> "kroma::tui" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::view" -> "kroma::tui::ask" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::view" -> "kroma::tui::attachments" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::view" -> "kroma::tui::editor" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::view" -> "kroma::tui::event_queue" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::view" -> "kroma::tui::gitinfo" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::view" -> "kroma::tui::links" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::view" -> "kroma::tui::markdown" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::view" -> "kroma::tui::picker" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::view" -> "kroma::tui::preferences" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::view" -> "kroma::tui::runtime_events" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::view" -> "kroma::tui::theme" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::tui::view" -> "kroma::tui::tool_display" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+
+}

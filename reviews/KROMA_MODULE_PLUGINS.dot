@@ -1,0 +1,55 @@
+digraph {
+
+    graph [
+        label="kroma",
+        labelloc=t,
+
+        pad=0.4,
+
+        // Consider rendering the graph using a different layout algorithm, such as:
+        // [dot, neato, twopi, circo, fdp, sfdp]
+        layout=neato,
+        overlap=false,
+        splines="line",
+        rankdir=LR,
+
+        fontname="Helvetica", 
+        fontsize="36",
+    ];
+
+    node [
+        fontname="monospace",
+        fontsize="10",
+        shape="record",
+        style="filled",
+    ];
+
+    edge [
+        fontname="monospace",
+        fontsize="10",
+    ];
+
+    "kroma" [label="crate|kroma", fillcolor="#5397c8"]; // "crate" node
+    "kroma::plugins" [label="pub mod|plugins", fillcolor="#81c169"]; // "mod" node
+    "kroma::plugins::approval" [label="pub(self) mod|plugins::approval", fillcolor="#db5367"]; // "mod" node
+    "kroma::plugins::context" [label="pub(self) mod|plugins::context", fillcolor="#db5367"]; // "mod" node
+    "kroma::plugins::model" [label="pub(self) mod|plugins::model", fillcolor="#db5367"]; // "mod" node
+    "kroma::plugins::stream" [label="pub(self) mod|plugins::stream", fillcolor="#db5367"]; // "mod" node
+    "kroma::plugins::task_control" [label="pub(self) mod|plugins::task_control", fillcolor="#db5367"]; // "mod" node
+
+    "kroma" -> "kroma::plugins" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::plugins" -> "kroma" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::plugins" -> "kroma::plugins::approval" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::plugins" -> "kroma::plugins::model" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::plugins" -> "kroma::plugins::stream" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::plugins" -> "kroma::plugins::task_control" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::plugins::context" -> "kroma" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::plugins::context" -> "kroma::plugins" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::plugins::model" -> "kroma" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::plugins::model" -> "kroma::plugins" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::plugins::model" -> "kroma::plugins::stream" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::plugins::stream" -> "kroma::plugins" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::plugins::task_control" -> "kroma" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+    "kroma::plugins::task_control" -> "kroma::plugins" [label="uses", color="#7f7f7f", style="dashed"] [constraint=false]; // "uses" edge
+
+}
