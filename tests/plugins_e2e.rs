@@ -154,7 +154,7 @@ async fn the_declarative_ask_plugin_installs_without_a_process() -> Result<()> {
         .content
         .as_deref()
         .unwrap_or_default()
-        .contains("Ask only when both are true"));
+        .contains("Ask only when project evidence cannot resolve a consequential choice"));
     Ok(())
 }
 

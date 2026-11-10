@@ -420,6 +420,15 @@ impl PluginManifest {
 
     fn read(directory: &Path) -> Result<Self> {
         let path = directory.join("plugin.toml");
+        if !path.is_file() {
+            let nested = directory.join("plugin").join("plugin.toml");
+            if nested.is_file() {
+                bail!(
+                    "plugin manifest is under {}. Use that directory for `kroma plugins check` or `kroma plugins install`",
+                    nested.display()
+                );
+            }
+        }
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let manifest: Self =
@@ -5440,6 +5449,23 @@ prompt='try me'
         let check = catalog.check(&source).unwrap();
         assert!(check.contains("process=not applicable"), "{check}");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nested_plugin_manifest_error_explains_the_correct_install_path() -> Result<()> {
+        let root = test_root("nested-manifest");
+        fs::create_dir_all(root.join("plugin"))?;
+        fs::write(
+            root.join("plugin/plugin.toml"),
+            "api_version=2\nid='nested'\nname='Nested'\nprompt='fixture'\n",
+        )?;
+        let error = PluginManifest::read(&root).unwrap_err().to_string();
+        assert!(error.contains("manifest is under"), "{error}");
+        assert!(error.contains("plugins check"), "{error}");
+        assert!(error.contains("plugins install"), "{error}");
+        assert_eq!(PluginManifest::read(&root.join("plugin"))?.id, "nested");
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
