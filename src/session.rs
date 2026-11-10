@@ -111,14 +111,20 @@ fn replay_journal(
             let split = line
                 .iter()
                 .rposition(|b| *b == b'\t')
-                .context("corrupt session journal: missing checksum")?;
+                .context(
+                    "this conversation's saved history is damaged: a line ends without a checksum. Nothing was deleted; start a new conversation, or pick another one.",
+                )?;
             let (payload, trailer) = line.split_at(split);
             let saved_checksum = std::str::from_utf8(&trailer[1..])
                 .ok()
                 .and_then(|value| u64::from_str_radix(value, 16).ok())
-                .context("corrupt session journal checksum")?;
+                .context(
+                    "this conversation's saved history is damaged: a checksum is unreadable. Nothing was deleted; start a new conversation, or pick another one.",
+                )?;
             if checksum(payload) != saved_checksum {
-                bail!("corrupt session journal: checksum mismatch");
+                bail!(
+                    "this conversation's saved history is damaged: a checksum does not match. Nothing was deleted; start a new conversation, or pick another one."
+                );
             }
             serde_json::from_slice(payload).context("invalid session journal event")
         })();
@@ -145,7 +151,9 @@ fn replay_journal(
                 if serde_json::to_value(&messages[event.index])?
                     != serde_json::to_value(&event.message)?
                 {
-                    bail!("session journal disagrees with durable checkpoint");
+                    bail!(
+                        "this conversation's saved history disagrees with its checkpoint, so it cannot be replayed safely. Nothing was deleted; start a new conversation."
+                    );
                 }
             }
             std::cmp::Ordering::Equal => {

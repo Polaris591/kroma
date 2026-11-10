@@ -50,7 +50,9 @@ impl ChildPolicy {
             || policy.max_turns > 1_000_000_000
             || !matches!(policy.shell.as_str(), "allow" | "deny")
         {
-            bail!("invalid subagent profile, prompt or budget");
+            bail!(
+                "subagent policy is invalid: profile and prompt must be non-empty (prompt up to 32 KB), shell must be 'allow' or 'deny', and max_turns must be at most 1,000,000,000."
+            );
         }
         Ok(Some(policy))
     }

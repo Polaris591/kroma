@@ -1147,9 +1147,11 @@ async fn streaming_model_cancellation_recovers_and_bad_frames_fail() -> Result<(
         .await
         .err()
         .context("invalid response should fail")?;
+    let text = format!("{error:#}");
     assert!(
-        format!("{error:#}").contains("request_id"),
-        "unexpected error: {error:#}"
+        text.contains("replied to a different request than Kroma sent")
+            && text.contains("model-stream"),
+        "unexpected error: {text}"
     );
     let stalled = [
         Message::new("system", "system"),
@@ -1244,7 +1246,9 @@ async fn plugin_jsonl_rejects_incorrect_response_correlation() -> Result<()> {
         .await;
     assert!(result.is_error);
     assert!(
-        result.content.contains("request_id mismatch"),
+        result
+            .content
+            .contains("replied to a different request than Kroma sent"),
         "{}",
         result.content
     );

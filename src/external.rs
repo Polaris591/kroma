@@ -9,13 +9,13 @@ use anyhow::{bail, Context, Result};
 /// are unnecessary for a documentation link and invite misleading UI.
 pub fn validate_http_url(raw: &str) -> Result<reqwest::Url> {
     if raw.len() > 4096 || raw.chars().any(char::is_control) || raw.contains('\\') {
-        bail!("invalid external URL");
+        bail!("only a plain http(s) link can be opened from the chat");
     }
     // `Url::parse` normalizes `https:///host` to a valid host. An explicitly
     // empty authority is almost always a typo or an attempt to confuse a
     // human about where the link goes, so reject it before parsing.
     let Some((_, after_scheme)) = raw.split_once("://") else {
-        bail!("invalid external URL");
+        bail!("only a plain http(s) link can be opened from the chat");
     };
     if after_scheme
         .split(['/', '?', '#'])

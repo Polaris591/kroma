@@ -2,7 +2,7 @@
 //! Stream callbacks run on the async caller, never on the blocking stdout
 //! reader. The existing per-plugin request mutex serializes stream and tool
 //! calls, and dropping a stream cancels its child process tree.
-use super::{PluginCallGuard, PluginProcess, PluginWorker};
+use super::{PluginCallGuard, PluginWorker};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::{
@@ -169,11 +169,14 @@ impl PluginWorker {
                 let request_id = request.get("request_id");
                 loop {
                     let frame = process.read_frame()?;
-                    PluginProcess::validate_frame(&frame, request_id, true, protocol_version)?;
+                    process.validate_frame(&frame, request_id, true, protocol_version)?;
                     let event = frame
                         .get("event")
                         .and_then(Value::as_str)
-                        .context("stream frame has no event")?;
+                        .context(format!(
+                            "plugin '{}' streamed a frame without an event name. Update the plugin.",
+                            process.name
+                        ))?;
                     if !matches!(
                         event,
                         "text_delta"

@@ -1698,7 +1698,9 @@ impl PluginCatalog {
     pub fn uninstall(&self, id: &str) -> Result<String> {
         let _lock = PluginStateLock::acquire(&self.state_path)?;
         if !valid_id(id) {
-            bail!("invalid plugin ID");
+            bail!(
+                "'{id}' is not a plugin id: use letters, digits, '-' or '_' (run `kroma plugins list` to see installed ids)."
+            );
         }
         let fresh = self.refresh()?;
         if fresh.plugins.iter().any(|plugin| {
@@ -3663,6 +3665,12 @@ impl PluginWorker {
                 child,
                 stdin,
                 stdout: BufReader::new(stdout),
+                name: self
+                    .directory
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
                 protocol_version: self.protocol_version,
                 terminated_pid: Arc::clone(&self.terminated_pid),
             });
@@ -3743,6 +3751,8 @@ struct PluginProcess {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    /// Plugin id, so a protocol failure names the plugin that caused it.
+    name: String,
     /// Worker protocol version echoed by this process's responses.
     protocol_version: u32,
     terminated_pid: Arc<AtomicU32>,
@@ -3794,28 +3804,38 @@ impl PluginProcess {
     }
 
     fn validate_frame(
+        &self,
         parsed: &Value,
         request_id: Option<&Value>,
         strict: bool,
         protocol_version: u32,
     ) -> Result<()> {
+        let name = &self.name;
         if strict
             && parsed.get("protocol_version").and_then(Value::as_u64)
                 != Some(protocol_version as u64)
         {
-            bail!("streaming plugin must include protocol_version={protocol_version}");
+            bail!(
+                "plugin '{name}' streamed a reply without the protocol version this Kroma expects ({protocol_version}). Update the plugin, or run `kroma plugins check`."
+            );
         }
         if strict && parsed.get("request_id") != request_id {
-            bail!("streaming plugin request_id missing or mismatched");
+            bail!(
+                "plugin '{name}' replied to a different request than Kroma sent. The plugin is likely built for another Kroma version: update it, or run `kroma plugins check`."
+            );
         }
         if let Some(version) = parsed.get("protocol_version") {
             if version.as_u64() != Some(protocol_version as u64) {
-                bail!("plugin response protocol version mismatch");
+                bail!(
+                    "plugin '{name}' uses protocol version {version}, but this Kroma expects {protocol_version}. Update the plugin."
+                );
             }
         }
         if let Some(received) = parsed.get("request_id") {
             if Some(received) != request_id {
-                bail!("plugin response request_id mismatch");
+                bail!(
+                    "plugin '{name}' replied to a different request than Kroma sent. The plugin is likely built for another Kroma version: update it, or run `kroma plugins check`."
+                );
             }
         }
         Ok(())
@@ -3825,7 +3845,7 @@ impl PluginProcess {
         let request_id = request.get("request_id").cloned();
         self.write_request(&request)?;
         let parsed = self.read_frame()?;
-        Self::validate_frame(&parsed, request_id.as_ref(), false, self.protocol_version)?;
+        self.validate_frame(&parsed, request_id.as_ref(), false, self.protocol_version)?;
         serde_json::from_value(parsed).context("invalid plugin response fields")
     }
 }

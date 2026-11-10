@@ -293,10 +293,14 @@ fn image_capability_rejection(error: &anyhow::Error) -> bool {
 /// durable transcript must satisfy the same contract.
 pub(crate) fn validate_tool_call(id: &str, name: &str, arguments: &str) -> Result<()> {
     if id.is_empty() || id.len() > 256 {
-        bail!("model returned a tool call with an invalid id");
+        bail!(
+            "the model endpoint returned a tool call with an empty or oversized id. Retry; if it keeps happening, switch models."
+        );
     }
     if name.trim().is_empty() || name.len() > 256 {
-        bail!("model returned a tool call with an invalid name");
+        bail!(
+            "the model endpoint returned a tool call with an empty or oversized name. Retry; if it keeps happening, switch models."
+        );
     }
     let value: Value = serde_json::from_str(arguments)
         .with_context(|| format!("invalid JSON arguments in tool call {id}"))?;

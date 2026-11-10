@@ -1357,12 +1357,16 @@ async fn read_http_response(response: Response, id: u64) -> Result<Value> {
         let body = read_limited_body(response, MAX_MCP_RESPONSE_BYTES).await?;
         let reply: Value = serde_json::from_slice(&body).context("invalid MCP JSON response")?;
         if !matches_id(&reply, id) {
-            bail!("MCP HTTP returned a mismatched JSON-RPC ID");
+            bail!(
+                "the MCP server answered a different request than Kroma sent (JSON-RPC id mismatch). Restart the server, or update it."
+            );
         }
         return Ok(reply);
     }
     if !content_type.starts_with("text/event-stream") {
-        bail!("unexpected MCP HTTP content type '{content_type}'");
+        bail!(
+            "the MCP server answered with '{content_type}' instead of JSON or an event stream. Check the server URL, and that the server speaks MCP over HTTP."
+        );
     }
     let mut stream = response.bytes_stream();
     let mut pending = Vec::<u8>::new();
