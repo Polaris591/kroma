@@ -59,7 +59,7 @@ The source currently declares version `0.4.0` in `Cargo.toml`. No public npm pac
 ### Fixed
 - Google Gemini rejects an oversized request with `INVALID_ARGUMENT` and the sentence "The input token count exceeds the maximum number of tokens allowed …". That sentence now counts as a context overflow, including after a failure is re-wrapped to keep its reported usage, so the existing compaction retry runs instead of every later turn failing on the same history.
 - A context overflow may compact and retry twice within one turn instead of once, so a single checkpoint that is still too large no longer ends the turn.
-- An answer stopped by the output-token ceiling is continued automatically until it is finished (a runaway guard stops a model that never stops, at 64 rounds), so a long answer arrives in one piece; the per-request ceiling itself stays because a provider counts input plus `max_tokens` against the same window.
+- An answer stopped by the output-token ceiling is continued automatically with no round limit: Kroma keeps asking for the rest until the model stops on its own or a round only repeats text already written (which ends the turn with the answer as it stands, no duplication). The per-request ceiling itself stays because a provider counts input plus `max_tokens` against the same window.
 - The terminal UI no longer reserves an unpainted row above the transcript; the first card starts on the first terminal row.
 - `###` headings use `▪` instead of `▍`, which read like a blockquote.
 

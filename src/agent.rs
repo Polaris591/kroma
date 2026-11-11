@@ -1,12 +1,6 @@
 /// Prefix of the durable model-facing cancellation note, shared with TUI display.
 pub const TASK_CANCELLED_PREFIX: &str = "[Task cancelled by user.";
 
-/// An answer that hits the per-turn output ceiling keeps going on its own.
-/// This is only a runaway guard (a model that never stops), not a length
-/// policy: 64 rounds is far beyond any real answer, so the visible behaviour
-/// is "write until the answer is finished".
-const MAX_OUTPUT_CONTINUATIONS: u32 = 64;
-
 use crate::{
     cache_trace::{CacheSnapshot, CacheTrace},
     child_policy::ExecutionLimits,
@@ -1773,6 +1767,8 @@ impl Agent {
                             reasoning_tokens: usage.and_then(|u| u.reasoning),
                         });
                     }
+                    // Set when the last continuation only repeated earlier text.
+                    let mut repeated_round = false;
                     if !printed_text
                         && !streamed_reasoning
                         && truncation_retries == 0
@@ -1786,19 +1782,25 @@ impl Agent {
                     }
                     // A long answer reached the per-turn output ceiling after
                     // the user already saw text: keep that text and ask for the
-                    // continuation instead of ending the turn on a limit.
-                    if crate::provider::is_output_truncation(&error)
-                        && !printed.trim().is_empty()
-                        && output_continuations < MAX_OUTPUT_CONTINUATIONS
-                    {
-                        output_continuations += 1;
-                        answer_prefix.push_str(&printed);
-                        pending_continuation = true;
+                    // continuation instead of ending the turn on a limit. The
+                    // loop stops on its own when a round brings no new text or
+                    // repeats what is already written, not on a round count.
+                    if crate::provider::is_output_truncation(&error) && !printed.trim().is_empty() {
+                        let round = printed.trim();
+                        let repeated = answer_prefix.contains(round);
+                        if !repeated {
+                            output_continuations += 1;
+                            answer_prefix.push_str(&printed);
+                            pending_continuation = true;
+                            crate::runtime_log!(
+                                "[model] output hit the per-turn ceiling; asking for the continuation (#{output_continuations})"
+                            );
+                            continue;
+                        }
                         crate::runtime_log!(
-                            "[model] output hit the per-turn ceiling; asking for the continuation ({}/{MAX_OUTPUT_CONTINUATIONS})",
-                            output_continuations
+                            "[model] the continuation repeated text already written; keeping the answer as it stands"
                         );
-                        continue;
+                        repeated_round = true;
                     }
                     if !printed_text
                         && !streamed_reasoning
@@ -1826,9 +1828,15 @@ impl Agent {
                     // text the user already read is real model output, so it
                     // is saved and the next turn continues from it.
                     let truncated = crate::provider::is_output_truncation(&error);
-                    let shown = format!("{answer_prefix}{}", printed.trim_end());
+                    // A repeated round is dropped: the answer is only what was
+                    // written before it.
+                    let shown = if repeated_round {
+                        answer_prefix.trim_end().to_owned()
+                    } else {
+                        format!("{answer_prefix}{}", printed.trim_end())
+                    };
                     let shown_chars = shown.chars().count();
-                    let note = if truncated && !printed.trim().is_empty() {
+                    let note = if truncated && !shown.trim().is_empty() {
                         shown
                     } else if printed_text || streamed_reasoning {
                         "[Kroma interrupted: the partial streamed response was not saved. Prior completed tool results are preserved; unfinished work has not been verified.]".to_owned()
@@ -2870,6 +2878,62 @@ mod tests {
             bodies[1].contains("Continue from the exact point where it stopped"),
             "the continuation round must ask the model to keep writing"
         );
+        drop(agent);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_repeating_continuation_stops_without_duplicating_the_answer() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut requests = 0;
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut body_size = 0usize;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(raw) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        body_size = raw.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; body_size];
+                reader.read_exact(&mut body).unwrap();
+                drop(reader);
+                requests += 1;
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {{\"choices\":[{{\"delta\":{{\"content\":\"partial answer\"}},\"finish_reason\":\"length\"}}]}}\n\n").unwrap();
+                stream.flush().unwrap();
+            }
+            requests
+        });
+        let dir = std::env::temp_dir().join(format!(
+            "kroma-repeat-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session_path = dir.join("session.json");
+        let model = ModelClient::new(&format!("http://{addr}/v1"), None, "mock".into()).unwrap();
+        let catalog = SessionCatalog::from_default(session_path.clone()).unwrap();
+        let mut agent = Agent::with_catalog(model, dir.clone(), catalog).unwrap();
+        let result = agent.run("Write a long answer", &mut |_| {}).await;
+        assert!(result.is_err(), "the run ends once nothing new arrives");
+        assert_eq!(
+            agent.messages.last().unwrap().content.as_deref(),
+            Some("partial answer"),
+            "a repeated round must not duplicate the saved answer"
+        );
+        assert_eq!(server.join().unwrap(), 2, "one continuation round");
         drop(agent);
         std::fs::remove_dir_all(dir).unwrap();
     }
