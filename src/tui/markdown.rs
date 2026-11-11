@@ -291,7 +291,7 @@ pub(super) fn render_document_with(
                     let marker = match level {
                         pulldown_cmark::HeadingLevel::H1 => "◆ ",
                         pulldown_cmark::HeadingLevel::H2 => "▸ ",
-                        _ => "▍ ",
+                        _ => "▪ ",
                     };
                     spans.push(Span::styled(marker, Style::default().fg(theme.muted)));
                     styles.push(
@@ -596,6 +596,23 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn heading_levels_use_distinct_markers_and_never_a_quote_bar() {
+        let theme = ThemeStore::load_at(None).unwrap().colors;
+        let rows = render_with_width("# 一级\n\n## 二级\n\n### 三级\n", theme, 40);
+        let text = plain_lines(&rows);
+        let marker = |label: &str| {
+            text.iter()
+                .find(|line| line.contains(label))
+                .unwrap_or_else(|| panic!("missing {label}"))
+                .clone()
+        };
+        assert!(marker("一级").starts_with("◆ "));
+        assert!(marker("二级").starts_with("▸ "));
+        // A thin `▍` reads as a blockquote; H3 keeps its own bullet instead.
+        assert!(marker("三级").starts_with("▪ "));
     }
 
     #[test]

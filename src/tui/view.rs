@@ -2798,8 +2798,10 @@ impl UiState {
         } else {
             (outer_area, None)
         };
+        // Plain has no session heading of its own: the first turn starts at the
+        // very top of the reading column instead of under a reserved blank row.
         let header_rows = if self.plain_style {
-            u16::from(area.height >= 20)
+            0
         } else if area.height < 20 {
             1
         } else {
@@ -3644,21 +3646,16 @@ impl UiState {
                 self.attach_path.clone()
             })
             .style(Style::default().fg(colors.text))
-        } else if self.editor.text().is_empty() && self.plain_style {
-            Paragraph::new("")
+        } else if self.editor.text().is_empty() && !self.running {
+            // An empty composer still says what it is for: typing a task, or
+            // opening the command list with `/`.
+            Paragraph::new(self.preferences.language.text(
+                "Describe a task, or / for commands…",
+                "描述任务，或输入 / 查看命令…",
+            ))
+            .style(Style::default().fg(colors.muted))
         } else if self.editor.text().is_empty() {
-            let hint = if self.running {
-                self.preferences.language.text(
-                    "Enter steers; Alt+Enter / Ctrl+Q queues…",
-                    "Enter 引导；Alt+Enter / Ctrl+Q 排队…",
-                )
-            } else {
-                self.preferences.language.text(
-                    "Describe a task, or / for commands…",
-                    "描述任务，或输入 / 查看命令…",
-                )
-            };
-            Paragraph::new(hint).style(Style::default().fg(colors.muted))
+            Paragraph::new("")
         } else {
             Paragraph::new(text).style(Style::default().fg(colors.text))
         };

@@ -34,7 +34,7 @@ impl UiState {
     pub(super) fn plain_palette(&self) -> PlainPalette {
         if self.themes.preset() == "mono" {
             let native = Color::Reset;
-            return PlainPalette {
+            return self.with_plugin_colors(PlainPalette {
                 theme: Theme {
                     background: native,
                     surface: native,
@@ -67,14 +67,14 @@ impl UiState {
                     add: native,
                     remove: native,
                 },
-            };
+            });
         }
 
         if self.themes.preset() == "dark" {
             // The default Plain renderer uses the same semantic palette as
             // the theme settings, including user theme.toml overrides.
             let base = self.themes.colors;
-            return PlainPalette {
+            return self.with_plugin_colors(PlainPalette {
                 theme: base,
                 message: MessageColors {
                     surface: base.surface,
@@ -91,7 +91,7 @@ impl UiState {
                     add: base.success,
                     remove: base.error,
                 },
-            };
+            });
         }
 
         let is_light = self.themes.preset() == "light";
@@ -120,7 +120,7 @@ impl UiState {
                 remove: Color::Rgb(240, 120, 134),
             }
         };
-        PlainPalette {
+        self.with_plugin_colors(PlainPalette {
             theme: Theme {
                 background: gray(13, 239),
                 surface: gray(23, 226),
@@ -153,6 +153,34 @@ impl UiState {
                 },
             },
             semantic,
+        })
+    }
+
+    /// `[ui.colors]` is a host-level appearance contract: a manifest slot
+    /// overrides the same token in every preset, including `mono`, and the
+    /// identity rails follow the `user` / `accent` slots they are built from.
+    fn with_plugin_colors(&self, mut palette: PlainPalette) -> PlainPalette {
+        for (slot, color) in &self.plugin_colors {
+            match slot.as_str() {
+                "accent" => {
+                    palette.theme.accent = *color;
+                    palette.theme.accent_text = *color;
+                    palette.message.assistant_rail = *color;
+                    palette.semantic.running = *color;
+                }
+                "background" => palette.theme.background = *color,
+                "border" => palette.theme.border = *color,
+                "text" => palette.theme.text = *color,
+                "muted" => palette.theme.muted = *color,
+                "user" => {
+                    palette.theme.user = *color;
+                    palette.message.user_rail = *color;
+                }
+                "tool" => palette.theme.tool = *color,
+                "code" => palette.theme.code = *color,
+                _ => {}
+            }
         }
+        palette
     }
 }

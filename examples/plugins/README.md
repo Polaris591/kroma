@@ -339,7 +339,8 @@ The basic fields:
   `dynamic_panel = true`. `[ui.tool_labels]` maps actual tool names to display
   labels without changing execution. `[ui.colors]` supplies optional `#RRGGBB`
   overrides for `accent`, `text`, `muted`, `background`, `border`, `user`, `tool`
-  and `code`; the active user theme remains the base. `[ui.layout]` optionally
+  and `code`; the active user theme remains the base and the same slots apply in
+  the terminal and in the desktop shell. `[ui.layout]` optionally
   sets `composer_max_rows = 3..14`. Legacy `header_rows` and
   `full_width_prose` values are ignored because the default Plain layout
   determines header and reading width itself. The host still owns Ratatui, scroll,

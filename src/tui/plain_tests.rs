@@ -183,14 +183,59 @@ fn plain_renderer_uses_full_width_without_layout_preference() {
 }
 
 #[test]
-fn plain_composer_has_one_divider_and_no_raised_surface_or_empty_placeholder() {
+fn plugin_colors_reach_the_terminal_palette() {
+    let mut ui = ui();
+    ui.themes.select("light").unwrap();
+    let before = ui.active_colors();
+    ui.set_plugin_presentation(
+        Vec::new(),
+        BTreeMap::new(),
+        None,
+        BTreeMap::from([
+            ("accent".into(), "#0a7f42".into()),
+            ("border".into(), "#123456".into()),
+        ]),
+    );
+    let after = ui.active_colors();
+    assert_ne!(before.accent, after.accent);
+    assert_eq!(after.accent, Color::Rgb(10, 127, 66));
+    assert_eq!(after.border, Color::Rgb(0x12, 0x34, 0x56));
+    // The identity rail is built from the accent slot, so it follows too.
+    assert_eq!(ui.message_colors().assistant_rail, Color::Rgb(10, 127, 66));
+}
+
+#[test]
+fn plain_wastes_no_row_above_the_first_turn() {
+    let mut ui = ui();
+    ui.add_user("first question");
+    let buffer = draw(&mut ui, 80, 24);
+    let rows = text(&buffer);
+    // Row zero belongs to the first card's own padding, never to an unpainted
+    // header: the surface starts on the very first terminal row.
+    let surface = ui.message_colors().surface;
+    let card = ui.message_surface_area(ui.selection_area, 0);
+    assert_eq!(buffer.cell((card.x + 1, 0)).unwrap().bg, surface);
+    assert!(rows.contains("first question"));
+}
+
+#[test]
+fn plain_composer_has_one_divider_and_a_quiet_empty_hint() {
     let mut ui = ui();
     ui.add_user("hello");
+    ui.finish_task();
     let buffer = draw(&mut ui, 80, 24);
     let rendered = text(&buffer);
+    // An empty composer still explains itself instead of showing nothing.
     assert!(
-        !rendered.contains("Describe a task")
-            && !rendered.contains("Enter steers; Alt+Enter / Ctrl+Q queues")
+        rendered.contains("Describe a task, or / for commands…"),
+        "{rendered}"
+    );
+    assert_eq!(
+        buffer
+            .cell((ui.editor_area.x + 1, ui.editor_area.y))
+            .unwrap()
+            .fg,
+        ui.active_colors().muted
     );
     assert!(!rendered.contains('┌') && !rendered.contains('└'));
     assert!(rendered.contains('─') && rendered.contains('›'));
@@ -213,7 +258,9 @@ fn plain_composer_has_one_divider_and_no_raised_surface_or_empty_placeholder() {
     );
     assert_eq!(ui.editor_area.y, 21);
     ui.running = true;
-    assert!(!text(&draw(&mut ui, 80, 24)).contains("Enter steers; Alt+Enter / Ctrl+Q queues"));
+    // While a turn runs the activity row explains the state, so the composer
+    // stays clean instead of repeating a hint.
+    assert!(!text(&draw(&mut ui, 80, 24)).contains("Describe a task"));
 }
 
 #[test]
@@ -418,6 +465,38 @@ fn plain_panels_and_recent_session_hit_regions_keep_drafts_intact() {
     draw(&mut ui, 80, 24);
     ui.close_plugin_panel();
     assert_eq!(ui.editor.text(), "unfinished 中文 draft");
+}
+
+#[test]
+fn plain_activity_animates_above_the_composer_without_rebuilding_history() {
+    let mut ui = ui();
+    ui.add_user("run tests");
+    ui.event(UiEvent::ModelStarted);
+    let rows = text(&draw(&mut ui, 100, 36));
+    let status = rows
+        .lines()
+        .position(|row| row.contains("Connecting"))
+        .expect("live status row");
+    let divider = rows
+        .lines()
+        .position(|row| row.trim_start().starts_with('─'))
+        .expect("composer divider");
+    assert_eq!(
+        divider,
+        status + 1,
+        "the live status stays pinned directly above the composer"
+    );
+    let cached = ui.history_cache.as_ref().unwrap().text.lines.as_ptr();
+    let before = text(&draw(&mut ui, 100, 36));
+    ui.last_activity_frame = Instant::now() - Duration::from_millis(600);
+    assert!(ui.tick_activity());
+    let after = text(&draw(&mut ui, 100, 36));
+    assert_ne!(before, after, "the activity glyph keeps animating");
+    assert_eq!(
+        cached,
+        ui.history_cache.as_ref().unwrap().text.lines.as_ptr(),
+        "animation must never rebuild the transcript"
+    );
 }
 
 #[test]
