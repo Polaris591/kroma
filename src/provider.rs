@@ -168,6 +168,29 @@ struct ModelHttpError {
     message: String,
 }
 
+/// Provider sentences that reject a request for being too large. Kept as one
+/// list so the typed error and a text-only wrapped failure agree.
+const OVERFLOW_MARKERS: [&str; 14] = [
+    "context_length_exceeded",
+    "context length exceeded",
+    "maximum context length",
+    "prompt is too long",
+    "input exceeds the context window",
+    // Google Gemini reports an oversized request as "The input token count
+    // exceeds the maximum number of tokens allowed 1048576." with
+    // INVALID_ARGUMENT instead of a context-length code.
+    "input token count exceeds",
+    "maximum number of tokens allowed",
+    "exceeds the maximum number of tokens",
+    // Other providers phrase the same rejection differently.
+    "input is too long",
+    "input too long",
+    "too many tokens",
+    "reduce the length of the",
+    "request is too large",
+    "request too large",
+];
+
 pub fn is_context_overflow(error: &anyhow::Error) -> bool {
     if error
         .chain()
@@ -175,7 +198,7 @@ pub fn is_context_overflow(error: &anyhow::Error) -> bool {
     {
         return true;
     }
-    error
+    let typed = error
         .chain()
         .find_map(|source| source.downcast_ref::<ModelHttpError>())
         .is_some_and(|http| {
@@ -188,16 +211,22 @@ pub fn is_context_overflow(error: &anyhow::Error) -> bool {
                 return false;
             }
             let message = http.message.to_ascii_lowercase();
-            [
-                "context_length_exceeded",
-                "context length exceeded",
-                "maximum context length",
-                "prompt is too long",
-                "input exceeds the context window",
-            ]
-            .iter()
-            .any(|marker| message.contains(marker))
-        })
+            OVERFLOW_MARKERS
+                .iter()
+                .any(|marker| message.contains(marker))
+        });
+    if typed {
+        return true;
+    }
+    // A failure that carried usage is re-wrapped as text, which drops the typed
+    // error. Require both a rejection status and a known sentence there so a
+    // tool output that merely quotes one of them cannot trigger a compaction.
+    let full = format!("{error:#}").to_ascii_lowercase();
+    let rejected = full.contains("http 400")
+        || full.contains("http 413")
+        || full.contains("http 422")
+        || full.contains("invalid_argument");
+    rejected && OVERFLOW_MARKERS.iter().any(|marker| full.contains(marker))
 }
 
 impl fmt::Display for ModelHttpError {
@@ -235,9 +264,11 @@ pub fn reported_error_usage(error: &anyhow::Error) -> Option<&Usage> {
 pub(crate) fn is_output_truncation(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         let detail = cause.to_string();
-        detail.starts_with("model response was truncated (finish_reason=length)")
-            || detail.starts_with("Anthropic response truncated at max_tokens")
-            || detail.starts_with("Responses output truncated (reason=max_output_tokens)")
+        // `contains`, not `starts_with`: a failure that reported usage is
+        // re-wrapped as "outer: inner" text and would otherwise be missed.
+        detail.contains("model response was truncated (finish_reason=length)")
+            || detail.contains("Anthropic response truncated at max_tokens")
+            || detail.contains("Responses output truncated (reason=max_output_tokens)")
     })
 }
 
@@ -3095,6 +3126,35 @@ mod tests {
         assert_eq!(vision.image_input, Some(true));
         let unknown = ModelInfo::parse(&json!({"context_window":128000}));
         assert_eq!(unknown.image_input, None);
+    }
+
+    #[test]
+    fn gemini_input_limit_messages_count_as_context_overflow() {
+        // Gemini reports an oversized request as INVALID_ARGUMENT with this
+        // sentence, not as a context_length_exceeded code.
+        let gemini = anyhow::Error::new(ModelHttpError {
+            status: StatusCode::BAD_REQUEST,
+            retry_after: None,
+            message: "model returned HTTP 400: {\"error\":{\"code\":400,\"message\":\"The input token count exceeds the maximum number of tokens allowed 1048576.\",\"status\":\"INVALID_ARGUMENT\"}}".into(),
+        });
+        assert!(is_context_overflow(&gemini));
+        let unrelated = anyhow::Error::new(ModelHttpError {
+            status: StatusCode::BAD_REQUEST,
+            retry_after: None,
+            message: "invalid image data".into(),
+        });
+        assert!(!is_context_overflow(&unrelated));
+    }
+
+    #[test]
+    fn a_usage_wrapped_rejection_still_counts_as_overflow() {
+        // Reporting usage re-wraps the typed error as text; the overflow
+        // recovery must still recognize the provider's sentence.
+        let wrapped = anyhow::Error::new(ReportedModelFailure {
+            detail: "model returned HTTP 400: {\"error\":{\"code\":400,\"message\":\"The input token count exceeds the maximum number of tokens allowed 1048576.\",\"status\":\"INVALID_ARGUMENT\"}}".into(),
+            usage: Usage::default(),
+        });
+        assert!(is_context_overflow(&wrapped));
     }
 
     #[test]

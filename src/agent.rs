@@ -1646,6 +1646,9 @@ impl Agent {
             });
             let mut printed_text = false;
             let mut streamed_reasoning = false;
+            // Keep the streamed text so a response cut off by the output
+            // ceiling can still be saved instead of vanishing from history.
+            let mut printed = String::new();
             if let Some(events) = &self.events {
                 events.on_event(RuntimeEvent::ModelStarted {
                     request: stats.calls + 1,
@@ -1665,6 +1668,7 @@ impl Agent {
                     &task_images,
                     &mut |delta| {
                         printed_text = true;
+                        printed.push_str(delta);
                         if let Some(events) = &event_sink {
                             events.on_event(RuntimeEvent::TextDelta(delta));
                         }
@@ -1759,7 +1763,7 @@ impl Agent {
                     }
                     if !printed_text
                         && !streamed_reasoning
-                        && overflow_retries == 0
+                        && overflow_retries < 2
                         && crate::provider::is_context_overflow(&error)
                     {
                         overflow_retries += 1;
@@ -1778,12 +1782,24 @@ impl Agent {
                     }
                     // A partially streamed answer is not a valid assistant
                     // message or tool call. Only durable earlier tool results
-                    // may be trusted when the next user turn resumes.
-                    let note = if printed_text || streamed_reasoning {
-                        "[Kroma interrupted: the partial streamed response was not saved. Prior completed tool results are preserved; unfinished work has not been verified.]"
+                    // may be trusted when the next user turn resumes. An
+                    // answer cut off by the output ceiling is different: the
+                    // text the user already read is real model output, so it
+                    // is saved and the next turn continues from it.
+                    let truncated = crate::provider::is_output_truncation(&error);
+                    let note = if truncated && !printed.trim().is_empty() {
+                        printed.trim_end().to_owned()
+                    } else if printed_text || streamed_reasoning {
+                        "[Kroma interrupted: the partial streamed response was not saved. Prior completed tool results are preserved; unfinished work has not been verified.]".to_owned()
                     } else {
-                        "[Kroma interrupted before a complete model response. Prior completed tool results are preserved; unfinished work has not been verified.]"
+                        "[Kroma interrupted before a complete model response. Prior completed tool results are preserved; unfinished work has not been verified.]".to_owned()
                     };
+                    if truncated && !printed.trim().is_empty() {
+                        crate::runtime_log!(
+                            "[model] output hit the token ceiling; the {} characters already shown were saved so the next turn can continue",
+                            printed.trim_end().chars().count()
+                        );
+                    }
                     self.messages.push(Message::new("assistant", note));
                     let persisted = match self
                         .session
@@ -2729,6 +2745,69 @@ mod tests {
             "partial user record must not be replayed"
         );
         drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_truncated_answer_keeps_its_streamed_text_in_history() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut body_size = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(raw) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    body_size = raw.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; body_size];
+            reader.read_exact(&mut body).unwrap();
+            drop(reader);
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {{\"choices\":[{{\"delta\":{{\"content\":\"partial answer\"}},\"finish_reason\":\"length\"}}]}}\n\n").unwrap();
+            stream.flush().unwrap();
+        });
+        let dir = std::env::temp_dir().join(format!(
+            "kroma-truncation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session_path = dir.join("session.json");
+        let model = ModelClient::new(&format!("http://{addr}/v1"), None, "mock".into()).unwrap();
+        let catalog = SessionCatalog::from_default(session_path.clone()).unwrap();
+        let mut agent = Agent::with_catalog(model, dir.clone(), catalog).unwrap();
+        let mut visible = String::new();
+        let result = agent
+            .run("Write a long answer", &mut |piece| visible.push_str(piece))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(visible, "partial answer");
+        assert_eq!(
+            agent.messages.last().unwrap().content.as_deref(),
+            Some("partial answer"),
+            "the text the user already read must survive the truncation"
+        );
+        assert!(!agent
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("Kroma interrupted"));
+        drop(agent);
+        server.join().unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 

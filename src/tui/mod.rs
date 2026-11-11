@@ -1711,10 +1711,27 @@ async fn execute_task(
     let completed = match result {
         Some(Ok(_)) => true,
         Some(Err(error)) => {
-            let message = format!(
-                "{}: {error:#}",
-                state.preferences.language.text("Task failed", "任务失败")
-            );
+            let language = state.preferences.language;
+            let label = language.text("Task failed", "任务失败");
+            let message = if crate::provider::is_context_overflow(&error) {
+                // The raw provider sentence is unreadable and hides the way out.
+                format!(
+                    "{label}: {}",
+                    language.text(
+                        "this conversation is larger than the model accepts, even after compaction. Run /compact to shrink it, or /new to start a fresh session.",
+                        "这段对话超出了模型能接收的大小，自动压缩后仍然超长。用 /compact 手动压缩，或用 /new 开一个新会话。"
+                    )
+                )
+            } else if crate::provider::is_output_truncation(&error) {
+                language
+                    .text(
+                        "The answer reached the model's output limit. The text already shown is saved; send 继续 to continue writing.",
+                        "回答达到模型的输出上限被截断。已经显示的内容已保存，发送「继续」可以接着写。",
+                    )
+                    .to_owned()
+            } else {
+                format!("{label}: {error:#}")
+            };
             state.note_with_level(view::NoticeLevel::Error, &message);
             task_notice = Some(("ERROR", message));
             false

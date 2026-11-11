@@ -50,7 +50,18 @@ The source currently declares version `0.4.0` in `Cargo.toml`. No public npm pac
 - The obsolete TUI layout/width preference and the ignored `KROMA_TUI_STYLE` variable were removed; A / Plain is the only interface, and saved UI settings still load.
 - Hot plugging: a plugin installed, enabled or edited outside a running Kroma applies to the next message in the terminal and the desktop window — no restart, no command to remember. The check is a fingerprint of the plugin folders, their `plugin.toml` size and modification time and the settings file, not a reload per keystroke.
 - Desktop draws what a plugin declares: tool labels, the activity indicator with its status line, Alt+letter shortcuts, plugin panels (static or produced by the plugin on request), declared theme slots (painting the plugin's own panel and status line) and a composer height cap.
+- An idle, empty composer shows one muted hint (`描述任务，或输入 / 查看命令…`) instead of nothing; while a turn runs it stays clean because the activity row already explains the state.
+- `[ui.colors]` from a plugin now repaints the terminal as well as the desktop shell, including the `user` / `accent` identity rails and the running-state accent.
+- `ui.widget` accepts `placement = "transcript"`, which puts a content block inside the message stream so it scrolls, wraps and copies with the conversation (terminal and desktop); that placement is content only and rejects `actions`, which belong to a slot widget.
+- A task that fails because of a context overflow or an output ceiling says what to do next (compact, start a new session, or send `继续`) instead of showing raw provider JSON.
 - `PluginCatalog::ui_panels` exposes the panels an interface may offer, so a front end never has to know a plugin by name, and `tests/plugins_e2e.rs::an_unseen_plugin_needs_no_core_change` installs `tests/fixtures/plugins/timeline-note` — an id, tool, command and panel the source has never heard of — to keep it that way.
+
+### Fixed
+- Google Gemini rejects an oversized request with `INVALID_ARGUMENT` and the sentence "The input token count exceeds the maximum number of tokens allowed …". That sentence now counts as a context overflow, including after a failure is re-wrapped to keep its reported usage, so the existing compaction retry runs instead of every later turn failing on the same history.
+- A context overflow may compact and retry twice within one turn instead of once, so a single checkpoint that is still too large no longer ends the turn.
+- An answer stopped by the output-token ceiling keeps the text already shown in the conversation instead of dropping it, so sending `继续` resumes from that point.
+- The terminal UI no longer reserves an unpainted row above the transcript; the first card starts on the first terminal row.
+- `###` headings use `▪` instead of `▍`, which read like a blockquote.
 
 ### Removed
 - Every `KROMA_EXPERIMENT_*` switch left the production path: the prompt arms (`KROMA_EXPERIMENT_PROMPT_ARM`, `KROMA_EXPERIMENT_FINISH_ON_EVIDENCE`, `KROMA_EXPERIMENT_COMPLETE_FUNCTION_READ`), `KROMA_EXPERIMENT_READABLE_SHELL_RESULTS`, `KROMA_EXPERIMENT_ADAPTIVE_FINISH` and `KROMA_EXPERIMENT_SHELL_TOOL_NAME`. The Cargo-specific "tests passed, so finish" hint and the readable-shell request projection went with them, so no request sees a rewritten tool result or a Rust-only completion rule.
