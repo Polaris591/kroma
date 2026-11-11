@@ -53,13 +53,13 @@ The source currently declares version `0.4.0` in `Cargo.toml`. No public npm pac
 - An idle, empty composer shows one muted hint (`描述任务，或输入 / 查看命令…`) instead of nothing; while a turn runs it stays clean because the activity row already explains the state.
 - `[ui.colors]` from a plugin now repaints the terminal as well as the desktop shell, including the `user` / `accent` identity rails and the running-state accent.
 - `ui.widget` accepts `placement = "transcript"`, which puts a content block inside the message stream so it scrolls, wraps and copies with the conversation (terminal and desktop); that placement is content only and rejects `actions`, which belong to a slot widget.
-- A task that fails because of a context overflow or an output ceiling says what to do next (compact, start a new session, or send `继续`) instead of showing raw provider JSON.
+- A task that fails because of a context overflow says what to do next (compact, or start a new session) instead of showing raw provider JSON.
 - `PluginCatalog::ui_panels` exposes the panels an interface may offer, so a front end never has to know a plugin by name, and `tests/plugins_e2e.rs::an_unseen_plugin_needs_no_core_change` installs `tests/fixtures/plugins/timeline-note` — an id, tool, command and panel the source has never heard of — to keep it that way.
 
 ### Fixed
 - Google Gemini rejects an oversized request with `INVALID_ARGUMENT` and the sentence "The input token count exceeds the maximum number of tokens allowed …". That sentence now counts as a context overflow, including after a failure is re-wrapped to keep its reported usage, so the existing compaction retry runs instead of every later turn failing on the same history.
 - A context overflow may compact and retry twice within one turn instead of once, so a single checkpoint that is still too large no longer ends the turn.
-- An answer stopped by the output-token ceiling keeps the text already shown in the conversation instead of dropping it, so sending `继续` resumes from that point.
+- An answer stopped by the output-token ceiling is continued automatically (up to four continuation rounds per turn) instead of ending the turn, so a long answer arrives in one piece; if the ceiling is still hit, the text already shown is kept in the conversation instead of being dropped.
 - The terminal UI no longer reserves an unpainted row above the transcript; the first card starts on the first terminal row.
 - `###` headings use `▪` instead of `▍`, which read like a blockquote.
 

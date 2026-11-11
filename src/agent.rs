@@ -1,6 +1,10 @@
 /// Prefix of the durable model-facing cancellation note, shared with TUI display.
 pub const TASK_CANCELLED_PREFIX: &str = "[Task cancelled by user.";
 
+/// How many times one turn may ask the model to continue an answer that hit
+/// the per-turn output ceiling before the text shown so far is simply kept.
+const MAX_OUTPUT_CONTINUATIONS: u32 = 4;
+
 use crate::{
     cache_trace::{CacheSnapshot, CacheTrace},
     child_policy::ExecutionLimits,
@@ -1532,6 +1536,11 @@ impl Agent {
 
         let mut overflow_retries = 0;
         let mut truncation_retries = 0;
+        // Text already shown from rounds that hit the per-turn output ceiling,
+        // and whether the next request should ask the model to continue.
+        let mut answer_prefix = String::new();
+        let mut pending_continuation = false;
+        let mut output_continuations = 0;
         let mut continuing_native_search = false;
         let mut checkpoint_ready = false;
         loop {
@@ -1576,6 +1585,18 @@ impl Agent {
             // current task (including its tool rounds), but don't repeatedly
             // re-upload old images for every later user turn.
             crate::attachments::project_history(&mut view, self.model.accepts_images());
+            if pending_continuation {
+                pending_continuation = false;
+                // The model cannot see a partial answer that was never saved,
+                // so hand its own text back for the continuation round only.
+                if !answer_prefix.is_empty() {
+                    view.push(Message::new("assistant", answer_prefix.clone()));
+                }
+                view.push(Message::new(
+                    "user",
+                    "Your previous message was cut off by the output limit. Continue from the exact point where it stopped: do not repeat text you already wrote and do not restart the answer.",
+                ));
+            }
             // Plan with the metadata the active provider actually sends.
             // The complete view and WAL remain untouched, including opaque
             // reasoning from other models and human-visible thinking history.
@@ -1761,6 +1782,22 @@ impl Agent {
                         );
                         continue;
                     }
+                    // A long answer reached the per-turn output ceiling after
+                    // the user already saw text: keep that text and ask for the
+                    // continuation instead of ending the turn on a limit.
+                    if crate::provider::is_output_truncation(&error)
+                        && !printed.trim().is_empty()
+                        && output_continuations < MAX_OUTPUT_CONTINUATIONS
+                    {
+                        output_continuations += 1;
+                        answer_prefix.push_str(&printed);
+                        pending_continuation = true;
+                        crate::runtime_log!(
+                            "[model] output hit the per-turn ceiling; asking for the continuation ({}/{MAX_OUTPUT_CONTINUATIONS})",
+                            output_continuations
+                        );
+                        continue;
+                    }
                     if !printed_text
                         && !streamed_reasoning
                         && overflow_retries < 2
@@ -1787,8 +1824,10 @@ impl Agent {
                     // text the user already read is real model output, so it
                     // is saved and the next turn continues from it.
                     let truncated = crate::provider::is_output_truncation(&error);
+                    let shown = format!("{answer_prefix}{}", printed.trim_end());
+                    let shown_chars = shown.chars().count();
                     let note = if truncated && !printed.trim().is_empty() {
-                        printed.trim_end().to_owned()
+                        shown
                     } else if printed_text || streamed_reasoning {
                         "[Kroma interrupted: the partial streamed response was not saved. Prior completed tool results are preserved; unfinished work has not been verified.]".to_owned()
                     } else {
@@ -1797,7 +1836,7 @@ impl Agent {
                     if truncated && !printed.trim().is_empty() {
                         crate::runtime_log!(
                             "[model] output hit the token ceiling; the {} characters already shown were saved so the next turn can continue",
-                            printed.trim_end().chars().count()
+                            shown_chars
                         );
                     }
                     self.messages.push(Message::new("assistant", note));
@@ -1884,6 +1923,13 @@ impl Agent {
                     completion.first_token.map_or_else(|| "n/a".to_string(), |t| format!("{:.2}", t.as_secs_f64() * 1_000.0)),
                     calls.len()
                 );
+            }
+            // Rounds that hit the output ceiling were never saved; this round
+            // finishes the same answer, so it becomes one message.
+            if !answer_prefix.is_empty() {
+                let continued = response.content.take().unwrap_or_default();
+                response.content = Some(format!("{answer_prefix}{continued}"));
+                answer_prefix.clear();
             }
             let text = response.content.clone();
             self.messages.push(response);
@@ -2755,24 +2801,32 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            let mut body_size = 0usize;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if line == "\r\n" {
-                    break;
+            let mut bodies = Vec::new();
+            for reply in [
+                "data: {\"choices\":[{\"delta\":{\"content\":\"partial answer\"},\"finish_reason\":\"length\"}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\" the end\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut body_size = 0usize;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(raw) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        body_size = raw.trim().parse().unwrap();
+                    }
                 }
-                if let Some(raw) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    body_size = raw.trim().parse().unwrap();
-                }
+                let mut body = vec![0; body_size];
+                reader.read_exact(&mut body).unwrap();
+                drop(reader);
+                bodies.push(String::from_utf8_lossy(&body).into_owned());
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{reply}").unwrap();
+                stream.flush().unwrap();
             }
-            let mut body = vec![0; body_size];
-            reader.read_exact(&mut body).unwrap();
-            drop(reader);
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {{\"choices\":[{{\"delta\":{{\"content\":\"partial answer\"}},\"finish_reason\":\"length\"}}]}}\n\n").unwrap();
-            stream.flush().unwrap();
+            bodies
         });
         let dir = std::env::temp_dir().join(format!(
             "kroma-truncation-{}-{}",
@@ -2791,12 +2845,15 @@ mod tests {
         let result = agent
             .run("Write a long answer", &mut |piece| visible.push_str(piece))
             .await;
-        assert!(result.is_err());
-        assert_eq!(visible, "partial answer");
+        let bodies = server.join().unwrap();
+        // A cut-off answer is continued automatically: the turn succeeds and
+        // the user sees one uninterrupted answer.
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(visible.trim_end(), "partial answer the end");
         assert_eq!(
             agent.messages.last().unwrap().content.as_deref(),
-            Some("partial answer"),
-            "the text the user already read must survive the truncation"
+            Some("partial answer the end"),
+            "the continued rounds must be saved as one answer"
         );
         assert!(!agent
             .messages
@@ -2806,8 +2863,12 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("Kroma interrupted"));
+        assert_eq!(bodies.len(), 2, "one continuation request");
+        assert!(
+            bodies[1].contains("Continue from the exact point where it stopped"),
+            "the continuation round must ask the model to keep writing"
+        );
         drop(agent);
-        server.join().unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 
