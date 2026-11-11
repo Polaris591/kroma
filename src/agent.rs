@@ -1,9 +1,11 @@
 /// Prefix of the durable model-facing cancellation note, shared with TUI display.
 pub const TASK_CANCELLED_PREFIX: &str = "[Task cancelled by user.";
 
-/// How many times one turn may ask the model to continue an answer that hit
-/// the per-turn output ceiling before the text shown so far is simply kept.
-const MAX_OUTPUT_CONTINUATIONS: u32 = 4;
+/// An answer that hits the per-turn output ceiling keeps going on its own.
+/// This is only a runaway guard (a model that never stops), not a length
+/// policy: 64 rounds is far beyond any real answer, so the visible behaviour
+/// is "write until the answer is finished".
+const MAX_OUTPUT_CONTINUATIONS: u32 = 64;
 
 use crate::{
     cache_trace::{CacheSnapshot, CacheTrace},
