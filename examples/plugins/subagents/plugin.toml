@@ -16,10 +16,13 @@ max_parallel = 8
 task_timeout_secs = 1800
 # Absolute path to the Kroma binary; empty uses PATH or KROMA_BIN.
 kroma_bin = ""
+# Whether children load this machine's plugins. "none" keeps a child fast and
+# self-contained; "inherit" gives it the same plugins you have.
+child_plugins = "none"
 
 [[tools]]
 name = "subagent"
-description = "Delegate self-contained tasks to separate Kroma agents and return their answers in one result. Each child has its own session, working directory, model and toolset and does not see this conversation, so the task must carry the goal, relevant paths, allowed changes, constraints and the evidence to return; point at files instead of pasting them (16 KiB limit). The call blocks until every child finishes, so batch independent tasks into one call rather than starting them one at a time; live progress is shown while they run. Up to 8 tasks per call, each optionally resumed from an earlier answer's resume token. Parallel edits need non-overlapping files or separate directories. A child cannot delegate further."
+description = "Delegate self-contained tasks to separate Kroma agents; one call runs the whole batch and returns each child's answer, so give the batch in one call instead of polling. A child has its own session, cwd, model and toolset and cannot delegate further, so state the goal, paths, constraints and what to return; point at files instead of pasting them."
 streaming = true
 
 [tools.parameters]

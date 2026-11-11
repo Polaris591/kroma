@@ -722,30 +722,10 @@ html,body,#app{min-width:0}
 .followup-add-button{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:34px;padding:0 10px;border:1px solid #b3c9ed29;border-radius:8px;background:#b3c9ed09;color:#b9cae5;font-size:11px}
 .followup-add-button:hover{background:#b3c9ed19;color:#e5eefe}
 
-/* Host-published goal state above the composer. The bar is read-only except
-   for the pause/resume/cancel entries, which reuse the steering and send IPC. */
+/* Plugin status and activity shelf above the composer. */
 .plugin-shelf{display:flex;align-items:center;gap:8px;margin:0 0 9px;padding:6px 10px;border:1px solid #a5bbf126;background:#a9c7f509;border-radius:9px;color:#aab7c8;font-size:12px}
 .plugin-frame{display:inline-block;min-width:1.1em;text-align:center;color:#9fc6ff;font-weight:600}
 .plugin-status{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.goal-shelf{margin:0 0 9px;padding:8px 10px 9px;border:1px solid #a5bbf126;background:linear-gradient(130deg,#a9c7f509,#ffffff03);border-radius:10px;color:#c3cfdf}
-.goal-shelf.goal-running{border-color:#8fc79a33;background:linear-gradient(130deg,#8fc79a10,#ffffff03)}
-.goal-shelf.goal-paused{border-color:#d8bd8250;background:linear-gradient(130deg,#d8bd8214,#ffffff03)}
-.goal-heading{display:flex;align-items:center;gap:8px;min-width:0;font-size:11.5px}
-.goal-state{display:inline-flex;align-items:center;gap:6px;flex:none;font-weight:650;color:#dbe4f1}
-.goal-state-dot{height:6px;width:6px;border-radius:50%;background:#8f9db1}
-.goal-running .goal-state-dot{background:#7fc194;animation:pulse 1.5s ease-in-out infinite}
-.goal-paused .goal-state-dot{background:#d8bd82}
-.goal-id{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#b5cafa;font-variant-numeric:tabular-nums}
-.goal-revision{flex:none;color:#7f8ea3;font-size:10px;font-variant-numeric:tabular-nums}
-.goal-summary{margin:6px 0 0;color:#aab8ca;font-size:11px;line-height:1.5;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
-.goal-reason{margin:5px 0 0;color:#d8bd82;font-size:11px}
-.goal-next{margin:5px 0 0;color:#8fa1b8;font-size:10.5px}
-.goal-actions{display:flex;align-items:center;gap:7px;margin-top:8px}
-.goal-action{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:28px;padding:0 11px;border:1px solid #ffffff15;border-radius:7px;color:#bed0ed;font-size:11px}
-.goal-action:hover:not(:disabled){background:var(--wash-2);color:#e5eefe}
-.goal-action:disabled{opacity:.4}
-.goal-action-stop{color:#e0b6bf}
-.goal-action-stop:hover:not(:disabled){background:#5a364133;color:#f2ccd5}
 
 
 /* Search metadata is instant. Full-text hits arrive from a bounded
@@ -922,3 +902,62 @@ html,body,#app{min-width:0}
 .panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border-bottom:1px solid #ffffff12}
 .panel-head h3{margin:0;font-size:14px}
 .panel-body{margin:0;padding:14px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,monospace;font-size:12px;line-height:1.55;color:#c3cfdf}
+
+/* A plugin's question takes the composer slot as a bar, never a centred modal:
+   the answer belongs exactly where typing normally happens. */
+.ask-bar{padding:12px 14px 10px;display:flex;flex-direction:column;gap:9px}
+/* The real composer stays mounted behind the question and must not show. */
+.composer[hidden]{display:none}
+.ask-head{display:flex;align-items:flex-start;gap:9px;color:#eef2f9}
+.ask-head>svg{flex-shrink:0;margin-top:2px;color:#a9c0ef}
+.ask-head p{flex:1;min-width:0;margin:0;font-size:12.5px;line-height:1.55;word-break:break-word}
+.ask-options{display:flex;flex-wrap:wrap;gap:6px}
+.ask-option{padding:6px 12px;border:1px solid #ffffff26;border-radius:8px;background:var(--wash-1);color:#d7dde8;font-size:12px}
+.ask-option:hover,.ask-option.active{background:#ffffff16;border-color:#ffffff3d;color:#f5f7fb}
+.ask-option.chosen{border-color:#adc5fb99;background:#adc5fb1f;color:#eaf1ff}
+.ask-option.active.chosen{border-color:#adc5fbd9;box-shadow:0 0 0 2px #adc5fb26}
+.ask-answer{display:flex;align-items:center;gap:8px}
+.ask-answer input{flex:1;min-width:0;padding:8px 11px;border:1px solid var(--wash-3);border-radius:8px;background:#ffffff08;color:#f2f3f5;font-size:12px;outline:0}
+.ask-answer input::placeholder{color:#8b929e}
+.ask-answer input:focus{border-color:#a5baff85;background:#ffffff0e}
+.ask-tip{font-size:10.5px;color:#8b929e}
+
+/* Panel blocks: the plugin decides the content, the interface decides the
+   look, so no plugin needs its own stylesheet. */
+.panel-blocks{flex:1;min-height:0;display:flex;flex-direction:column;gap:10px;padding:14px;overflow:auto;font-size:12px;line-height:1.6;color:#c9d3e2}
+.panel-heading{margin:0;font-size:13px;font-weight:650;color:#eef2f9}
+.panel-text{margin:0;white-space:pre-wrap;word-break:break-word}
+.panel-list{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
+.panel-kv{display:grid;grid-template-columns:minmax(88px,auto) 1fr;gap:4px 14px;margin:0}
+.panel-kv dt{color:#98a3b4}
+.panel-kv dd{margin:0;word-break:break-word}
+.panel-progress{display:flex;flex-direction:column;gap:5px}
+.panel-progress-label{display:flex;justify-content:space-between;gap:10px;font-size:11px;color:#b6c0cf;font-variant-numeric:tabular-nums}
+.panel-progress-track{height:6px;border-radius:12px;background:#2b3038;overflow:hidden}
+.panel-progress-fill{display:block;height:100%;border-radius:12px;background:linear-gradient(90deg,#9fb8f1,#bdccf0)}
+.panel-table-wrap{overflow-x:auto}
+.panel-table{border-collapse:collapse;font-size:11.5px;white-space:nowrap}
+.panel-table th,.panel-table td{padding:5px 11px;border-top:1px solid #ffffff0e;text-align:left}
+.panel-table th{border-top:0;color:#98a3b4;font-weight:600}
+.panel-divider{height:1px;background:#ffffff12}
+
+/* Extensible plugin widgets & sandboxed Desktop custom surfaces */
+.chat-body-row{display:flex;flex:1;min-height:0;min-width:0}
+.chat-main-column{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0}
+.plugin-right-dock{width:300px;flex-shrink:0;border-left:1px solid var(--subtle-line);background:#121823;padding:12px;display:flex;flex-direction:column;gap:10px;overflow:auto}
+.plugin-widgets-slot{display:flex;flex-direction:column;gap:8px}
+.plugin-widgets-slot.slot-above_composer,.plugin-widgets-slot.slot-below_composer,.plugin-widgets-slot.slot-footer{width:min(880px,calc(100% - 75px));margin:0 auto 8px}
+.plugin-widgets-slot.slot-header{padding:8px 24px 0}
+.plugin-widget-card{background:#18202e;border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column}
+.plugin-widget-head{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid #ffffff0d;font-size:12px;color:#dce4f2}
+.plugin-widget-head span{font-size:10.5px;color:#7e8ca3}
+.widget-actions{display:flex;flex-wrap:wrap;gap:6px;padding:8px 12px 10px;border-top:1px solid #ffffff0a}
+.composer-desktop-slot{width:min(880px,calc(100% - 75px));margin:0 auto 8px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#161d29}
+.plugin-tab-page{flex:1;min-height:0;display:flex;flex-direction:column;padding:16px}
+.plugin-desktop-frame{display:flex;flex-direction:column;width:100%;min-height:180px;position:relative;background:#111722}
+.plugin-desktop-frame.full-height{flex:1;min-height:420px;border-radius:10px;overflow:hidden;border:1px solid var(--line)}
+.plugin-desktop-iframe{width:100%;flex:1;min-height:inherit;border:0;background:transparent}
+.plugin-desktop-loading,.plugin-desktop-error{padding:14px;font-size:12px;color:#9fb0c8}
+.plugin-desktop-error{color:#f3ced5}
+.panel-card-wide{width:min(900px,92vw);height:min(700px,84vh)}
+

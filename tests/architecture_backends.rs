@@ -397,7 +397,7 @@ impl EventSink for RecordingEvents {
                 format!("tool-end:{name}")
             }
             RuntimeEvent::TaskFinished { status } => format!("task-end:{status}"),
-            RuntimeEvent::TaskControlChanged { status, .. } => format!("task-control:{status}"),
+            RuntimeEvent::TurnGateContinued { plugin, .. } => format!("gate-continue:{plugin}"),
             RuntimeEvent::SessionCreated { .. }
             | RuntimeEvent::SessionSwitched { .. }
             | RuntimeEvent::SessionCleared { .. }

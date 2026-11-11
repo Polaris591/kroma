@@ -1,5 +1,6 @@
 //! Tauri commands only translate GUI actions into the existing Kroma Rust host.
 //! No second Agent Loop, HTTP server, or terminal subprocess.
+mod plugins_ui;
 mod workspace_review;
 
 use anyhow::{bail, Context, Result};
@@ -16,15 +17,19 @@ use kroma::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
-use tauri::{ipc::Channel, State};
+use tauri::{ipc::Channel, AppHandle, Manager, State};
 use tokio::sync::watch;
 
-struct Host {
+pub(crate) struct Host {
     project: PathBuf,
     generation: u64,
     /// Monotonic token for concurrent IPC connect attempts. Only the newest
@@ -44,23 +49,92 @@ struct Host {
     events: Arc<DesktopEvents>,
     cancel: Option<watch::Sender<bool>>,
     task_input: Option<kroma::steering::TaskInput>,
-    /// Controller command name and host, kept outside the Agent so a running
-    /// turn can still report status and stop through the same rule as CLI/TUI.
-    control_command: Option<String>,
-    control_host: Option<Arc<kroma::plugins::TaskControlHost>>,
-    /// Set by a running `/goal cancel`; applied after the turn is stopped.
-    control_action: Option<kroma::plugins::HostControlAction>,
     /// Plugin sources as of the last load, so a plugin installed from a
     /// terminal is picked up by the next message instead of a restart.
     plugins_fingerprint: u64,
+    /// One question at a time from a plugin, delivered to the open window.
+    asker: Arc<DesktopAsker>,
+    app_handle: Option<AppHandle>,
+    ui_forwarder: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// Cloned catalog + active session coordinates so UI actions & custom panels
+    /// still work while a turn holds `runtime`.
+    active_plugins: Option<(PluginCatalog, String, PathBuf)>,
+}
+
+/// A plugin's question reaching the window. The plugin's own worker thread
+/// waits on the matching sender; the window answers with `answer_question`.
+#[derive(Default)]
+struct DesktopAsker {
+    next_id: AtomicU64,
+    pending: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<kroma::tools::AskAnswer>>>,
+    /// The channel of the message that is running right now, if any.
+    channel: Mutex<Option<Channel<Value>>>,
+}
+
+impl DesktopAsker {
+    fn set_channel(&self, channel: Option<Channel<Value>>) {
+        if let Ok(mut current) = self.channel.lock() {
+            *current = channel;
+        }
+    }
+
+    /// Answer one open question. Unknown or stale ids are ignored: a question
+    /// that already timed out must never be "answered" later.
+    fn answer(&self, id: u64, answer: kroma::tools::AskAnswer) -> bool {
+        let sender = self.pending.lock().ok().and_then(|mut map| map.remove(&id));
+        sender.is_some_and(|sender| sender.send(answer).is_ok())
+    }
+
+    /// A finished or cancelled turn leaves no answerable question behind.
+    fn clear_pending(&self) {
+        if let Ok(mut map) = self.pending.lock() {
+            map.clear();
+        }
+    }
+}
+
+impl kroma::tools::Asker for DesktopAsker {
+    fn ask<'a>(
+        &'a self,
+        request: kroma::tools::AskRequest,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Option<kroma::tools::AskAnswer>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            let channel = self
+                .channel
+                .lock()
+                .ok()
+                .and_then(|channel| channel.as_ref().cloned())?;
+            let (sender, wait) = tokio::sync::oneshot::channel();
+            self.pending.lock().ok()?.insert(id, sender);
+            let sent = channel
+                .send(json!({
+                    "kind": "ask",
+                    "ask": {
+                        "id": id,
+                        "question": request.question,
+                        "options": request.options,
+                        "multiple": request.multiple,
+                    }
+                }))
+                .is_ok();
+            if !sent {
+                self.pending.lock().ok()?.remove(&id);
+                return None;
+            }
+            wait.await.ok()
+        })
+    }
 }
 
 /// Cloned cheaply so blocking work can run on Tauri's blocking pool without
 /// holding the UI command thread.
 #[derive(Clone)]
-struct DesktopState(Arc<Mutex<Host>>);
+pub(crate) struct DesktopState(Arc<Mutex<Host>>);
 
-fn ui_error(error: impl std::fmt::Display) -> String {
+pub(crate) fn ui_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
@@ -136,46 +210,6 @@ fn validate_pasted_image(bytes: &[u8], extension: &str) -> Result<&'static str> 
         .with_context(|| format!("仅支持 PNG / JPEG / WebP 图片，无法保存 .{extension} 内容"))
 }
 
-/// Install only from a plain directory with a readable, valid plugin.toml.
-/// Symlinked directories and manifests are refused, so a chosen folder cannot
-/// redirect the installer to files the user never selected.
-fn validate_plugin_source(directory: &Path) -> Result<PathBuf> {
-    let meta = fs::symlink_metadata(directory)
-        .with_context(|| format!("插件目录不存在：{}", directory.display()))?;
-    if meta.file_type().is_symlink() {
-        bail!("插件目录不能是符号链接：{}", directory.display());
-    }
-    if !meta.is_dir() {
-        bail!("插件源必须是一个文件夹：{}", directory.display());
-    }
-    let source = directory
-        .canonicalize()
-        .with_context(|| format!("无法打开插件目录：{}", directory.display()))?;
-    let manifest = source.join("plugin.toml");
-    let manifest_meta = fs::symlink_metadata(&manifest)
-        .with_context(|| format!("该文件夹缺少 plugin.toml：{}", source.display()))?;
-    if manifest_meta.file_type().is_symlink() {
-        bail!("plugin.toml 不能是符号链接：{}", manifest.display());
-    }
-    if !manifest_meta.is_file() {
-        bail!("plugin.toml 必须是普通文件：{}", manifest.display());
-    }
-    if manifest_meta.len() > 1024 * 1024 {
-        bail!("plugin.toml 过大（上限 1 MiB）：{}", manifest.display());
-    }
-    let text = fs::read_to_string(&manifest)
-        .with_context(|| format!("无法读取 plugin.toml：{}", manifest.display()))?;
-    if text.trim().is_empty() {
-        bail!("plugin.toml 为空，无法安装插件：{}", manifest.display());
-    }
-    text.parse::<toml::Value>().with_context(|| {
-        format!(
-            "plugin.toml 不是合法的 TOML，无法安装插件：{}",
-            manifest.display()
-        )
-    })?;
-    Ok(source)
-}
 fn last_project_file() -> Result<PathBuf> {
     Ok(home()?.join(".kroma").join("desktop.json"))
 }
@@ -277,6 +311,9 @@ fn initial_project() -> PathBuf {
 
 impl DesktopState {
     fn new() -> Self {
+        let asker = Arc::new(DesktopAsker::default());
+        // Plugins reach the same window the model's ask tool uses.
+        kroma::tools::set_host_asker(asker.clone());
         Self(Arc::new(Mutex::new(Host {
             project: initial_project(),
             generation: 0,
@@ -289,10 +326,11 @@ impl DesktopState {
             events: Arc::new(DesktopEvents::default()),
             cancel: None,
             task_input: None,
-            control_command: None,
-            control_host: None,
-            control_action: None,
             plugins_fingerprint: 0,
+            asker,
+            app_handle: None,
+            ui_forwarder: None,
+            active_plugins: None,
         })))
     }
 }
@@ -322,7 +360,7 @@ impl RuntimePurpose {
     }
 }
 
-fn require_idle(host: &Host) -> Result<()> {
+pub(crate) fn require_idle(host: &Host) -> Result<()> {
     if host.cancel.is_some() {
         bail!("A task is running. Cancel or finish it before changing sessions or plugins.");
     }
@@ -363,7 +401,10 @@ fn return_runtime(host: &mut Host, runtime: DefaultRuntime, owner: RuntimeOwner)
     host.runtime = Some(runtime);
 }
 
-async fn with_host<T, F>(state: State<'_, DesktopState>, work: F) -> std::result::Result<T, String>
+pub(crate) async fn with_host<T, F>(
+    state: State<'_, DesktopState>,
+    work: F,
+) -> std::result::Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce(&mut Host) -> Result<T> + Send + 'static,
@@ -434,7 +475,7 @@ fn sessions_for(project: &Path) -> Result<Value> {
 
 fn view(host: &mut Host) -> Result<Value> {
     let snapshot = if let Some(runtime) = &host.runtime {
-        let current = desktop_host::snapshot(&runtime.agent)?;
+        let current = desktop_host::snapshot_with_plugins(&runtime.agent, Some(&runtime.plugins))?;
         host.last_snapshot = Some(current.clone());
         Some(current)
     } else {
@@ -931,9 +972,11 @@ async fn open_project(
     with_host(state, move |host| {
         require_idle(host)?;
         if canonical != host.project {
+            plugins_ui::stop_ui_forwarder(host);
             host.project = canonical.clone();
             host.generation += 1;
             host.runtime = None;
+            host.active_plugins = None;
             host.last_snapshot = None;
             host.connected_profile = None;
             host.task_input = None;
@@ -986,12 +1029,6 @@ async fn connect(
     })
     .await
     .map_err(ui_error)?;
-    // One process-wide controller, exactly like the CLI and TUI hosts.
-    if let Some(control) = runtime.plugins.task_control() {
-        if let Err(error) = runtime.agent.attach_task_control(control) {
-            eprintln!("[desktop] task control: {error:#}");
-        }
-    }
     let mut host = state.0.lock().map_err(ui_error)?;
     require_idle(&host).map_err(ui_error)?;
     if host.generation != version {
@@ -1022,16 +1059,14 @@ async fn connect(
             let _ = backfill_session_title(&runtime.agent);
         }
     }
+    let ui_bus = runtime.plugins.ui_bus();
     host.events = events;
     host.runtime = Some(runtime);
     host.connected_profile = requested_profile;
     host.plugins_fingerprint = PluginCatalog::source_fingerprint(&host.project);
     host.task_input = host.runtime.as_ref().map(|r| r.agent.task_input());
-    host.control_command = host
-        .runtime
-        .as_ref()
-        .and_then(|r| r.agent.task_control_command_name());
-    host.control_host = host.runtime.as_ref().and_then(|r| r.plugins.task_control());
+    plugins_ui::sync_active_plugins(&mut host);
+    plugins_ui::start_ui_forwarder(&mut host, ui_bus);
     view(&mut host).map_err(ui_error)
 }
 
@@ -1171,24 +1206,40 @@ async fn switch_session(
 ) -> std::result::Result<Value, String> {
     with_host(state, move |host| {
         require_idle(host)?;
-        let runtime = host.runtime.as_mut().context("Connect a model first")?;
-        runtime.agent.resume_session(&id)?;
-        let title = backfill_session_title(&runtime.agent);
-
-        // A session switch does not change model profiles, installed plugins,
-        // project settings, or the navigation tree. Rebuilding the entire
-        // bootstrap here scanned all projects and discovered every plugin on
-        // every click, then serialized up to 1000 messages despite the UI only
-        // showing a small recent window. Return just the authoritative session
-        // snapshot; the client already has stable navigation metadata.
-        let snapshot = desktop_host::snapshot_page(&runtime.agent, None, 120)?;
+        let (snapshot, title, connected_model, reasoning_level, thinking_levels) = {
+            let runtime = host.runtime.as_mut().context("Connect a model first")?;
+            runtime.agent.resume_session(&id)?;
+            runtime.plugins.clear_session_ui();
+            let title = backfill_session_title(&runtime.agent);
+            let snapshot = desktop_host::snapshot_page_with_plugins(
+                &runtime.agent,
+                None,
+                120,
+                Some(&runtime.plugins),
+            )?;
+            let connected_model = runtime.selected_model_name.clone().or_else(|| {
+                runtime
+                    .agent
+                    .model_report()
+                    .map(|report| report.model.clone())
+            });
+            let reasoning_level = runtime.agent.reasoning_level();
+            let thinking_levels = runtime.agent.thinking_levels().to_vec();
+            (
+                snapshot,
+                title,
+                connected_model,
+                reasoning_level,
+                thinking_levels,
+            )
+        };
+        plugins_ui::sync_active_plugins(host);
         Ok(json!({
             "snapshot":snapshot,
             "title":title,
-            "connected_model":runtime.selected_model_name.clone().or_else(||
-                runtime.agent.model_report().map(|report| report.model.clone())),
-            "reasoning_level":runtime.agent.reasoning_level(),
-            "thinking_levels":runtime.agent.thinking_levels(),
+            "connected_model":connected_model,
+            "reasoning_level":reasoning_level,
+            "thinking_levels":thinking_levels,
         }))
     })
     .await
@@ -1198,14 +1249,10 @@ async fn switch_session(
 async fn new_session(state: State<'_, DesktopState>) -> std::result::Result<Value, String> {
     with_host(state, |host| {
         require_idle(host)?;
-        // Create a real independent conversation immediately. The old
-        // welcome-only "unknown" session caused first-send reinitialization
-        // and a sudden jump in the Desktop history list.
-        host.runtime
-            .as_mut()
-            .context("Connect a model first")?
-            .agent
-            .new_session()?;
+        let runtime = host.runtime.as_mut().context("Connect a model first")?;
+        runtime.agent.new_session()?;
+        runtime.plugins.clear_session_ui();
+        plugins_ui::sync_active_plugins(host);
         view(host)
     })
     .await
@@ -1395,64 +1442,7 @@ fn cancel_task(state: State<'_, DesktopState>) -> std::result::Result<(), String
 
 #[tauri::command]
 fn steer_task(state: State<'_, DesktopState>, text: String) -> std::result::Result<Value, String> {
-    let mut host = state.0.lock().map_err(ui_error)?;
-    if let Some(command) = host.control_command.clone() {
-        if let Some(action) = kroma::plugins::running_control(&command, &text) {
-            use kroma::plugins::RunningControl;
-            match action {
-                RunningControl::Pause | RunningControl::Cancel => {
-                    if matches!(action, RunningControl::Cancel) {
-                        host.control_action = Some(kroma::plugins::HostControlAction::Cancel);
-                    }
-                    // The user stop path is the one Ctrl+C uses; the
-                    // controller is never asked to approve a stop.
-                    let cancel = host
-                        .cancel
-                        .as_ref()
-                        .context("No task is running")
-                        .map_err(ui_error)?;
-                    cancel.send(true).map_err(ui_error)?;
-                    return Ok(json!({
-                        "kind": if matches!(action, RunningControl::Cancel) {
-                            "cancelled"
-                        } else {
-                            "paused"
-                        },
-                    }));
-                }
-                RunningControl::Status => {
-                    let snapshot = host.control_host.as_ref().and_then(|host| host.snapshot());
-                    let events = host.events.clone();
-                    events.on_event(kroma::events::RuntimeEvent::TaskControlChanged {
-                        command: &command,
-                        owner: snapshot.as_ref().map_or("", |s| s.owner.as_str()),
-                        id: snapshot.as_ref().map_or("", |s| s.id.as_str()),
-                        revision: snapshot.as_ref().map_or(0, |s| s.revision),
-                        status: snapshot.as_ref().map_or("none", |s| s.status.as_str()),
-                        reason: snapshot
-                            .as_ref()
-                            .and_then(|s| s.reason.as_deref())
-                            .unwrap_or(""),
-                        summary: snapshot
-                            .as_ref()
-                            .and_then(|s| s.data.get("summary"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or(""),
-                    });
-                    // Only a status report happened; the renderer must not
-                    // present it as an inserted instruction.
-                    return Ok(json!({"kind": "status"}));
-                }
-                RunningControl::Start => {
-                    return Err(
-                        "A goal is running: pause or cancel it before starting another".into(),
-                    )
-                }
-            }
-        }
-    }
-    // The active Agent is temporarily owned by send_message. Its TaskInput
-    // handle must be cloned out before starting so steering works concurrently.
+    let host = state.0.lock().map_err(ui_error)?;
     let handle = host
         .task_input
         .as_ref()
@@ -1489,8 +1479,9 @@ async fn send_message(
             .map_err(ui_error)?;
         let (tx, rx) = watch::channel(false);
         host.task_input = Some(runtime.agent.task_input());
-        host.control_action = None;
         host.cancel = Some(tx);
+        // Questions raised by this turn reach the window that started it.
+        host.asker.set_channel(Some(channel.clone()));
         (runtime, host.events.clone(), rx)
     };
     let mut all = Vec::new();
@@ -1507,31 +1498,9 @@ async fn send_message(
         if runtime.agent.session_id() == "unknown" {
             runtime.agent.new_session()?;
         }
-        // A controller line must never reach the model as ordinary text. The
-        // prepared start is the only way a goal turn begins, and the reply is
-        // returned instead of starting a run that has nothing to do.
         let mut prompt = text.clone();
-        let mut control_text: Option<String> = None;
-        if let Some(command) = runtime.agent.task_control_command_name() {
-            if let Some(arguments) = kroma::plugins::control_arguments(&command, &text) {
-                match runtime.agent.task_control_command(&text, arguments).await? {
-                    Some(kroma::plugins::ControlCommand::Prepared(task)) => {
-                        if !task.output.is_empty() {
-                            control_text = Some(task.output.clone());
-                        }
-                        prompt = runtime.agent.stage_prepared_task(task)?;
-                    }
-                    Some(kroma::plugins::ControlCommand::Text(reply)) => {
-                        return Ok(("completed".to_owned(), Some(reply)));
-                    }
-                    Some(kroma::plugins::ControlCommand::HostAction(action)) => {
-                        let reply = runtime.agent.control_host_action(action)?;
-                        return Ok(("completed".to_owned(), Some(reply)));
-                    }
-                    None => {}
-                }
-            }
-        }
+        // A reply a plugin command produced is shown alongside the completion.
+        let mut notice: Option<String> = None;
         let first_user_turn = !runtime
             .agent
             .messages()
@@ -1555,7 +1524,15 @@ async fn send_message(
                         } else {
                             reply.output
                         };
-                        return Ok(("completed".to_owned(), Some(output)));
+                        match reply.action {
+                            // The plugin supplied this turn: run it as the
+                            // user's message instead of answering it here.
+                            kroma::commands::CommandAction::Task(body) => {
+                                prompt = body;
+                                notice = Some(output);
+                            }
+                            _ => return Ok(("completed".to_owned(), Some(output))),
+                        }
                     }
                     Ok(None) => {}
                     Err(error) => {
@@ -1593,19 +1570,9 @@ async fn send_message(
             }
         }; // Dropping the cancelled Future first terminates active tool workers.
         let result = match status {
-            Turn::Finished(result) => result.map(|_| ("completed".to_owned(), control_text.take())),
+            Turn::Finished(result) => result.map(|_| ("completed".to_owned(), notice.take())),
             Turn::Cancelled => {
-                let action = state
-                    .0
-                    .lock()
-                    .map_err(|error| anyhow::anyhow!("{error}"))?
-                    .control_action
-                    .take();
-                if matches!(action, Some(kroma::plugins::HostControlAction::Cancel)) {
-                    runtime.agent.cancel_goal()?;
-                } else {
-                    runtime.agent.cancel()?;
-                }
+                runtime.agent.cancel()?;
                 Ok(("cancelled".to_owned(), None))
             }
         };
@@ -1647,7 +1614,7 @@ async fn send_message(
     });
     // Always restore the Agent to the host, even when a UI-only snapshot
     // fails (for example because the usage ledger is temporarily unreadable).
-    let snapshot = desktop_host::snapshot(&runtime.agent);
+    let snapshot = desktop_host::snapshot_with_plugins(&runtime.agent, Some(&runtime.plugins));
     let last = events.drain();
     if !last.is_empty() {
         let _ = channel.send(json!({"kind":"batch","events":last}));
@@ -1661,12 +1628,16 @@ async fn send_message(
         host.runtime = Some(runtime);
         host.cancel = None;
         host.task_input = host.runtime.as_ref().map(|r| r.agent.task_input());
+        plugins_ui::sync_active_plugins(&mut host);
+        // The turn is over: a question nobody can answer any more is dropped.
+        host.asker.set_channel(None);
+        host.asker.clear_pending();
     }
     let snapshot = snapshot.map_err(ui_error)?;
     Ok(json!({"result":result,"snapshot":snapshot,"sessions":sessions,"session_groups":groups}))
 }
 
-fn reload_plugins(host: &mut Host) -> Result<()> {
+pub(crate) fn reload_plugins(host: &mut Host) -> Result<()> {
     let Some(runtime) = host.runtime.as_mut() else {
         return Ok(());
     };
@@ -1678,31 +1649,11 @@ fn reload_plugins(host: &mut Host) -> Result<()> {
     )?;
     let sink: Arc<dyn EventSink> = host.events.clone();
     let events = next.wrap_events(Some(sink))?;
-    // The only fallible task-control transition happens before swapping
-    // the active plugin catalog, tools and events.
-    let next_control = next.task_control();
-    if let Some(control) = next_control.clone() {
-        runtime.agent.attach_task_control(control)?;
-    }
     runtime.agent.reload_extensions(tools, prompt, events);
     runtime.plugins = next;
-    if next_control.is_none() {
-        runtime.agent.detach_task_control();
-    }
-    host.control_command = runtime.agent.task_control_command_name();
-    host.control_host = runtime.plugins.task_control();
     host.plugins_fingerprint = PluginCatalog::source_fingerprint(&host.project);
+    plugins_ui::sync_active_plugins(host);
     Ok(())
-}
-
-fn parse_setting(value: Value) -> Result<toml::Value> {
-    match value {
-        Value::String(text) => Ok(toml::Value::String(text)),
-        Value::Bool(v) => Ok(toml::Value::Boolean(v)),
-        Value::Number(n) if n.is_i64() => Ok(toml::Value::Integer(n.as_i64().unwrap())),
-        Value::Number(n) => Ok(toml::Value::Float(n.as_f64().context("bad number")?)),
-        _ => bail!("setting must be a string, number or boolean"),
-    }
 }
 
 #[cfg(test)]
@@ -1724,96 +1675,6 @@ async fn trust_project_mcp(state: State<'_, DesktopState>) -> std::result::Resul
     };
     let path = mcp::trust_project_mcp(&project).map_err(ui_error)?;
     Ok(json!({"path":path,"trusted":true}))
-}
-
-/// Everything an interface needs to draw plugin-declared presentation without
-/// knowing any plugin by name: tool labels, the activity indicator, declared
-/// status text, Alt+letter shortcuts and the panels each plugin offers.
-fn plugin_presentation_value(plugins: &kroma::plugins::PluginCatalog) -> Value {
-    json!({
-        "tool_labels": plugins.ui_tool_labels().unwrap_or_default(),
-        "activity_frames": plugins.ui_activity_frames().unwrap_or_default(),
-        "statuses": plugins.ui_statuses(),
-        "shortcuts": plugins.ui_shortcuts().unwrap_or_default().into_iter()
-            .map(|(key, command)| json!({"key": key.to_string(), "command": command}))
-            .collect::<Vec<_>>(),
-        "panels": plugins.ui_panels().into_iter()
-            .map(|(id, title, dynamic)| json!({"id": id, "title": title, "dynamic": dynamic}))
-            .collect::<Vec<_>>(),
-        // Declared theme slots and composer height, so a plugin looks the same
-        // on every interface instead of only in the terminal.
-        "colors": plugins.ui_colors().unwrap_or_default(),
-        "composer_max_rows": plugins.ui_layout().ok().flatten().and_then(|layout| layout.composer_max_rows),
-    })
-}
-
-#[tauri::command]
-async fn plugin_presentation(state: State<'_, DesktopState>) -> std::result::Result<Value, String> {
-    with_host(state, |host| match host.runtime.as_ref() {
-        Some(runtime) => Ok(plugin_presentation_value(&runtime.plugins)),
-        None => Ok(json!({
-            "tool_labels": {}, "activity_frames": [], "statuses": [],
-            "shortcuts": [], "panels": [],
-        })),
-    })
-    .await
-}
-
-/// The panel body is produced by the plugin itself (`title\n\nbody`), exactly as
-/// the terminal interface receives it.
-#[tauri::command]
-async fn plugin_panel(
-    state: State<'_, DesktopState>,
-    id: String,
-) -> std::result::Result<String, String> {
-    with_host(state, move |host| {
-        let runtime = host.runtime.as_ref().context("Connect a model first")?;
-        runtime.plugins.ui_panel(&id)
-    })
-    .await
-}
-
-#[tauri::command]
-async fn plugin_action(
-    state: State<'_, DesktopState>,
-    action: String,
-    id: Option<String>,
-    path: Option<String>,
-    key: Option<String>,
-    value: Option<Value>,
-) -> std::result::Result<Value, String> {
-    with_host(state, move |host| {
-        require_idle(host)?;
-        let catalog = PluginCatalog::discover(&host.project)?;
-        let plugin = id.as_deref().unwrap_or("");
-        let message = match action.as_str() {
-            "enable" => catalog.set_enabled(plugin, true),
-            "disable" => catalog.set_enabled(plugin, false),
-            "install" => {
-                let source = validate_plugin_source(Path::new(
-                    path.as_deref().context("Plugin directory required")?,
-                ))?;
-                catalog.install(&source)
-            }
-            "uninstall" => catalog.uninstall(plugin),
-            "set" => catalog.set_config_value(
-                plugin,
-                key.as_deref().context("Setting key required")?,
-                value.map(parse_setting).transpose()?,
-            ),
-            "reload" => Ok("Reloading desktop plugins".to_owned()),
-            _ => bail!("unknown plugin action"),
-        }?;
-        let reload = reload_plugins(host);
-        let restart_required = reload.is_err();
-        Ok(json!({
-            "message":message,
-            "restart_required":restart_required,
-            "warning":reload.err().map(|e|e.to_string()),
-            "plugins":PluginCatalog::discover(&host.project)?.summaries()?,
-        }))
-    })
-    .await
 }
 
 /// The WebView only ever shows the app itself. A remote http(s) navigation is
@@ -1845,6 +1706,11 @@ pub fn run() {
                 .build(),
         )
         .manage(DesktopState::new())
+        .setup(|app| {
+            let state = app.state::<DesktopState>();
+            plugins_ui::attach_app(&state, app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             bootstrap,
             search_sessions,
@@ -1875,9 +1741,14 @@ pub fn run() {
             cancel_task,
             steer_task,
             send_message,
-            plugin_action,
-            plugin_presentation,
-            plugin_panel,
+            plugins_ui::plugin_action,
+            plugins_ui::plugin_presentation,
+            plugins_ui::plugin_panel,
+            plugins_ui::plugin_panel_view,
+            plugins_ui::plugin_desktop_bundle,
+            plugins_ui::plugin_ui_action,
+            plugins_ui::plugin_ui_message,
+            plugins_ui::answer_question,
             trust_project_mcp,
             open_external
         ])
@@ -1905,6 +1776,39 @@ mod tests {
         assert!(ensure_session_target("session-a", "session-b").is_err());
         assert!(ensure_session_target("", "").is_err());
         assert!(ensure_session_target("unknown", "unknown").is_err());
+    }
+
+    #[test]
+    fn an_unknown_question_id_is_never_answered() {
+        let asker = DesktopAsker::default();
+        assert!(!asker.answer(7, kroma::tools::AskAnswer::Dismissed));
+    }
+
+    #[test]
+    fn a_finished_turn_drops_its_open_question() {
+        let asker = DesktopAsker::default();
+        let (sender, wait) = tokio::sync::oneshot::channel();
+        asker.pending.lock().expect("pending map").insert(1, sender);
+        assert!(asker.answer(
+            1,
+            kroma::tools::AskAnswer::Answered {
+                picked: vec!["Postgres".into()],
+                typed: None,
+            }
+        ));
+        assert!(matches!(
+            wait.blocking_recv(),
+            Ok(kroma::tools::AskAnswer::Answered { picked, .. }) if picked == ["Postgres"]
+        ));
+
+        let (sender, wait) = tokio::sync::oneshot::channel();
+        asker.pending.lock().expect("pending map").insert(2, sender);
+        asker.clear_pending();
+        assert!(
+            wait.blocking_recv().is_err(),
+            "a dropped question has no answer"
+        );
+        assert!(!asker.answer(2, kroma::tools::AskAnswer::Dismissed));
     }
 
     #[test]
@@ -1949,6 +1853,7 @@ mod tests {
 
     #[test]
     fn simple_plugin_settings_preserve_typed_values() {
+        use plugins_ui::parse_setting;
         assert_eq!(
             parse_setting(json!(true)).unwrap(),
             toml::Value::Boolean(true)
@@ -2074,10 +1979,11 @@ mod tests {
             events: Arc::new(DesktopEvents::default()),
             cancel: None,
             task_input: None,
-            control_command: None,
-            control_host: None,
-            control_action: None,
             plugins_fingerprint: 0,
+            asker: Arc::new(DesktopAsker::default()),
+            app_handle: None,
+            ui_forwarder: None,
+            active_plugins: None,
         }
     }
 
@@ -2177,6 +2083,7 @@ mod tests {
 
     #[test]
     fn plugin_install_requires_a_real_manifest_and_refuses_symlinks() {
+        use plugins_ui::validate_plugin_source;
         let root = scratch_dir("plugin");
         let good = root.join("good");
         let empty = root.join("empty");

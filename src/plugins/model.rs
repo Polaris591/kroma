@@ -622,7 +622,7 @@ pub(super) struct CapabilityWorker {
 fn last_user_task(messages: &[Message]) -> Option<(String, usize, String)> {
     let index = messages
         .iter()
-        .rposition(crate::task_control::is_actual_user_message)?;
+        .rposition(crate::protocol::is_actual_user_message)?;
     let content = messages[index].content.as_deref().unwrap_or("").trim();
     if content.is_empty() {
         return None;
@@ -638,7 +638,7 @@ fn with_packs(messages: &[Message], rendered: &str) -> Option<Vec<Message>> {
     let mut view = messages.to_vec();
     let message = view
         .iter_mut()
-        .rfind(|message| crate::task_control::is_actual_user_message(message))?;
+        .rfind(|message| crate::protocol::is_actual_user_message(message))?;
     message.content = Some(match message.content.as_deref() {
         Some(existing) if !existing.trim().is_empty() => {
             format!("{existing}\n\n{rendered}")
@@ -654,7 +654,7 @@ fn recent_users(messages: &[Message]) -> Vec<String> {
     for message in messages
         .iter()
         .rev()
-        .filter(|message| crate::task_control::is_actual_user_message(message))
+        .filter(|message| crate::protocol::is_actual_user_message(message))
     {
         if recent.len() >= SUMMARY_MAX_USERS {
             break;
@@ -1272,7 +1272,7 @@ mod tests {
     fn control_note(text: &str) -> Message {
         let mut note = Message::new("user", text);
         note.provider_items = Some(vec![json!({
-            "type": crate::task_control::CONTROL_NOTE_ITEM_TYPE,
+            "type": "kroma_turn_gate",
             "source": "host"
         })]);
         note

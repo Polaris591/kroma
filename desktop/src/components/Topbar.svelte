@@ -5,6 +5,7 @@
   import ModelPicker from './ModelPicker.svelte';
   import ThinkingPicker from './ThinkingPicker.svelte';
 
+  import { desktopSurfaces } from '../lib/plugin-ui';
   export let tab: Tab = 'chat';
   export let currentSessionName = '';
 
@@ -56,7 +57,8 @@
         {/if}
       {/if}
     {:else if tab === 'settings'}<Settings2 size={16}/> 模型与设置
-    {:else}<Puzzle size={16}/> 插件管理{/if}
+    {:else if tab === 'plugins'}<Puzzle size={16}/> 插件管理
+    {:else}{@const pluginTabId = tab.slice('plugin:'.length)}{@const surface = $desktopSurfaces.find(s => s.plugin_id === pluginTabId)}<Puzzle size={16}/> {surface?.title || pluginTabId}{/if}
   </div>
   <div class="topbar-right">
     {#if tab === 'chat'}

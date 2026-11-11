@@ -3,7 +3,6 @@ import {
 } from '@tauri-apps/plugin-notification';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { Message } from './api';
-import type { GoalState } from './goal';
 import { taskNotification } from './notify';
 
 /** Desktop-only duty: a long task must reach the user when they are looking at
@@ -12,9 +11,8 @@ export async function announceTaskResult(options: {
   status: string;
   sessionName: string;
   messages: Message[];
-  goal?: GoalState | null;
 }): Promise<void> {
-  const payload = taskNotification(options.status, options.sessionName, options.messages, options.goal);
+  const payload = taskNotification(options.status, options.sessionName, options.messages);
   if (!payload) return;
   let focused = true;
   try { focused = await getCurrentWindow().isFocused(); }

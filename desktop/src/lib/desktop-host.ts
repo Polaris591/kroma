@@ -51,7 +51,6 @@ export interface DesktopHost {
   expandProject(project: string): void;
   showError(failure: unknown): void;
   toast(message: string): void;
-  resetGoal(): void;
   syncHistory(): void;
   restoreDraft(): void;
   restoreFollowups(): void;

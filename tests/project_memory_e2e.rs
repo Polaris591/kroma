@@ -265,7 +265,7 @@ async fn zero_maintenance_flow_is_automatic_persistent_and_isolated() -> Result<
         .content
         .as_deref()
         .unwrap_or("")
-        .contains("Remember durable project preferences"));
+        .contains("Project memory is automatic"));
     let manifest: toml::Value = toml::from_str(&fs::read_to_string(
         user.join("project-memory/plugin.toml"),
     )?)?;

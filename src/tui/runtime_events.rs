@@ -67,14 +67,6 @@ pub enum UiEvent {
         chunk: String,
     },
     SessionTitleUpdated(String),
-    ControlStatus {
-        owner: String,
-        id: String,
-        revision: u64,
-        status: String,
-        reason: String,
-        summary: String,
-    },
     TaskFinished,
 }
 
@@ -169,23 +161,12 @@ impl crate::events::EventSink for UiSink {
                 stream: stream.to_owned(),
                 chunk: chunk.to_owned(),
             }),
-            RuntimeEvent::TaskControlChanged {
-                command: _,
-                owner,
-                id,
-                revision,
-                status,
-                reason,
-                summary,
-            } => Some(UiEvent::ControlStatus {
-                owner: owner.to_owned(),
-                id: id.to_owned(),
-                revision,
-                status: status.to_owned(),
-                reason: reason.to_owned(),
-                summary: summary.to_owned(),
-            }),
             RuntimeEvent::TaskFinished { .. } => Some(UiEvent::TaskFinished),
+            // The user must always be able to see which plugin kept the turn
+            // open; a stop can then be explained, not guessed.
+            RuntimeEvent::TurnGateContinued { plugin, feedback } => Some(UiEvent::Warning(
+                format!("{plugin}: 插件要求继续这一轮：{feedback}"),
+            )),
             _ => None,
         };
         if let Some(message) = message {

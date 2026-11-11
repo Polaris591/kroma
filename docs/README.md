@@ -35,7 +35,7 @@ These documents are retained for context, and some record proposals, experiments
 - [Model catalog](model-catalog.md)
 - [Project Memory](project-memory.md) — current behavior, original-wording rules, user controls and storage
 - [Subagents](subagents.md) — execution-kernel design reference and the archived 1.0 contract
-- [Goal plugin design](goal-plugin-design.md) — R1 contracts and recovery; the plugin, host controller and CLI/TUI/Desktop dispatch are implemented and covered by the 12 goal end-to-end tests in `tests/task_control_e2e.rs`, while release validation (a real-provider end-to-end run and a deployment rehearsal) is still pending
+- Goal: the core has no goal-specific code; `examples/plugins/goal` owns its own per-session state and uses only `task`, `before_turn_end` and `ui.status` (see its README and `node --test goal.test.js`)
 - [Historical deployment notes](promotion-linux-do.md)
 - [Plugin roadmap](../PLUGIN_ROADMAP.md), [benchmark archive](../benchmarks/README.md) and [review archive](../reviews/README.md)
 

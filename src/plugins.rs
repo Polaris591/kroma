@@ -6,45 +6,37 @@ mod context;
 #[cfg(test)]
 use approval::PluginScanLimits;
 use approval::{PluginCodeScan, PLUGIN_SCAN_LIMITS};
+mod manifest;
+#[cfg(test)]
+use manifest::{empty_parameters, scaffold_in, PLUGIN_API_VERSION_V1};
+use manifest::{parse_alt_shortcut, scaffold, valid_id};
+pub use manifest::{
+    ModelOverride, PluginCommandSpec, PluginContextSpec, PluginDesktopUiSpec, PluginLayoutSpec,
+    PluginManifest, PluginModelSpec, PluginToolSpec, PluginUiShortcut, PluginUiSpec,
+};
 mod model;
 mod stream;
-mod task_control;
-/// V1 plugins keep the original envelope and frame contract byte for byte.
-const PLUGIN_API_VERSION_V1: u32 = 1;
-/// V2 only changes the worker protocol version and enables the two host calls.
-const PLUGIN_API_VERSION_V2: u32 = 2;
+pub mod ui;
+pub use ui::{
+    CustomTuiChannel, CustomTuiClientEvent, CustomTuiFrameUpdate, CustomTuiHost, CustomTuiSpan,
+    CustomTuiSpec, PluginLivePanel, PluginUiAction, PluginUiBus, PluginUiEvent, PluginWidget,
+    UiScope, WidgetPlacement, MAX_STATUS_CHARS,
+};
 /// Host memory calls are fail-open and bounded apart from the 120-second
 /// tool/hook timeout, so a slow plugin cannot stall the model request.
 const PLUGIN_MEMORY_CALL_TIMEOUT: Duration = Duration::from_secs(2);
 /// Bound on the verified user turn handed to a plugin that asks for it.
 const TRUSTED_USER_CHARS: usize = 4096;
-// New generic lifecycle capabilities; legacy V2 names remain accepted.
-const PLUGIN_CAPABILITIES: [&str; 5] = [
-    "provide_context",
-    "task_finished",
-    "request_context",
-    "task_summary",
-    "task_control",
-];
 const MAX_INSTALL_ENTRIES: usize = 20_000;
 const MAX_INSTALL_BYTES: u64 = 64 * 1024 * 1024;
 
-fn default_plugin_api_version() -> u32 {
-    PLUGIN_API_VERSION_V1
-}
-
-use self::task_control::{Decision, PluginTaskControl};
-use crate::task_control::{
-    ControlOp, ControlProposal, ControlScope, ControlUpdate, ExecutionReceipt, FactIndex,
-    FinishFacts, TaskControlSnapshot, TaskController, TaskStatus,
-};
 use crate::{
-    commands::{CommandRegistry, CommandReply, CommandSession},
+    commands::{CommandAction, CommandRegistry, CommandReply},
     context::{ContextConfig, ContextFactory},
     events::{EventSink, RuntimeEvent},
     model::ModelBackend,
     prompt::PromptComposer,
-    protocol::{Message, ToolCall},
+    protocol::ToolCall,
     provider::ModelClient,
     tools::{
         AskTool, HookFuture, Tool, ToolContext, ToolFuture, ToolInterceptor, ToolRegistry,
@@ -70,6 +62,30 @@ use std::{
 
 const PLUGIN_CALL_TIMEOUT: Duration = Duration::from_secs(120);
 const PLUGIN_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+/// Host calls a plugin may make while one request is in flight.
+const MAX_HOST_CALLS_PER_REQUEST: usize = 64;
+/// Terminal width a panel is laid out for before the TUI wraps it again.
+const PANEL_WIDTH: usize = 76;
+
+/// Panels reach the terminal as one string: a title, a blank line, then the
+/// rendered blocks. Structured output stays available through
+/// `ui_panel_blocks_async` for frontends that draw widgets.
+fn render_panel(title: &str, content: &str) -> String {
+    let blocks = crate::panel::parse(content);
+    let body = crate::panel::render_text(&blocks, PANEL_WIDTH);
+    format!("{title}\n\n{}", body.join("\n"))
+}
+
+/// The same panel as structured blocks plus its terminal rendering, so a
+/// frontend picks whichever it can draw.
+fn panel_json(title: &str, content: &str) -> Value {
+    let blocks = crate::panel::parse(content);
+    json!({
+        "title": title,
+        "blocks": crate::panel::to_json(&blocks),
+        "text": crate::panel::render_text(&blocks, PANEL_WIDTH).join("\n")
+    })
+}
 
 /// Optional whole-tool deadline for long-running plugin tools. Zero or unset
 /// preserves the documented unlimited behavior; hooks and ordinary calls keep
@@ -102,6 +118,20 @@ fn optional_seconds_env(name: &str) -> Option<Duration> {
     }
 }
 
+/// `KROMA_PLUGINS=off` disables every plugin for this process. A subagent
+/// child uses it so it starts with no plugin prompts, processes or state; the
+/// subagents plugin can opt a child back in with its own setting.
+fn plugins_disabled() -> bool {
+    env::var("KROMA_PLUGINS").is_ok_and(|value| plugins_off(&value))
+}
+
+fn plugins_off(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "off" | "false" | "none"
+    )
+}
+
 /// Opt-in minimum-privilege mode for plugin processes. Default behavior is
 /// unchanged because documented plugins may read a provider key from the host
 /// environment. `KROMA_PLUGIN_ISOLATE_ENV=1` removes credential-shaped values.
@@ -128,620 +158,6 @@ fn plugin_env_secret(name: &str) -> bool {
         || upper.ends_with("_PWD")
         || upper.ends_with("_COOKIE")
         || upper.ends_with("_CREDENTIALS")
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct PluginManifest {
-    #[serde(default = "default_plugin_api_version")]
-    pub api_version: u32,
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub version: String,
-    #[serde(default)]
-    pub description: String,
-    pub command: Option<String>,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub prompt: Option<String>,
-    #[serde(default)]
-    pub replace_prompt: Option<String>,
-    #[serde(default)]
-    pub hooks: Vec<String>,
-    /// V2 host capabilities; V1 manifests must leave this empty.
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-    #[serde(default)]
-    pub context: Option<PluginContextSpec>,
-    #[serde(default)]
-    pub model: Option<PluginModelSpec>,
-    #[serde(default)]
-    pub ui: Option<PluginUiSpec>,
-    #[serde(default)]
-    pub settings: BTreeMap<String, toml::Value>,
-    #[serde(default)]
-    pub tools: Vec<PluginToolSpec>,
-    #[serde(default)]
-    pub commands: Vec<PluginCommandSpec>,
-    #[serde(default)]
-    pub events: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct PluginUiSpec {
-    /// Optional terminal-safe Alt+letter bindings for this plugin's commands.
-    #[serde(default)]
-    pub shortcuts: Vec<PluginUiShortcut>,
-    /// Host-rendered activity indicator, at most one enabled plugin may own it.
-    #[serde(default)]
-    pub activity_frames: Vec<String>,
-    /// Display labels for registered tool names, without changing dispatch.
-    #[serde(default)]
-    pub tool_labels: BTreeMap<String, String>,
-    #[serde(default)]
-    pub layout: Option<PluginLayoutSpec>,
-    /// Optional palette overrides rendered by the host, never raw ANSI escapes.
-    #[serde(default)]
-    pub colors: BTreeMap<String, String>,
-    #[serde(default)]
-    pub status: String,
-    #[serde(default)]
-    pub panel_title: String,
-    #[serde(default)]
-    pub panel_text: String,
-    /// On-demand panel body returned by the plugin process, not TUI polling.
-    #[serde(default)]
-    pub dynamic_panel: bool,
-}
-
-/// Minimal host-owned layout knobs; plugins never receive raw terminal control.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct PluginLayoutSpec {
-    #[serde(default)]
-    pub composer_max_rows: Option<u16>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct PluginUiShortcut {
-    pub key: String,
-    pub command: String,
-}
-
-fn parse_alt_shortcut(key: &str) -> Option<char> {
-    let value = key.to_ascii_lowercase();
-    let letter = value.strip_prefix("alt+")?;
-    (letter.len() == 1 && letter.as_bytes()[0].is_ascii_alphabetic())
-        .then(|| letter.as_bytes()[0] as char)
-}
-
-pub type ModelOverride = (Arc<dyn ModelBackend>, ContextConfig, String);
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct PluginModelSpec {
-    pub model: String,
-    #[serde(default)]
-    pub base_url: String,
-    #[serde(default = "default_protocol")]
-    pub protocol: String,
-    #[serde(default)]
-    pub streaming: bool,
-    /// Provider-advertised tiers; an empty list permits custom levels.
-    #[serde(default)]
-    pub thinking_levels: Vec<String>,
-    #[serde(default)]
-    pub reasoning_level: Option<String>,
-    pub api_key_env: Option<String>,
-    pub context_window: usize,
-    pub output_reserve: usize,
-    /// Explicit vision support for process model adapters. Unknown by default.
-    #[serde(default)]
-    pub image_input: Option<bool>,
-}
-fn default_protocol() -> String {
-    "chat".into()
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct PluginContextSpec {
-    #[serde(default = "context_version")]
-    pub version: u32,
-}
-
-fn context_version() -> u32 {
-    1
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct PluginToolSpec {
-    pub name: String,
-    pub description: String,
-    #[serde(default)]
-    pub streaming: bool,
-    #[serde(default)]
-    pub invalidates_context: bool,
-    #[serde(default)]
-    pub requires_user_context: bool,
-    #[serde(default)]
-    pub requires_user_attachments: bool,
-    /// Optional whole-call deadline for this tool, enforced by the host for
-    /// streaming and non-streaming calls alike. A global
-    /// `KROMA_PLUGIN_TOOL_TIMEOUT_SECS` value caps it when smaller.
-    #[serde(default)]
-    pub timeout_secs: Option<u64>,
-    #[serde(default)]
-    pub replace: bool,
-    /// `Some("ask_user")` means the host itself runs this tool: no process is
-    /// started and the host owns the argument shape.
-    #[serde(default)]
-    pub host: Option<String>,
-    #[serde(default = "empty_parameters")]
-    pub parameters: Value,
-}
-
-fn empty_parameters() -> Value {
-    json!({"type": "object", "properties": {}})
-}
-
-/// Admit the small, standard JSON Schema subset accepted by tool providers.
-/// Reject structurally invalid declarations at discovery rather than letting
-/// one plugin's malformed schema break every model request. This is a shape
-/// check, not a second JSON Schema interpreter or a runtime argument filter.
-fn validate_tool_schema(schema: &Value) -> Result<()> {
-    fn walk(value: &Value, depth: usize, remaining: &mut usize) -> Result<()> {
-        if depth > 12 || *remaining == 0 {
-            bail!("tool JSON schema exceeds the supported complexity budget");
-        }
-        *remaining -= 1;
-        let map = value.as_object().context("tool schema must be an object")?;
-        if let Some(kind) = map.get("type") {
-            let check = |name: &str| {
-                matches!(
-                    name,
-                    "object" | "array" | "string" | "number" | "integer" | "boolean" | "null"
-                )
-            };
-            if !kind.as_str().is_some_and(check) {
-                bail!("tool schema has an unsupported type");
-            }
-        }
-        if let Some(props) = map.get("properties") {
-            let props = props
-                .as_object()
-                .context("schema properties must be an object")?;
-            if map.get("type").and_then(Value::as_str) != Some("object") {
-                bail!("schema properties require type=object");
-            }
-            for (_, child) in props {
-                walk(child, depth + 1, remaining)?;
-            }
-        }
-        if let Some(required) = map.get("required") {
-            let required = required
-                .as_array()
-                .context("schema required must be an array")?;
-            let props = map
-                .get("properties")
-                .and_then(Value::as_object)
-                .context("schema required needs properties")?;
-            let mut names = BTreeSet::new();
-            for item in required {
-                let name = item
-                    .as_str()
-                    .context("schema required keys must be strings")?;
-                if !props.contains_key(name) || !names.insert(name) {
-                    bail!("schema required key is absent or duplicated");
-                }
-            }
-        }
-        if let Some(items) = map.get("items") {
-            if map.get("type").and_then(Value::as_str) != Some("array") {
-                bail!("schema items require type=array");
-            }
-            walk(items, depth + 1, remaining)?;
-        }
-        if let Some(extra) = map.get("additionalProperties") {
-            if !extra.is_boolean() {
-                walk(extra, depth + 1, remaining)?;
-            }
-        }
-        if let Some(variants) = map.get("anyOf").or_else(|| map.get("oneOf")) {
-            let variants = variants
-                .as_array()
-                .filter(|items| !items.is_empty())
-                .context("schema union must be a nonempty array")?;
-            for child in variants {
-                walk(child, depth + 1, remaining)?;
-            }
-        }
-        if let Some(values) = map.get("enum") {
-            if values.as_array().is_none_or(Vec::is_empty) {
-                bail!("schema enum must be a nonempty array");
-            }
-        }
-        Ok(())
-    }
-    if schema.get("type").and_then(Value::as_str) != Some("object") {
-        bail!("tool parameters must declare type=object");
-    }
-    walk(schema, 0, &mut 256)
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct PluginCommandSpec {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-}
-
-impl PluginManifest {
-    fn has_capability(&self, capability: &str) -> bool {
-        self.capabilities.iter().any(|item| item == capability)
-    }
-
-    /// Capabilities are a V2-only host contract and always need a process.
-    fn validate_capabilities(&self) -> Result<()> {
-        if self.capabilities.is_empty() {
-            return Ok(());
-        }
-        if self.api_version != PLUGIN_API_VERSION_V2 {
-            bail!(
-                "plugin '{}' capabilities require api_version = {}",
-                self.id,
-                PLUGIN_API_VERSION_V2
-            );
-        }
-        if self
-            .command
-            .as_deref()
-            .is_none_or(|cmd| cmd.trim().is_empty())
-        {
-            bail!("plugin '{}' capabilities require a command", self.id);
-        }
-        let mut seen = BTreeSet::new();
-        for capability in &self.capabilities {
-            if !PLUGIN_CAPABILITIES.contains(&capability.as_str()) {
-                bail!(
-                    "plugin '{}' declares unsupported capability '{}'",
-                    self.id,
-                    capability
-                );
-            }
-            if !seen.insert(capability.as_str()) {
-                bail!(
-                    "plugin '{}' declares capability '{}' twice",
-                    self.id,
-                    capability
-                );
-            }
-        }
-        Ok(())
-    }
-
-    fn read(directory: &Path) -> Result<Self> {
-        let path = directory.join("plugin.toml");
-        if !path.is_file() {
-            let nested = directory.join("plugin").join("plugin.toml");
-            if nested.is_file() {
-                bail!(
-                    "plugin manifest is under {}. Use that directory for `kroma plugins check` or `kroma plugins install`",
-                    nested.display()
-                );
-            }
-        }
-        let text =
-            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        let manifest: Self =
-            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        manifest.validate()?;
-        Ok(manifest)
-    }
-
-    fn validate(&self) -> Result<()> {
-        if !matches!(
-            self.api_version,
-            PLUGIN_API_VERSION_V1 | PLUGIN_API_VERSION_V2
-        ) {
-            bail!(
-                "plugin '{}' requires API version {}; Kroma supports versions {} and {}",
-                self.id,
-                self.api_version,
-                PLUGIN_API_VERSION_V1,
-                PLUGIN_API_VERSION_V2
-            );
-        }
-        self.validate_capabilities()?;
-        if !valid_id(&self.id) {
-            bail!("plugin id must contain only ASCII letters, digits, '-' or '_'");
-        }
-        if self.name.trim().is_empty() {
-            bail!("plugin '{}' has no name", self.id);
-        }
-        if self.tools.is_empty()
-            && self.commands.is_empty()
-            && self.events.is_empty()
-            && self.hooks.is_empty()
-            && self.capabilities.is_empty()
-            && self.context.is_none()
-            && self.model.is_none()
-            && self.ui.is_none()
-            && self
-                .replace_prompt
-                .as_deref()
-                .unwrap_or("")
-                .trim()
-                .is_empty()
-            && self.prompt.as_deref().unwrap_or("").trim().is_empty()
-        {
-            bail!("plugin '{}' has no contributions", self.id);
-        }
-        // Host-run tools execute in this process, so a plugin made only of
-        // them is declarative and needs no command.
-        if (!self.commands.is_empty()
-            || !self.events.is_empty()
-            || !self.hooks.is_empty()
-            || self.context.is_some()
-            || self
-                .model
-                .as_ref()
-                .is_some_and(|model| model.protocol == "plugin")
-            || self.tools.iter().any(|tool| tool.host.is_none()))
-            && self
-                .command
-                .as_deref()
-                .is_none_or(|cmd| cmd.trim().is_empty())
-        {
-            bail!(
-                "plugin '{}' needs a command to run tools or commands",
-                self.id
-            );
-        }
-        let mut names = BTreeSet::new();
-        for tool in &self.tools {
-            if !valid_tool_name(&tool.name)
-                || tool.description.trim().is_empty()
-                || !tool.parameters.is_object()
-            {
-                bail!("plugin '{}' has an invalid tool '{}'", self.id, tool.name);
-            }
-            validate_tool_schema(&tool.parameters)
-                .with_context(|| format!("plugin '{}' tool '{}'", self.id, tool.name))?;
-            if !names.insert(tool.name.clone()) {
-                bail!("plugin '{}' declares tool '{}' twice", self.id, tool.name);
-            }
-            if let Some(host) = tool.host.as_deref() {
-                if host != "ask_user" {
-                    bail!(
-                        "plugin '{}' tool '{}' names an unknown host mechanism '{}'",
-                        self.id,
-                        tool.name,
-                        host
-                    );
-                }
-                if tool.streaming
-                    || tool.invalidates_context
-                    || tool.requires_user_context
-                    || tool.requires_user_attachments
-                    || tool.replace
-                    || tool.timeout_secs.is_some()
-                    || tool.parameters != empty_parameters()
-                {
-                    bail!(
-                        "plugin '{}' tool '{}' is run by the host and takes only a name and description",
-                        self.id,
-                        tool.name
-                    );
-                }
-            }
-            if tool
-                .timeout_secs
-                .is_some_and(|secs| !(1..=86_400).contains(&secs))
-            {
-                bail!(
-                    "plugin '{}' tool '{}' has an invalid timeout_secs; use 1..=86400",
-                    self.id,
-                    tool.name
-                );
-            }
-        }
-        names.clear();
-        for command in &self.commands {
-            if !command.name.starts_with('/') || !valid_tool_name(&command.name[1..]) {
-                bail!(
-                    "plugin '{}' has an invalid slash command '{}'",
-                    self.id,
-                    command.name
-                );
-            }
-            if !names.insert(command.name.clone()) {
-                bail!(
-                    "plugin '{}' declares command '{}' twice",
-                    self.id,
-                    command.name
-                );
-            }
-        }
-        if let Some(model) = &self.model {
-            ContextConfig::with_output_reserve(model.context_window, model.output_reserve)?;
-            if model.protocol != "plugin"
-                && (!model.thinking_levels.is_empty()
-                    || model.reasoning_level.is_some()
-                    || model.image_input.is_some())
-            {
-                bail!(
-                    "plugin '{}' custom model capabilities require protocol='plugin'",
-                    self.id
-                );
-            }
-            let mut levels = BTreeSet::new();
-            if model.thinking_levels.len() > 32
-                || model
-                    .thinking_levels
-                    .iter()
-                    .any(|tier| !valid_id(tier) || tier.len() > 32 || !levels.insert(tier.as_str()))
-            {
-                bail!(
-                    "plugin '{}' has invalid or duplicate thinking levels",
-                    self.id
-                );
-            }
-            if let Some(level) = &model.reasoning_level {
-                if !valid_id(level)
-                    || (!model.thinking_levels.is_empty() && !model.thinking_levels.contains(level))
-                {
-                    bail!(
-                        "plugin '{}' default reasoning level is not supported",
-                        self.id
-                    );
-                }
-            }
-            if model.model.trim().is_empty()
-                || (model.protocol != "plugin" && model.base_url.trim().is_empty())
-                || (model.streaming && model.protocol != "plugin")
-            {
-                bail!("plugin '{}' has invalid model configuration", self.id);
-            }
-        }
-        if self
-            .context
-            .as_ref()
-            .is_some_and(|context| context.version == 0)
-        {
-            bail!("plugin '{}' context version cannot be zero", self.id);
-        }
-        for hook in &self.hooks {
-            if !matches!(
-                hook.as_str(),
-                "before_tool_call" | "after_tool_result" | "before_model_request"
-            ) {
-                bail!("plugin '{}' declares unsupported hook '{hook}'", self.id);
-            }
-        }
-        if let Some(ui) = &self.ui {
-            for (slot, color) in &ui.colors {
-                let hex = color.strip_prefix('#').unwrap_or(color);
-                if !matches!(
-                    slot.as_str(),
-                    "accent"
-                        | "background"
-                        | "border"
-                        | "text"
-                        | "muted"
-                        | "user"
-                        | "tool"
-                        | "code"
-                ) || hex.len() != 6
-                    || !hex.bytes().all(|ch| ch.is_ascii_hexdigit())
-                {
-                    bail!("plugin '{}' has an invalid UI color '{slot}'", self.id);
-                }
-            }
-            if let Some(layout) = &ui.layout {
-                if layout
-                    .composer_max_rows
-                    .is_some_and(|rows| !(3..=14).contains(&rows))
-                {
-                    bail!("plugin '{}' has invalid UI layout dimensions", self.id);
-                }
-            }
-            if !ui.activity_frames.is_empty()
-                && (ui.activity_frames.len() < 2
-                    || ui.activity_frames.len() > 12
-                    || ui.activity_frames.iter().any(|frame| {
-                        frame.trim().is_empty()
-                            || frame.chars().any(char::is_control)
-                            || unicode_width::UnicodeWidthStr::width(frame.as_str()) > 8
-                    }))
-            {
-                bail!(
-                    "plugin '{}' activity_frames must contain 2–12 short terminal-safe frames",
-                    self.id
-                );
-            }
-            for (tool, label) in &ui.tool_labels {
-                if !valid_tool_name(tool)
-                    || label.trim().is_empty()
-                    || label.chars().count() > 48
-                    || label.chars().any(char::is_control)
-                {
-                    bail!("plugin '{}' has an invalid tool display label", self.id);
-                }
-            }
-            if ui.dynamic_panel
-                && self
-                    .command
-                    .as_deref()
-                    .is_none_or(|cmd| cmd.trim().is_empty())
-            {
-                bail!(
-                    "plugin '{}' needs a command for its dynamic UI panel",
-                    self.id
-                );
-            }
-            let mut bindings = BTreeSet::new();
-            for shortcut in &ui.shortcuts {
-                let key = parse_alt_shortcut(&shortcut.key).ok_or_else(|| {
-                    anyhow!(
-                        "plugin '{}' shortcut '{}' must be Alt+A..Z",
-                        self.id,
-                        shortcut.key
-                    )
-                })?;
-                if !bindings.insert(key) {
-                    bail!("plugin '{}' has duplicate Alt+{key} shortcut", self.id);
-                }
-                let command = shortcut.command.split_whitespace().next().unwrap_or("");
-                if !self
-                    .commands
-                    .iter()
-                    .any(|registered| registered.name == command)
-                {
-                    bail!(
-                        "plugin '{}' shortcut must target its own slash command",
-                        self.id
-                    );
-                }
-            }
-        }
-        for name in &self.events {
-            if !matches!(
-                name.as_str(),
-                "task_started"
-                    | "task_finished"
-                    | "compaction_started"
-                    | "context_prepared"
-                    | "model_started"
-                    | "model_finished"
-                    | "model_failed"
-                    | "compaction_usage"
-                    | "tool_started"
-                    | "tool_finished"
-                    | "session_created"
-                    | "session_switched"
-                    | "session_cleared"
-                    | "session_forked"
-                    | "session_rewound"
-            ) {
-                bail!("plugin '{}' declares unsupported event '{name}'", self.id);
-            }
-        }
-        Ok(())
-    }
-}
-
-fn valid_id(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
-
-fn valid_tool_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 /// A short OS-held lock for plugins.toml read/modify/write. This lock file is
@@ -820,8 +236,8 @@ pub struct PluginCatalog {
     pub warnings: Vec<String>,
     /// Enabled plugins with unreadable manifests cannot be silently omitted.
     invalid_enabled: Vec<String>,
-    /// Unique task control owner for this process; None when disabled.
-    control: Option<Arc<TaskControlHost>>,
+    /// Per-catalog live UI state & broadcast bus (isolated across projects/tests).
+    ui_bus: Arc<PluginUiBus>,
 }
 
 #[derive(Clone)]
@@ -839,6 +255,7 @@ struct Plugin {
     transient: bool,
     worker: Arc<PluginWorker>,
     event_worker: Option<Arc<PluginWorker>>,
+    ui_worker: Arc<PluginWorker>,
 }
 
 impl Plugin {
@@ -1244,6 +661,22 @@ impl PluginCatalog {
         transient: Option<PathBuf>,
         bundled: Option<PathBuf>,
     ) -> Result<Self> {
+        let ui_bus = Arc::new(PluginUiBus::new());
+        if plugins_disabled() {
+            // A subagent child starts with no plugins: it pays no plugin
+            // prompt, starts no plugin process and inherits no plugin state.
+            return Ok(Self {
+                directory,
+                bundled,
+                state_path,
+                workdir: workdir.to_path_buf(),
+                plugins: Vec::new(),
+                transient,
+                warnings: Vec::new(),
+                invalid_enabled: Vec::new(),
+                ui_bus,
+            });
+        }
         let mut warnings = Vec::new();
         let mut invalid_enabled = Vec::new();
         let state = match PluginState::load(&state_path) {
@@ -1332,6 +765,7 @@ impl PluginCatalog {
                                 &manifest,
                                 settings,
                                 data_root.join(&manifest.id),
+                                ui_bus.clone(),
                             )
                         } else {
                             PluginWorker::unscanned(
@@ -1340,6 +774,7 @@ impl PluginCatalog {
                                 &manifest,
                                 settings,
                                 data_root.join(&manifest.id),
+                                ui_bus.clone(),
                             )
                         });
                         // Activation is one user switch, not a fingerprint
@@ -1360,6 +795,7 @@ impl PluginCatalog {
                         }
                         let event_worker =
                             (!manifest.events.is_empty()).then(|| Arc::new(worker.isolated()));
+                        let ui_worker = Arc::new(worker.isolated());
                         plugins.push(Plugin {
                             manifest,
                             enabled,
@@ -1369,6 +805,7 @@ impl PluginCatalog {
                             transient: false,
                             worker,
                             event_worker,
+                            ui_worker,
                         });
                     }
                     Err(error) => {
@@ -1419,8 +856,10 @@ impl PluginCatalog {
                 &manifest,
                 serde_json::to_value(&manifest.settings)?,
                 data_root.join(&manifest.id),
+                ui_bus.clone(),
             ));
             let event_worker = (!manifest.events.is_empty()).then(|| Arc::new(worker.isolated()));
+            let ui_worker = Arc::new(worker.isolated());
             plugins.push(Plugin {
                 manifest,
                 enabled: true,
@@ -1430,9 +869,10 @@ impl PluginCatalog {
                 transient: true,
                 worker,
                 event_worker,
+                ui_worker,
             });
         }
-        let control = build_task_control(&plugins, workdir, &mut warnings, &mut invalid_enabled);
+        sync_ui_bus(&plugins, &ui_bus);
         Ok(Self {
             directory,
             bundled,
@@ -1442,7 +882,7 @@ impl PluginCatalog {
             transient,
             warnings,
             invalid_enabled,
-            control,
+            ui_bus,
         })
     }
 
@@ -1515,6 +955,7 @@ impl PluginCatalog {
                     "has_model": plugin.manifest.model.is_some(),
                     "has_context": plugin.manifest.context.is_some(),
                     "has_ui": plugin.manifest.ui.is_some(),
+                    "has_desktop_ui": plugin.manifest.ui.as_ref().is_some_and(|ui| ui.desktop.is_some()),
                 })
             })
             .collect())
@@ -1786,9 +1227,49 @@ impl PluginCatalog {
             return Err(error);
         }
         Ok(format!(
-            "Installed '{}' (disabled). Enable with 'kroma plugins enable {}'.",
-            manifest.id, manifest.id
+            "Installed '{}' (disabled), and nothing runs until you enable it.\n\n{}\n\nEnable with 'kroma plugins enable {}'.",
+            manifest.id,
+            manifest.describe(),
+            manifest.id
         ))
+    }
+
+    /// Install from a local directory or a git URL. Remote sources are cloned
+    /// with the user's own git (no bundled credential or network stack) and
+    /// then go through exactly the same local install path, including the
+    /// manifest check and the entry/size budget.
+    pub fn install_source(&self, source: &str) -> Result<String> {
+        let Some(url) = git_source(source) else {
+            return self.install(Path::new(source));
+        };
+        let nonce = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let checkout =
+            env::temp_dir().join(format!("kroma-plugin-clone-{}-{nonce}", std::process::id()));
+        let output = Command::new("git")
+            .args(["clone", "--depth", "1"])
+            .arg(&url)
+            .arg(&checkout)
+            .output()
+            .with_context(|| {
+                format!("running git for {url}; install git or pass a local plugin directory")
+            })?;
+        if !output.status.success() {
+            let _ = fs::remove_dir_all(&checkout);
+            let reason = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "git clone {url} failed: {}",
+                reason.trim().lines().last().unwrap_or("no diagnostic")
+            );
+        }
+        let manifest_dir = find_manifest_directory(&checkout).inspect_err(|_| {
+            let _ = fs::remove_dir_all(&checkout);
+        })?;
+        let result = self.install(&manifest_dir);
+        let _ = fs::remove_dir_all(&checkout);
+        result
     }
 
     /// Validate a plugin with the same manifest/process contract used by the
@@ -1813,6 +1294,8 @@ impl PluginCatalog {
             manifest.ui.is_some()
         );
         let mut lines = vec![
+            manifest.describe(),
+            String::new(),
             format!("plugin={} name={}", manifest.id, manifest.name),
             format!(
                 "api_version={} protocol_version={}",
@@ -1851,6 +1334,7 @@ impl PluginCatalog {
             &manifest,
             serde_json::to_value(&manifest.settings)?,
             data_dir.clone(),
+            Arc::new(PluginUiBus::new()),
         ));
         let request = json!({"type":"ping", "name":"ping"});
         let reply = std::thread::spawn(move || -> Result<PluginResponse> {
@@ -1915,6 +1399,12 @@ impl PluginCatalog {
                         plugin.manifest.id
                     );
                 }
+                plugin.worker = Arc::new(plugin.worker.with_ui_bus(self.ui_bus.clone()));
+                plugin.event_worker = plugin
+                    .event_worker
+                    .as_ref()
+                    .map(|w| Arc::new(w.with_ui_bus(self.ui_bus.clone())));
+                plugin.ui_worker = Arc::new(plugin.ui_worker.with_ui_bus(self.ui_bus.clone()));
                 continue;
             };
             let same_worker = old.worker.same_definition(&plugin.worker);
@@ -1937,14 +1427,30 @@ impl PluginCatalog {
                 // definition fingerprint includes plugin-local imported JS,
                 // so a helper change invalidates reuse without node_modules.
                 plugin.worker = old.worker.clone();
+                plugin.ui_worker = old.ui_worker.clone();
                 // Event subscriptions use an isolated process; retain its
                 // state when an unrelated plugin changes during idle reload.
                 if plugin.manifest.events == old.manifest.events {
                     plugin.event_worker = old.event_worker.clone();
+                } else {
+                    plugin.event_worker = plugin
+                        .event_worker
+                        .as_ref()
+                        .map(|w| Arc::new(w.with_ui_bus(self.ui_bus.clone())));
                 }
+            } else {
+                plugin.worker = Arc::new(plugin.worker.with_ui_bus(self.ui_bus.clone()));
+                plugin.event_worker = plugin
+                    .event_worker
+                    .as_ref()
+                    .map(|w| Arc::new(w.with_ui_bus(self.ui_bus.clone())));
+                plugin.ui_worker = Arc::new(plugin.ui_worker.with_ui_bus(self.ui_bus.clone()));
             }
         }
-        next.prepare_idle_reload(base_tools, base_prompt)
+        let prepared = next.prepare_idle_reload(base_tools, base_prompt)?;
+        next.ui_bus = self.ui_bus.clone();
+        sync_ui_bus(&next.plugins, &next.ui_bus);
+        Ok(prepared)
     }
 
     /// Build a replacement plugin view without touching the running agent.
@@ -2018,11 +1524,6 @@ impl PluginCatalog {
                     plugin_errors.push(format!("{}: {error:#}", plugin.manifest.id));
                 }
             }
-            let control_channel = self
-                .control
-                .as_ref()
-                .filter(|control| control.owner() == plugin.manifest.id)
-                .map(|control| control.channel().clone());
             for tool in &plugin.manifest.tools {
                 // Host-run tools have no process to talk to: the name and the
                 // model-facing description come from the manifest, and this
@@ -2047,7 +1548,6 @@ impl PluginCatalog {
                     timeout: effective_tool_timeout(tool.timeout_secs, plugin_tool_timeout()),
                     data_dir: plugin.worker.data_dir.clone(),
                     worker: plugin.worker.clone(),
-                    control: control_channel.clone(),
                 };
                 let result = if tool.replace {
                     candidate_tools.replace(&tool.name, Arc::new(adapter))
@@ -2438,19 +1938,149 @@ impl PluginCatalog {
         Ok(labels)
     }
 
+    pub fn ui_bus(&self) -> Arc<PluginUiBus> {
+        Arc::clone(&self.ui_bus)
+    }
+
+    pub fn clear_session_ui(&self) {
+        self.ui_bus.clear_session_ui();
+    }
+
     pub fn ui_statuses(&self) -> Vec<String> {
+        self.ui_bus.statuses()
+    }
+
+    pub fn ui_widgets(&self) -> Vec<PluginWidget> {
+        self.ui_bus.widgets()
+    }
+
+    pub fn ui_desktop_surfaces(&self) -> Vec<Value> {
         self.plugins
             .iter()
             .filter(|plugin| plugin.enabled)
             .filter_map(|plugin| {
-                plugin
-                    .manifest
-                    .ui
-                    .as_ref()
-                    .map(|ui| ui.status.clone())
-                    .filter(|status| !status.trim().is_empty())
+                let desktop = plugin.manifest.ui.as_ref()?.desktop.as_ref()?;
+                let title = if desktop.title.trim().is_empty() {
+                    plugin.manifest.name.clone()
+                } else {
+                    desktop.title.clone()
+                };
+                Some(json!({
+                    "plugin_id": plugin.manifest.id,
+                    "title": title,
+                    "slot": desktop.slot,
+                    "height": desktop.height,
+                }))
             })
             .collect()
+    }
+
+    pub fn ui_desktop_bundle(&self, id: &str) -> Result<Value> {
+        let plugin = self
+            .plugins
+            .iter()
+            .find(|plugin| plugin.manifest.id == id && plugin.enabled)
+            .ok_or_else(|| anyhow!("no enabled plugin '{id}'"))?;
+        let desktop = plugin
+            .manifest
+            .ui
+            .as_ref()
+            .and_then(|ui| ui.desktop.as_ref())
+            .context("plugin has no Desktop UI surface")?;
+        let title = if desktop.title.trim().is_empty() {
+            plugin.manifest.name.clone()
+        } else {
+            desktop.title.clone()
+        };
+        let html = ui::bundle_desktop_html(
+            &plugin.worker.directory,
+            &desktop.entry,
+            &plugin.manifest.id,
+        )?;
+        Ok(json!({
+            "plugin_id": plugin.manifest.id,
+            "title": title,
+            "slot": desktop.slot,
+            "height": desktop.height,
+            "html": html,
+        }))
+    }
+
+    pub async fn ui_action_async(
+        &self,
+        plugin_id: &str,
+        widget_id: &str,
+        action_id: &str,
+        payload: Option<Value>,
+        session_id: &str,
+        archive: &Path,
+    ) -> Result<(String, Option<String>)> {
+        let plugin = self
+            .plugins
+            .iter()
+            .find(|plugin| plugin.manifest.id == plugin_id && plugin.enabled)
+            .ok_or_else(|| anyhow!("no enabled plugin '{plugin_id}'"))?;
+        if plugin
+            .manifest
+            .command
+            .as_deref()
+            .is_none_or(|cmd| cmd.trim().is_empty())
+        {
+            bail!("plugin '{plugin_id}' has no command to handle UI actions");
+        }
+        let worker = plugin.ui_worker.clone();
+        let reply = worker
+            .invoke_async(json!({
+                "type": "ui_action",
+                "widget_id": widget_id,
+                "action_id": action_id,
+                "payload": payload.unwrap_or(Value::Null),
+                "session_id": session_id,
+                "archive": archive,
+            }))
+            .await?;
+        if reply.is_error {
+            bail!("{}", reply.content);
+        }
+        Ok((reply.content, reply.task))
+    }
+
+    pub async fn ui_message_async(
+        &self,
+        plugin_id: &str,
+        payload: Value,
+        session_id: &str,
+        archive: &Path,
+    ) -> Result<Value> {
+        let plugin = self
+            .plugins
+            .iter()
+            .find(|plugin| plugin.manifest.id == plugin_id && plugin.enabled)
+            .ok_or_else(|| anyhow!("no enabled plugin '{plugin_id}'"))?;
+        if plugin
+            .manifest
+            .command
+            .as_deref()
+            .is_none_or(|cmd| cmd.trim().is_empty())
+        {
+            bail!("plugin '{plugin_id}' has no command to handle UI messages");
+        }
+        let worker = plugin.ui_worker.clone();
+        let reply = worker
+            .invoke_async(json!({
+                "type": "ui_message",
+                "payload": payload,
+                "session_id": session_id,
+                "archive": archive,
+            }))
+            .await?;
+        if reply.is_error {
+            bail!("{}", reply.content);
+        }
+        if let Ok(parsed) = serde_json::from_str::<Value>(&reply.content) {
+            return Ok(parsed);
+        }
+        Ok(json!({"content": reply.content, "task": reply.task}))
     }
 
     /// Panels an interface can offer, as `(plugin id, title, dynamic)`. The body
@@ -2512,7 +2142,44 @@ impl PluginCatalog {
         } else {
             fallback
         };
-        Ok(format!("{title}\n\n{content}"))
+        Ok(render_panel(&title, &content))
+    }
+
+    /// The same panel with real structure, for a frontend that draws widgets.
+    /// One schema serves both: the terminal uses the rendered text.
+    pub async fn ui_panel_blocks_async(&self, id: &str) -> Result<Value> {
+        let (title, fallback, dynamic, worker) = self.panel_details(id)?;
+        let content = if dynamic {
+            let result = worker
+                .invoke_async(json!({
+                    "type":"ui", "name":"panel", "arguments":{"id":id}
+                }))
+                .await?;
+            if result.is_error {
+                bail!("dynamic panel failed: {}", result.content);
+            }
+            result.content
+        } else {
+            fallback
+        };
+        Ok(panel_json(&title, &content))
+    }
+
+    /// The synchronous form for a blocking host; identical content.
+    pub fn ui_panel_blocks(&self, id: &str) -> Result<Value> {
+        let (title, fallback, dynamic, worker) = self.panel_details(id)?;
+        let content = if dynamic {
+            let result = worker.invoke(json!({
+                "type":"ui", "name":"panel", "arguments":{"id":id}
+            }))?;
+            if result.is_error {
+                bail!("dynamic panel failed: {}", result.content);
+            }
+            result.content
+        } else {
+            fallback
+        };
+        Ok(panel_json(&title, &content))
     }
 
     /// TUI requests are cancellable and must not block the input event loop.
@@ -2531,20 +2198,26 @@ impl PluginCatalog {
         } else {
             fallback
         };
-        Ok(format!("{title}\n\n{content}"))
+        Ok(render_panel(&title, &content))
     }
 
-    /// The single task control provider of this process, if one is enabled.
-    /// Its command is dispatched by the host, never by the generic command
-    /// registry, because a prepared task must start a real Agent run.
-    pub fn task_control(&self) -> Option<Arc<TaskControlHost>> {
-        self.control.clone()
-    }
-
-    fn is_control_command(&self, name: &str) -> bool {
-        self.control
-            .as_ref()
-            .is_some_and(|control| control.command() == name)
+    /// The generic turn-end gate, if at least one enabled plugin declared the
+    /// `before_turn_end` hook. `None` keeps the no-plugin path unchanged.
+    pub fn turn_end_gate(&self) -> Option<TurnEndGate> {
+        let workers = self
+            .plugins
+            .iter()
+            .filter(|plugin| {
+                plugin.enabled
+                    && plugin
+                        .manifest
+                        .hooks
+                        .iter()
+                        .any(|hook| hook == "before_turn_end")
+            })
+            .map(|plugin| (plugin.manifest.id.clone(), plugin.worker.clone()))
+            .collect::<Vec<_>>();
+        (!workers.is_empty()).then_some(TurnEndGate { workers })
     }
 
     pub fn command_descriptions(&self) -> Vec<(String, String)> {
@@ -2575,14 +2248,14 @@ impl PluginCatalog {
                 [] | ["list"] => catalog.list(),
                 ["enable", id] => catalog.set_enabled(id, true),
                 ["disable", id] => catalog.set_enabled(id, false),
-                ["install", path] => catalog.install(Path::new(path)),
+                ["install", path] => catalog.install_source(path),
                 ["check", path] => catalog.check(Path::new(path)),
                 ["uninstall", id] => catalog.uninstall(id),
                 ["config", id] => catalog.show_config(id),
                 ["view", id] => catalog.ui_panel(id),
                 ["set", id, key, value @ ..] if !value.is_empty() => catalog.set_config(id, key, Some(&value.join(" "))),
                 ["reset", id, key] => catalog.set_config(id, key, None),
-                _ => bail!("Usage: /plugins [list|enable <id>|disable <id>|install <path>|check <path>|uninstall <id>|config <id>|set <id> <key> <value>|reset <id> <key>]"),
+                _ => bail!("Usage: /plugins [list|enable <id>|disable <id>|install <path|git-url>|check <path>|uninstall <id>|config <id>|set <id> <key> <value>|reset <id> <key>]"),
             }?;
             Ok(CommandReply::text(result))
         }) {
@@ -2593,25 +2266,6 @@ impl PluginCatalog {
                 continue;
             }
             for spec in &plugin.manifest.commands {
-                if self.is_control_command(&spec.name) {
-                    // The owning host must dispatch this through the prepared-
-                    // task entry so one real Agent run starts. A host that has
-                    // no such entry refuses explicitly instead of sending the
-                    // line to the model or claiming the goal started.
-                    let name = spec.name.clone();
-                    let label = format!("{}: {name}", plugin.manifest.id);
-                    if let Err(error) = registry.register_async_context(&spec.name, move |_, _| {
-                        let name = name.clone();
-                        async move {
-                            bail!(
-                                "{name} needs a host with prepared task control; this entry point does not start goal tasks yet"
-                            )
-                        }
-                    }) {
-                        warnings.push(format!("{label}: {error:#}"));
-                    }
-                    continue;
-                }
                 let worker = plugin.worker.clone();
                 let name = spec.name.clone();
                 let label = format!("{}: {name}", plugin.manifest.id);
@@ -2630,6 +2284,19 @@ impl PluginCatalog {
                             .await?;
                         if reply.is_error {
                             bail!("{}", reply.content);
+                        }
+                        // A command may also start one real task. The body is
+                        // the user turn; the host never re-dispatches it as
+                        // another command.
+                        if let Some(body) = reply.task.as_deref() {
+                            let body = body.trim();
+                            if body.is_empty() {
+                                bail!("{name}: the task body is empty");
+                            }
+                            return Ok(CommandReply {
+                                output: reply.content,
+                                action: CommandAction::Task(body.to_owned()),
+                            });
                         }
                         Ok(CommandReply::text(reply.content))
                     }
@@ -2651,17 +2318,64 @@ impl PluginCatalog {
             [one] if one == "list" => catalog.list()?,
             [action, id] if action == "enable" => catalog.set_enabled(id, true)?,
             [action, id] if action == "disable" => catalog.set_enabled(id, false)?,
-            [action, path] if action == "install" => catalog.install(Path::new(path))?,
+            [action, path] if action == "install" => catalog.install_source(path)?,
             [action, path] if action == "check" => catalog.check(Path::new(path))?,
             [action, id] if action == "uninstall" => catalog.uninstall(id)?,
             [action, id] if action == "config" => catalog.show_config(id)?,
             [action, id] if action == "view" => catalog.ui_panel(id)?,
             [action, id, key, value @ ..] if action == "set" && !value.is_empty() => catalog.set_config(id, key, Some(&value.join(" ")))?,
             [action, id, key] if action == "reset" => catalog.set_config(id, key, None)?,
-            _ => bail!("Usage: kroma plugins [list|enable <id>|disable <id>|install <path>|check <path>|uninstall <id>|config <id>|set <id> <key> <value>|reset <id> <key>]"),
+            [action, id] if action == "new" => scaffold(id)?,
+            _ => bail!("Usage: kroma plugins [list|enable <id>|disable <id>|install <path|git-url>|check <path>|new <id>|uninstall <id>|config <id>|set <id> <key> <value>|reset <id> <key>]"),
         };
         crate::cli_println!("{output}");
         Ok(())
+    }
+}
+
+/// A source counts as remote when it is an explicit URL. A local path that
+/// happens to contain dots is still a directory.
+fn git_source(source: &str) -> Option<String> {
+    let value = source.trim();
+    let remote = value.starts_with("git@")
+        || value.starts_with("ssh://")
+        || value.starts_with("git://")
+        || value.starts_with("http://")
+        || value.starts_with("https://")
+        || value.starts_with("file://");
+    remote.then(|| value.to_owned())
+}
+
+/// A cloned repository may hold the plugin at its root or in exactly one
+/// subdirectory. More than one candidate is reported instead of guessed.
+fn find_manifest_directory(root: &Path) -> Result<PathBuf> {
+    if root.join("plugin.toml").is_file() {
+        return Ok(root.to_path_buf());
+    }
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.is_dir() && path.join("plugin.toml").is_file() {
+            candidates.push(path);
+        }
+    }
+    match candidates.len() {
+        1 => Ok(candidates.remove(0)),
+        0 => bail!(
+            "no plugin.toml in the repository root or one level below it; install the plugin directory itself"
+        ),
+        _ => {
+            candidates.sort();
+            let names = candidates
+                .iter()
+                .filter_map(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "the repository contains several plugins ({names}); install the one you want by its directory"
+            )
+        }
     }
 }
 
@@ -2740,9 +2454,6 @@ struct PluginToolAdapter {
     timeout: Option<Duration>,
     data_dir: PathBuf,
     worker: Arc<PluginWorker>,
-    /// Present only for the task control owner, which may emit root-level
-    /// control replies that this host validates.
-    control: Option<Arc<ControlChannel>>,
 }
 
 impl Tool for PluginToolAdapter {
@@ -2770,7 +2481,6 @@ impl Tool for PluginToolAdapter {
         let streaming = self.streaming;
         let timeout = self.timeout;
         let data_dir = self.data_dir.clone();
-        let control_channel = self.control.clone();
         let workdir = context.workdir.to_path_buf();
         let archive = context.archive.to_path_buf();
         let model_connection = context.model_connection.cloned();
@@ -2824,14 +2534,11 @@ impl Tool for PluginToolAdapter {
                     arguments.unwrap_err()
                 ));
             };
-            let mut payload = json!({"type":if streaming {"tool_stream"} else {"tool"},
+            let payload = json!({"type":if streaming {"tool_stream"} else {"tool"},
                 "name":name, "arguments":arguments, "workdir":workdir,
                 "archive":archive, "call_id":call_id.clone(), "model_connection":model_connection,
                 "trusted_user_context":user_context,
                 "trusted_user_attachments":user_attachments});
-            if let Some(channel) = &control_channel {
-                payload["control_context"] = channel.context();
-            }
             if streaming {
                 let mut stream = worker.start_stream(payload);
                 let consumed = async {
@@ -2893,10 +2600,7 @@ impl Tool for PluginToolAdapter {
                         ToolResult::error(format!("plugin stream failed: {error:#}"))
                     }
                     Ok(()) => match completed {
-                        Some(Ok(reply)) if !reply.is_error => {
-                            record_control_reply(&control_channel, &call_id, &reply);
-                            ToolResult::ok(reply.content)
-                        }
+                        Some(Ok(reply)) if !reply.is_error => ToolResult::ok(reply.content),
                         Some(Ok(reply)) => ToolResult::error(reply.content),
                         Some(Err(error)) => {
                             worker.discard_process();
@@ -2922,28 +2626,12 @@ impl Tool for PluginToolAdapter {
                 }
             };
             match reply {
-                Ok(response) if !response.is_error => {
-                    record_control_reply(&control_channel, &call_id, &response);
-                    ToolResult::ok(response.content)
-                }
+                Ok(response) if !response.is_error => ToolResult::ok(response.content),
                 Ok(response) => ToolResult::error(response.content),
                 Err(error) => ToolResult::error(format!("plugin execution failed: {error:#}")),
             }
         })
     }
-}
-
-/// Only an error-free reply from the control owner may publish a control
-/// proposal, and only once per call id. The host validates it afterwards.
-fn record_control_reply(
-    channel: &Option<Arc<ControlChannel>>,
-    call_id: &str,
-    reply: &PluginResponse,
-) {
-    let (Some(channel), Some(control)) = (channel, reply.control.clone()) else {
-        return;
-    };
-    channel.record(call_id, control);
 }
 
 fn tool_timeout_error(name: &str, limit: Duration, data_dir: &Path, call_id: &str) -> ToolResult {
@@ -2952,6 +2640,96 @@ fn tool_timeout_error(name: &str, limit: Duration, data_dir: &Path, call_id: &st
         limit.as_secs(),
         data_dir.display()
     ))
+}
+
+/// Bounded, host-derived facts a turn-end gate may read. Nothing here is a
+/// user instruction and nothing here grants permission.
+pub struct TurnEndFacts {
+    pub session_id: String,
+    pub archive: String,
+    pub workdir: String,
+    /// The model answer that would end the turn.
+    pub final_text: String,
+    /// `[{"name":..,"arguments":..}]` for this turn's calls, host-truncated.
+    pub tools: Value,
+}
+
+/// One plugin's refusal to end the turn, plus the bounded feedback the model
+/// receives as the next step.
+#[derive(Debug, Clone)]
+pub struct TurnEndAdvice {
+    pub plugin: String,
+    pub feedback: String,
+}
+
+/// Every enabled plugin that declared `before_turn_end`, in enablement order.
+/// A plugin answers with `{"decision":"finish"}` or
+/// `{"decision":"continue","feedback":"..."}`; the first `continue` wins.
+pub struct TurnEndGate {
+    workers: Vec<(String, Arc<PluginWorker>)>,
+}
+
+impl TurnEndGate {
+    /// Fail-open on purpose: a broken, slow or unparsable advisory plugin can
+    /// never trap the user in a turn that does not end.
+    pub async fn gate(&self, facts: &TurnEndFacts) -> Option<TurnEndAdvice> {
+        for (id, worker) in &self.workers {
+            let request = json!({
+                "type": "hook",
+                "name": "before_turn_end",
+                "arguments": {
+                    "final_text": facts.final_text,
+                    "tools": facts.tools,
+                },
+                "session_id": facts.session_id,
+                "archive": facts.archive,
+                "workdir": facts.workdir,
+            });
+            let reply = match worker.clone().invoke_async(request).await {
+                Ok(reply) if !reply.is_error => reply,
+                Ok(reply) => {
+                    crate::runtime_log!(
+                        "[plugin] {id}: before_turn_end returned an error: {}",
+                        reply.content
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    crate::runtime_log!("[plugin] {id}: before_turn_end skipped: {error:#}");
+                    continue;
+                }
+            };
+            let Ok(decision) = serde_json::from_str::<Value>(&reply.content) else {
+                crate::runtime_log!("[plugin] {id}: before_turn_end must return a JSON object");
+                continue;
+            };
+            match decision.get("decision").and_then(Value::as_str) {
+                Some("finish") => {}
+                Some("continue") => {
+                    let feedback = decision
+                        .get("feedback")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_owned();
+                    if feedback.is_empty() {
+                        crate::runtime_log!(
+                            "[plugin] {id}: before_turn_end asked to continue without feedback; ignored"
+                        );
+                        continue;
+                    }
+                    return Some(TurnEndAdvice {
+                        plugin: id.clone(),
+                        feedback,
+                    });
+                }
+                other => crate::runtime_log!(
+                    "[plugin] {id}: before_turn_end returned unknown decision {other:?}; treated as finish"
+                ),
+            }
+        }
+        None
+    }
 }
 
 struct PluginToolHooks {
@@ -3119,7 +2897,7 @@ fn plugin_event_name(event: &RuntimeEvent<'_>) -> Option<&'static str> {
         RuntimeEvent::ModelFailed => "model_failed",
         RuntimeEvent::FailedRequestUsage { .. } | RuntimeEvent::Warning { .. } => return None,
         RuntimeEvent::CompactionUsage { .. } => "compaction_usage",
-        RuntimeEvent::TaskControlChanged { .. } => "task_control_changed",
+        RuntimeEvent::TurnGateContinued { .. } => "turn_gate_continued",
         RuntimeEvent::ToolStarted { .. } => "tool_started",
         RuntimeEvent::ToolFinished { .. } => "tool_finished",
         RuntimeEvent::SessionCreated { .. } => "session_created",
@@ -3172,18 +2950,9 @@ fn plugin_event_fields(event: &RuntimeEvent<'_>) -> Value {
             "requests":requests, "input_tokens":input_tokens,
             "output_tokens":output_tokens, "cached_tokens":cached_tokens
         }),
-        RuntimeEvent::TaskControlChanged {
-            command,
-            owner,
-            id,
-            revision,
-            status,
-            reason,
-            summary,
-        } => json!({
-            "command":command,"owner":owner, "id":id, "revision":revision,
-            "status":status, "reason":reason, "summary":summary
-        }),
+        RuntimeEvent::TurnGateContinued { plugin, feedback } => {
+            json!({"plugin":plugin, "feedback":feedback})
+        }
         RuntimeEvent::ToolStarted {
             name,
             id,
@@ -3324,6 +3093,20 @@ fn protect_project_plugin_data(workdir: &Path, data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn sync_ui_bus(plugins: &[Plugin], ui_bus: &PluginUiBus) {
+    let enabled: Vec<(String, Option<String>)> = plugins
+        .iter()
+        .filter(|plugin| plugin.enabled)
+        .map(|plugin| {
+            (
+                plugin.manifest.id.clone(),
+                plugin.manifest.ui.as_ref().map(|ui| ui.status.clone()),
+            )
+        })
+        .collect();
+    ui_bus.sync_manifest(&enabled);
+}
+
 struct PluginWorker {
     directory: PathBuf,
     workdir: PathBuf,
@@ -3337,11 +3120,13 @@ struct PluginWorker {
     /// Content approval is independent of the worker process lifecycle.
     scan: PluginCodeScan,
     process: Mutex<Option<PluginProcess>>,
+    id: String,
     next_request: AtomicU64,
     active: Mutex<Option<(u64, u32)>>,
     /// PID already terminated by a cancellation guard. The process object
     /// must not send the whole tree a second teardown signal.
     terminated_pid: Arc<AtomicU32>,
+    ui_bus: Arc<PluginUiBus>,
 }
 
 impl PluginWorker {
@@ -3356,9 +3141,30 @@ impl PluginWorker {
             settings: self.settings.clone(),
             scan: self.scan.clone(),
             process: Mutex::new(None),
+            id: self.id.clone(),
             next_request: AtomicU64::new(1),
             active: Mutex::new(None),
             terminated_pid: Arc::clone(&self.terminated_pid),
+            ui_bus: Arc::clone(&self.ui_bus),
+        }
+    }
+
+    fn with_ui_bus(&self, ui_bus: Arc<PluginUiBus>) -> Self {
+        Self {
+            directory: self.directory.clone(),
+            workdir: self.workdir.clone(),
+            data_dir: self.data_dir.clone(),
+            protocol_version: self.protocol_version,
+            command: self.command.clone(),
+            args: self.args.clone(),
+            settings: self.settings.clone(),
+            scan: self.scan.clone(),
+            process: Mutex::new(None),
+            id: self.id.clone(),
+            next_request: AtomicU64::new(1),
+            active: Mutex::new(None),
+            terminated_pid: Arc::new(AtomicU32::new(0)),
+            ui_bus,
         }
     }
 
@@ -3372,6 +3178,7 @@ impl PluginWorker {
         manifest: &PluginManifest,
         settings: Value,
         data_dir: PathBuf,
+        ui_bus: Arc<PluginUiBus>,
     ) -> Self {
         Self::with_scan(
             dir,
@@ -3383,6 +3190,7 @@ impl PluginWorker {
                 entrypoints: Vec::new(),
                 error: Some("its code was not scanned because the plugin is not enabled".into()),
             },
+            ui_bus,
         )
     }
 
@@ -3393,6 +3201,7 @@ impl PluginWorker {
         manifest: &PluginManifest,
         settings: Value,
         data_dir: PathBuf,
+        ui_bus: Arc<PluginUiBus>,
     ) -> Self {
         let scan = approval::scan(
             dir,
@@ -3400,7 +3209,7 @@ impl PluginWorker {
             &manifest.args,
             &PLUGIN_SCAN_LIMITS,
         );
-        Self::with_scan(dir, workdir, manifest, settings, data_dir, scan)
+        Self::with_scan(dir, workdir, manifest, settings, data_dir, scan, ui_bus)
     }
 
     fn with_scan(
@@ -3410,6 +3219,7 @@ impl PluginWorker {
         settings: Value,
         data_dir: PathBuf,
         scan: PluginCodeScan,
+        ui_bus: Arc<PluginUiBus>,
     ) -> Self {
         Self {
             directory: dir.to_path_buf(),
@@ -3421,9 +3231,11 @@ impl PluginWorker {
             settings,
             scan,
             process: Mutex::new(None),
+            id: manifest.id.clone(),
             next_request: AtomicU64::new(1),
             active: Mutex::new(None),
             terminated_pid: Arc::new(AtomicU32::new(0)),
+            ui_bus,
         }
     }
 
@@ -3673,6 +3485,8 @@ impl PluginWorker {
                     .to_string(),
                 protocol_version: self.protocol_version,
                 terminated_pid: Arc::clone(&self.terminated_pid),
+                plugin_id: self.id.clone(),
+                ui_bus: Arc::clone(&self.ui_bus),
             });
         }
         if cancellation.is_some_and(|(_, cancelled)| cancelled.load(Ordering::SeqCst)) {
@@ -3753,20 +3567,25 @@ struct PluginProcess {
     stdout: BufReader<ChildStdout>,
     /// Plugin id, so a protocol failure names the plugin that caused it.
     name: String,
-    /// Worker protocol version echoed by this process's responses.
+    /// Worker protocol version echoed by this process.s responses.
     protocol_version: u32,
     terminated_pid: Arc<AtomicU32>,
+    /// Plugin id used as the key for per-catalog UI state (`ui.status`, `ui.widget`, ...).
+    plugin_id: String,
+    ui_bus: Arc<PluginUiBus>,
 }
 
 #[derive(Deserialize)]
 struct PluginResponse {
     content: String,
     #[serde(default)]
-    control: Option<Value>,
-    #[serde(default)]
     is_error: bool,
     #[serde(default)]
     code: Option<String>,
+    /// Optional command action: the plugin supplied a user-turn body that the
+    /// host must run as the next task. Ignored for tool and hook replies.
+    #[serde(default)]
+    task: Option<String>,
 }
 
 impl PluginProcess {
@@ -3844,9 +3663,214 @@ impl PluginProcess {
     fn request(&mut self, request: Value) -> Result<PluginResponse> {
         let request_id = request.get("request_id").cloned();
         self.write_request(&request)?;
-        let parsed = self.read_frame()?;
-        self.validate_frame(&parsed, request_id.as_ref(), false, self.protocol_version)?;
-        serde_json::from_value(parsed).context("invalid plugin response fields")
+        // A plugin may push host calls before its final response. Only the
+        // calls below are answered; anything else is refused explicitly so a
+        // typo cannot hang the call. The bound keeps a looping plugin from
+        // holding the turn open.
+        for _ in 0..MAX_HOST_CALLS_PER_REQUEST {
+            let parsed = self.read_frame()?;
+            if parsed.get("type").and_then(Value::as_str) == Some("host_call") {
+                self.answer_host_call(&parsed)?;
+                continue;
+            }
+            self.validate_frame(&parsed, request_id.as_ref(), false, self.protocol_version)?;
+            return serde_json::from_value(parsed).context("invalid plugin response fields");
+        }
+        bail!(
+            "plugin '{}' sent more than {MAX_HOST_CALLS_PER_REQUEST} host calls in one request",
+            self.name
+        )
+    }
+
+    /// Answer one plugin-to-host call (`ui.status`, `ui.notify`, `ui.composer`,
+    /// `ui.widget`, `ui.panel`, `ui.desktop_emit`, `ui.ask`, `ui.custom`).
+    fn answer_host_call(&mut self, parsed: &Value) -> Result<()> {
+        self.answer_host_call_inner(parsed, true)
+    }
+
+    fn answer_host_call_inner(&mut self, parsed: &Value, allow_custom: bool) -> Result<()> {
+        let name = parsed.get("name").and_then(Value::as_str).unwrap_or("");
+        let arguments = parsed.get("arguments").cloned().unwrap_or(Value::Null);
+        let result = match name {
+            "ui.status" => {
+                let text = arguments.get("text").and_then(Value::as_str).unwrap_or("");
+                let key = arguments.get("key").and_then(Value::as_str).unwrap_or("");
+                let scope = UiScope::from_value(arguments.get("scope"));
+                self.ui_bus.set_status(&self.plugin_id, key, text, scope);
+                json!({"ok": true})
+            }
+            "ui.notify" => {
+                let message = arguments
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let level = arguments
+                    .get("level")
+                    .and_then(Value::as_str)
+                    .unwrap_or("info");
+                self.ui_bus.notify(&self.plugin_id, message, level);
+                json!({"ok": true})
+            }
+            "ui.composer" | "ui.set_editor" => {
+                let text = arguments.get("text").and_then(Value::as_str).unwrap_or("");
+                let mode = arguments
+                    .get("mode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("replace");
+                self.ui_bus.set_composer(&self.plugin_id, text, mode);
+                json!({"ok": true})
+            }
+            "ui.widget" => match ui::parse_widget_args(&self.plugin_id, &arguments) {
+                Ok(Some(widget)) => {
+                    self.ui_bus.set_widget(widget);
+                    json!({"ok": true})
+                }
+                Ok(None) => {
+                    let id = arguments
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("default");
+                    self.ui_bus.remove_widget(&self.plugin_id, id);
+                    json!({"ok": true})
+                }
+                Err(error) => json!({"ok": false, "error": format!("{error:#}")}),
+            },
+            "ui.panel" => {
+                let action = arguments
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .unwrap_or("open");
+                if action == "close" {
+                    self.ui_bus.close_panel(&self.plugin_id);
+                } else {
+                    let (blocks, text) = ui::parse_blocks_from_args(&arguments);
+                    let title =
+                        ui::clip_title(arguments.get("title").and_then(Value::as_str), &self.name);
+                    let actions = ui::parse_actions(arguments.get("actions"));
+                    self.ui_bus.open_panel(PluginLivePanel {
+                        plugin_id: self.plugin_id.clone(),
+                        title,
+                        blocks,
+                        text,
+                        actions,
+                    });
+                }
+                json!({"ok": true})
+            }
+            "ui.desktop_emit" => {
+                let payload = arguments.get("payload").cloned().unwrap_or(arguments);
+                self.ui_bus.emit_desktop(&self.plugin_id, payload);
+                json!({"ok": true})
+            }
+            "ui.ask" => self.ask_the_person(parsed),
+            "ui.custom" if allow_custom => self.run_custom_tui(&arguments)?,
+            "ui.custom" => json!({"ok": false, "error": "nested ui.custom calls are not allowed"}),
+            other => json!({"ok": false, "error": format!("unsupported host call '{other}'")}),
+        };
+        self.write_request(&json!({
+            "type": "host_call_result",
+            "request_id": parsed.get("request_id").cloned().unwrap_or(Value::Null),
+            "result": result,
+        }))
+    }
+
+    fn run_custom_tui(&mut self, arguments: &Value) -> Result<Value> {
+        let Some(host) = self.ui_bus.custom_tui_host() else {
+            return Ok(json!({
+                "ok": false,
+                "error": "custom TUI screen is only available in interactive terminal"
+            }));
+        };
+        let spec = CustomTuiSpec {
+            plugin_id: self.plugin_id.clone(),
+            title: ui::clip_title(arguments.get("title").and_then(Value::as_str), &self.name),
+            width: arguments
+                .get("width")
+                .and_then(Value::as_u64)
+                .map(|v| v.clamp(20, 400) as u16),
+            height: arguments
+                .get("height")
+                .and_then(Value::as_u64)
+                .map(|v| v.clamp(5, 200) as u16),
+            fullscreen: arguments
+                .get("fullscreen")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        };
+        let (client_tx, client_rx) = mpsc::channel();
+        let (frame_tx, frame_rx) = mpsc::channel();
+        let wake = Arc::new(tokio::sync::Notify::new());
+        if !host.open(CustomTuiChannel {
+            spec,
+            client_tx,
+            frame_rx,
+            wake: Arc::clone(&wake),
+        }) {
+            return Ok(json!({
+                "ok": false,
+                "error": "another custom TUI screen is already open"
+            }));
+        }
+        while let Ok(event) = client_rx.recv() {
+            if matches!(event, CustomTuiClientEvent::Cancel) {
+                let _ = self.write_request(&event.to_request());
+                return Ok(json!({"ok": true, "cancelled": true, "result": Value::Null}));
+            }
+            self.write_request(&event.to_request())?;
+            loop {
+                let parsed = self.read_frame()?;
+                if parsed.get("type").and_then(Value::as_str) == Some("host_call") {
+                    self.answer_host_call_inner(&parsed, false)?;
+                    continue;
+                }
+                let update = CustomTuiFrameUpdate::from_value(&parsed)?;
+                let done = update.done;
+                let result = update.result.clone();
+                let _ = frame_tx.send(update);
+                wake.notify_waiters();
+                if done {
+                    return Ok(json!({
+                        "ok": true,
+                        "cancelled": false,
+                        "result": result.unwrap_or(Value::Null),
+                    }));
+                }
+                break;
+            }
+        }
+        Ok(json!({"ok": true, "cancelled": true, "result": Value::Null}))
+    }
+
+    /// One question, answered by whoever is looking at this interface. The
+    /// plugin's own process is blocked while it waits, so this must never hold
+    /// a lock the interface needs; `ask` only parks this worker thread.
+    fn ask_the_person(&self, parsed: &Value) -> Value {
+        let Some(asker) = crate::tools::host_asker() else {
+            return json!({
+                "ok": false,
+                "error": "this interface cannot show a question; decide from what you know and say what you chose"
+            });
+        };
+        let arguments = parsed.get("arguments").cloned().unwrap_or(Value::Null);
+        let request = match crate::tools::ask_request_from_value(&arguments) {
+            Ok(request) => request,
+            Err(error) => return json!({"ok": false, "error": format!("{error:#}")}),
+        };
+        // The worker runs on a blocking thread, which is exactly where waiting
+        // is allowed and where the interface keeps repainting.
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return json!({"ok": false, "error": "this run has no runtime to wait for an answer"});
+        };
+        match handle.block_on(asker.ask(request)) {
+            Some(crate::tools::AskAnswer::Answered { picked, typed }) => {
+                json!({"ok": true, "picked": picked, "typed": typed})
+            }
+            Some(crate::tools::AskAnswer::Dismissed) | None => {
+                json!({"ok": false, "error": "the person closed the question without answering"})
+            }
+        }
     }
 }
 
@@ -3864,744 +3888,55 @@ impl Drop for PluginProcess {
     }
 }
 
-/// Name of the narrow capability a controller plugin declares.
-pub const TASK_CONTROL_CAPABILITY: &str = "task_control";
-
-/// A prepared task: the one-shot effect of an explicit control command. The
-/// host consumes it once and starts a normal Agent run; it never enters the
-/// follow-up queue and never starts a second Agent.
-#[derive(Debug, Clone)]
-pub struct PreparedTask {
-    pub owner: String,
-    pub command: String,
-    /// Raw user message that will be committed as the real user turn.
-    pub body: String,
-    /// Plugin text shown before the task starts.
-    pub output: String,
-    /// Candidate running snapshot; the host attaches it to the same commit
-    /// that creates the user message.
-    pub update: ControlUpdate,
-}
-
-/// Host-reserved actions. They never wait for the plugin to approve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostControlAction {
-    Pause,
-    Cancel,
-}
-
-/// Result of dispatching one control command.
-// One explicit goal command constructs this once; the variant size is not a hot
-// allocation path, and boxing `PreparedTask` would ripple through every host.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone)]
-pub enum ControlCommand {
-    Text(String),
-    Prepared(PreparedTask),
-    HostAction(HostControlAction),
-}
-
-/// Advice produced by the normal-finish callback plus host facts. Only
-/// `finish` lets the caller commit a completed snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FinishAdvice {
-    Finish,
-    Continue {
-        reason_code: String,
-        feedback: String,
-    },
-    Pause {
-        reason_code: String,
-        feedback: String,
-    },
-}
-
-/// Bounded in-process channel between the owner's tool adapters and the host.
-/// It carries the host-built read-only context in and validated raw `control`
-/// replies out; no model text can write it.
-#[derive(Default)]
-pub(crate) struct ControlChannel {
-    context: Mutex<Value>,
-    replies: Mutex<Vec<(String, Value)>>,
-}
-
-/// At most this many unconsumed tool replies are retained.
-const MAX_PENDING_CONTROL_REPLIES: usize = 8;
-
-impl ControlChannel {
-    pub(crate) fn refresh(&self, context: Value) {
-        if let Ok(mut slot) = self.context.lock() {
-            *slot = context;
-        }
-    }
-
-    pub(crate) fn context(&self) -> Value {
-        self.context
-            .lock()
-            .map(|slot| slot.clone())
-            .unwrap_or_else(|_| json!({}))
-    }
-
-    pub(crate) fn record(&self, call_id: &str, control: Value) {
-        let Ok(mut replies) = self.replies.lock() else {
-            return;
-        };
-        replies.push((call_id.to_string(), control));
-        if replies.len() > MAX_PENDING_CONTROL_REPLIES {
-            let drop = replies.len() - MAX_PENDING_CONTROL_REPLIES;
-            replies.drain(..drop);
-        }
-    }
-
-    pub(crate) fn take(&self, call_id: &str) -> Option<Value> {
-        let mut replies = self.replies.lock().ok()?;
-        let at = replies.iter().position(|(id, _)| id == call_id)?;
-        Some(replies.remove(at).1)
-    }
-}
-
-struct ControlState {
-    controller: TaskController,
-    facts: FactIndex,
-    scope: Option<ControlScope>,
-    workdir: String,
-}
-
-/// One recorded execution: the durable receipt and the optional candidate
-/// snapshot that opens a new verification round.
-#[derive(Debug, Clone, Default)]
-pub struct RecordedExecution {
-    pub receipt: Option<ExecutionReceipt>,
-    pub update: Option<ControlUpdate>,
-}
-
-/// A requirement carried over by a fork or rewind: the previous id is only
-/// reported, the update belongs to the new scope.
-pub struct CarriedOver {
-    pub previous_id: String,
-    pub update: ControlUpdate,
-}
-
-/// One host-side controller: unique owner, single control record, bounded
-/// facts, and no execution loop of its own.
-pub struct TaskControlHost {
-    control: Arc<PluginTaskControl>,
-    channel: Arc<ControlChannel>,
-    state: Mutex<ControlState>,
-}
-
-impl TaskControlHost {
-    fn new(control: Arc<PluginTaskControl>, workdir: &Path) -> Self {
-        Self {
-            control: control.clone(),
-            channel: Arc::new(ControlChannel::default()),
-            state: Mutex::new(ControlState {
-                controller: TaskController::new(control.owner().to_string()),
-                facts: FactIndex::default(),
-                scope: None,
-                workdir: workdir.to_string_lossy().into_owned(),
-            }),
-        }
-    }
-
-    pub(crate) fn channel(&self) -> &Arc<ControlChannel> {
-        &self.channel
-    }
-
-    pub fn owner(&self) -> &str {
-        self.control.owner()
-    }
-
-    pub fn command(&self) -> &str {
-        self.control.command()
-    }
-
-    pub fn plugin_version(&self) -> &str {
-        self.control.version()
-    }
-
-    pub fn is_control_tool(&self, name: &str) -> bool {
-        self.control.tools().iter().any(|tool| tool == name)
-    }
-
-    pub fn snapshot(&self) -> Option<TaskControlSnapshot> {
-        self.state
-            .lock()
-            .ok()
-            .and_then(|state| state.controller.current().cloned())
-    }
-
-    pub fn is_active(&self) -> bool {
-        self.state
-            .lock()
-            .map(|state| state.controller.is_active())
-            .unwrap_or(false)
-    }
-
-    pub fn is_running(&self) -> bool {
-        self.snapshot()
-            .is_some_and(|snapshot| snapshot.status == TaskStatus::Running)
-    }
-
-    /// Load the newest record for `scope` from authoritative history. An
-    /// abandoned `running` record yields a repaired `paused` candidate that the
-    /// caller must persist before it becomes authoritative.
-    pub fn adopt(
-        &self,
-        messages: &[Message],
-        scope: &ControlScope,
-    ) -> Result<Option<ControlUpdate>> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("task control state lock poisoned"))?;
-        if state.scope.as_ref() == Some(scope) {
-            return Ok(None);
-        }
-        let mut controller = TaskController::new(self.control.owner().to_string());
-        let mut facts = FactIndex::default();
-        let mut repaired = None;
-        if let Some(update) = controller.restore(messages, scope)? {
-            if update.requires_commit {
-                facts = FactIndex::from_history(messages, &update.snapshot.id);
-                repaired = Some(update);
-            } else {
-                facts = FactIndex::from_history(messages, &update.snapshot.id);
-                controller.commit(update)?;
-            }
-        }
-        state.controller = controller;
-        state.facts = facts;
-        state.scope = Some(scope.clone());
-        Ok(repaired)
-    }
-}
-
-impl TaskControlHost {
-    /// A fork or rewind keeps the user requirement but never the old run. The
-    /// new scope keeps the requirements and plan, but no pass facts or
-    /// completion claim. Nothing is re-executed implicitly.
-    pub fn carry_over(
-        &self,
-        messages: &[Message],
-        scope: &ControlScope,
-    ) -> Result<Option<CarriedOver>> {
-        let Some(origin) = crate::task_control::suspended_origin(messages) else {
-            return Ok(None);
-        };
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("task control state lock poisoned"))?;
-        if state.controller.current().is_some() {
-            return Ok(None);
-        }
-        // `start` is a candidate, not a committed record, so the paused state
-        // is derived here instead of through a second controller transition.
-        let mut update = state
-            .controller
-            .start(scope.clone())?
-            .with_data(json!({}), Some(origin.checks.clone()))?;
-        update.snapshot.plugin_version = self.control.version().to_string();
-        update.snapshot.source_indices = origin.source_indices.clone();
-        update.snapshot.revision = origin.revision;
-        update.snapshot.status = crate::task_control::TaskStatus::Paused;
-        update.snapshot.reason = Some(crate::task_control::reason::CARRIED_OVER.to_string());
-        update.snapshot.seq += 1;
-        update.snapshot.validate()?;
-        Ok(Some(CarriedOver {
-            previous_id: origin.id,
-            update,
-        }))
-    }
-
-    /// Install a candidate snapshot only after its message was persisted.
-    pub fn commit(&self, update: ControlUpdate) -> Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("task control state lock poisoned"))?;
-        state.controller.commit(update)?;
-        Ok(())
-    }
-
-    /// Candidate paused snapshot for a plugin/protocol failure or a user stop.
-    /// It never becomes authoritative before the caller persists it.
-    pub fn pause(&self, reason: &str) -> Result<ControlUpdate> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("task control state lock poisoned"))?;
-        if !state.controller.is_active() {
-            bail!("no active task to pause");
-        }
-        if !matches!(
-            state.controller.current().map(|snapshot| snapshot.status),
-            Some(TaskStatus::Running)
-        ) {
-            bail!("task is not running");
-        }
-        let update = state.controller.pause(reason)?;
-        Ok(update)
-    }
-
-    /// Terminal cancel candidate. Allowed while running or paused.
-    pub fn cancel(&self) -> Result<ControlUpdate> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("task control state lock poisoned"))?;
-        let update = state.controller.cancel()?;
-        Ok(update)
-    }
-
-    /// Candidate completed snapshot. The caller must have accepted the
-    /// candidate answer through [`Self::propose_finish`] first.
-    pub fn complete(&self) -> Result<ControlUpdate> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("task control state lock poisoned"))?;
-        let update = state.controller.complete()?;
-        Ok(update)
-    }
-
-    /// Candidate revision bump for a real steering message.
-    pub fn revise(&self) -> Result<ControlUpdate> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("task control state lock poisoned"))?;
-        let update = state.controller.revise()?;
-        Ok(update)
-    }
-
-    /// Record one raw execution fact, captured before any result rewriting.
-    ///
-    /// Returns a candidate snapshot when the execution opened a new
-    /// verification round (any non-check, non-control tool may have changed the
-    /// working tree). The caller persists it with the tool message, then
-    /// commits it.
-    pub fn record_execution(
-        &self,
-        call_id: &str,
-        tool: &str,
-        command: Option<&str>,
-        is_error: bool,
-        exit_code: Option<i32>,
-    ) -> Result<RecordedExecution> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("task control state lock poisoned"))?;
-        let empty = RecordedExecution::default();
-        let Some(snapshot) = state.controller.current().cloned() else {
-            return Ok(empty);
-        };
-        if snapshot.status != TaskStatus::Running {
-            return Ok(empty);
-        }
-        if self.is_control_tool(tool) {
-            // A control tool records state, not a check execution; it must
-            // neither satisfy nor invalidate a registered check.
-            return Ok(empty);
-        }
-        let command = command.map(str::to_owned);
-        let check_id = FactIndex::classify(&snapshot, command.as_deref(), &state.workdir);
-        let mut receipt = ExecutionReceipt::shell(
-            call_id,
-            command.clone().unwrap_or_default(),
-            state.workdir.clone(),
-            is_error,
-            exit_code,
-        );
-        receipt.tool = tool.to_string();
-        receipt.command = command;
-        receipt.check_id = check_id.clone();
-        let receipt = receipt.with_control(
-            snapshot.id.clone(),
-            snapshot.revision,
-            snapshot.verification_epoch,
-        );
-        let update = if check_id.is_none() && snapshot.checkpoint_basis.is_some() {
-            let mut snapshot = snapshot;
-            // Tool activity invalidates the completion declaration, not the fact
-            // that a check really ran. The model decides whether a rerun is needed.
-            snapshot.checkpoint_basis = None;
-            Some(ControlUpdate {
-                snapshot,
-                requires_commit: true,
-            })
-        } else {
-            None
-        };
-        Ok(RecordedExecution {
-            receipt: Some(receipt),
-            update,
-        })
-    }
-
-    /// Install an execution fact only after its tool message was persisted.
-    pub fn commit_execution(&self, receipt: ExecutionReceipt) -> Result<()> {
-        self.state
-            .lock()
-            .map_err(|_| anyhow!("task control state lock poisoned"))?
-            .facts
-            .record(receipt);
-        Ok(())
-    }
-
-    /// Facts for the current candidate finish.
-    pub fn facts(&self) -> Result<FinishFacts> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("task control state lock poisoned"))?;
-        let snapshot = state
-            .controller
-            .current()
-            .ok_or_else(|| anyhow!("no active task"))?;
-        let facts = crate::task_control::finish_facts(snapshot, &state.facts, &state.workdir);
-        Ok(facts)
-    }
-}
-
-impl TaskControlHost {
-    /// Rebuild the read-only context handed to the owner. Only real user
-    /// messages are citable; host control notes are excluded.
-    pub fn refresh_context(&self, messages: &[Message]) -> Value {
-        let snapshot = self.snapshot();
-        let context = crate::task_control::control_context(
-            snapshot.as_ref(),
-            &crate::task_control::goal_sources(snapshot.as_ref(), messages),
-        );
-        self.channel.refresh(context.clone());
-        context
-    }
-
-    /// Dispatch one explicit user command to the owner. Only a real user line
-    /// can start or resume; the reply is validated here, never trusted.
-    pub async fn dispatch_command(
-        &self,
-        raw_line: &str,
-        arguments: &str,
-        session: &CommandSession,
-        messages: &[Message],
-        scope: &ControlScope,
-    ) -> Result<ControlCommand> {
-        if self.adopt(messages, scope)?.is_some() {
-            bail!(
-                "the previous run was interrupted; its paused state is recorded before the next command"
-            );
-        }
-        let mut words = arguments.split_whitespace();
-        if let (Some(head), None) = (words.next(), words.next()) {
-            match head.to_ascii_lowercase().as_str() {
-                "pause" => return Ok(ControlCommand::HostAction(HostControlAction::Pause)),
-                "cancel" => return Ok(ControlCommand::HostAction(HostControlAction::Cancel)),
-                _ => {}
-            }
-        }
-        let snapshot = self.snapshot();
-        let head = arguments.split_whitespace().next().unwrap_or("");
-        let mut sources = if head.eq_ignore_ascii_case("resume")
-            || head.eq_ignore_ascii_case("status")
-            || head.is_empty()
-        {
-            crate::task_control::goal_sources(snapshot.as_ref(), messages)
-        } else {
-            Vec::new()
-        };
-        // The command's own user line is not committed yet, so it is offered
-        // with the position it will occupy in the authoritative history.
-        sources.push(crate::task_control::UserSource {
-            message_index: messages.len(),
-            content: raw_line.to_string(),
-        });
-        let context = crate::task_control::control_context(snapshot.as_ref(), &sources);
-        self.channel.refresh(context.clone());
-        let reply = self
-            .control
-            .command_request(arguments, arguments, &context, session)
-            .await
-            .context("task control command failed")?;
-        if reply.is_error {
-            bail!("{}", reply.content);
-        }
-        let Some(control) = reply.control else {
-            return Ok(ControlCommand::Text(reply.content));
-        };
-        let proposal = ControlProposal::parse(&control)?;
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("task control state lock poisoned"))?;
-        let expected_seq = state
-            .controller
-            .current()
-            .map_or(0, |snapshot| snapshot.seq);
-        if proposal.base_seq != expected_seq {
-            bail!(
-                "stale control base_seq {} (expected {expected_seq})",
-                proposal.base_seq
-            );
-        }
-        let update = match proposal.op {
-            ControlOp::Start => {
-                if proposal.id.is_some() {
-                    bail!("start must not nominate a task id");
-                }
-                state.controller.start(scope.clone())?
-            }
-            ControlOp::Resume => {
-                let current = state
-                    .controller
-                    .current()
-                    .ok_or_else(|| anyhow!("no task to resume"))?;
-                if proposal.id.as_deref() != Some(current.id.as_str())
-                    || proposal.revision != Some(current.revision)
-                {
-                    bail!("resume must echo the current task id and revision");
-                }
-                let supplement = arguments
-                    .trim()
-                    .split_once(char::is_whitespace)
-                    .map(|(_, rest)| rest.trim())
-                    .unwrap_or("");
-                state.controller.resume(!supplement.is_empty())?
-            }
-            ControlOp::Update => {
-                bail!("a command may not update the task; use the declared control tool")
-            }
-        };
-        let mut update = update.with_data(proposal.data, proposal.checks)?;
-        update.snapshot.plugin_version = self.control.version().to_string();
-        update.snapshot.source_indices.push(messages.len());
-        update.snapshot.validate()?;
-        crate::task_control::validate_check_sources(&update.snapshot.checks, &sources)?;
-        drop(state);
-        Ok(ControlCommand::Prepared(PreparedTask {
-            owner: self.owner().to_string(),
-            command: self.command().to_string(),
-            body: raw_line.to_string(),
-            output: reply.content,
-            update,
-        }))
-    }
-
-    /// Validate and install a control tool's reply. Invalid proposals are
-    /// dropped as a whole so no partial update can be committed.
-    pub fn apply_tool_control(
-        &self,
-        call_id: &str,
-        messages: &[Message],
-    ) -> Result<Option<ControlUpdate>> {
-        let Some(control) = self.channel.take(call_id) else {
-            return Ok(None);
-        };
-        let proposal = ControlProposal::parse(&control)?;
-        if proposal.op != ControlOp::Update {
-            bail!("the control tool may only propose update");
-        }
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("task control state lock poisoned"))?;
-        let current = state
-            .controller
-            .current()
-            .ok_or_else(|| anyhow!("no active task"))?;
-        if proposal.base_seq != current.seq
-            || proposal.id.as_deref() != Some(current.id.as_str())
-            || proposal.revision != Some(current.revision)
-        {
-            bail!("control reply does not match the current id/revision/seq");
-        }
-        let sources = crate::task_control::goal_sources(Some(current), messages);
-        if let Some(checks) = proposal.checks.as_ref() {
-            crate::task_control::validate_check_sources(checks, &sources)?;
-        }
-        for evidence in &proposal.evidence {
-            if !state
-                .facts
-                .has_call(evidence, &current.id, current.revision)
-            {
-                bail!("evidence {evidence} is not a recorded execution for this goal and revision");
-            }
-        }
-        let mut update = state.controller.update(
-            proposal.base_seq,
-            proposal.revision.unwrap_or(current.revision),
-            proposal.data,
-            proposal.checks,
-        )?;
-        update.snapshot.plugin_version = self.control.version().to_string();
-        update.snapshot.validate()?;
-        Ok(Some(update))
-    }
-
-    /// Ask the owner whether the candidate answer may finish. Errors, bad
-    /// replies, timeouts and contradictory facts all pause; nothing is
-    /// fail-open. The returned advice is not itself a state transition.
-    pub async fn propose_finish(
-        &self,
-        session: &CommandSession,
-        messages: &[Message],
-        has_content: bool,
-    ) -> FinishAdvice {
-        let context = self.refresh_context(messages);
-        let facts = {
-            let Ok(state) = self.state.lock() else {
-                return FinishAdvice::Pause {
-                    reason_code: "state_poisoned".into(),
-                    feedback: "task control state is unavailable".into(),
-                };
-            };
-            let Some(snapshot) = state.controller.current() else {
-                return FinishAdvice::Pause {
-                    reason_code: "no_task".into(),
-                    feedback: "no active task control record".into(),
-                };
-            };
-            crate::task_control::finish_facts(snapshot, &state.facts, &state.workdir)
-        };
-        let advice = self
-            .control
-            .before_finish(&context, &facts.to_value(), has_content, session)
-            .await;
-        let decision = match advice {
-            Ok(decision) => decision,
-            Err(error) => {
-                return FinishAdvice::Pause {
-                    reason_code: "plugin_error".into(),
-                    feedback: format!(
-                        "the controller did not answer the finish callback: {error:#}"
-                    ),
-                }
-            }
-        };
-        match decision.decision {
-            Decision::Finish => {
-                let blockers = facts.host_blockers(has_content);
-                if blockers.is_empty() {
-                    FinishAdvice::Finish
-                } else {
-                    FinishAdvice::Continue {
-                        reason_code: "HOST_BLOCKED".into(),
-                        feedback: format!(
-                            "宿主事实仍未满足：{}。先执行已登记的检查或补齐交付。",
-                            blockers.join(", ")
-                        ),
-                    }
-                }
-            }
-            Decision::Continue => FinishAdvice::Continue {
-                reason_code: decision.reason_code.unwrap_or_else(|| "CONTINUE".into()),
-                feedback: decision.feedback,
-            },
-            Decision::Pause => FinishAdvice::Pause {
-                reason_code: decision.reason_code.unwrap_or_else(|| "PAUSED".into()),
-                feedback: decision.feedback,
-            },
-        }
-    }
-}
-
-/// `None` unless the line is exactly the controller command or one of its
-/// whitespace-separated invocations. Every host uses the same rule, so a
-/// near-miss like `/goals` stays an ordinary line.
-pub fn control_arguments<'a>(command: &str, line: &'a str) -> Option<&'a str> {
-    let rest = line.strip_prefix(command)?;
-    if rest.is_empty() {
-        return Some("");
-    }
-    rest.strip_prefix(char::is_whitespace).map(str::trim)
-}
-
-/// What one explicit controller line means while a foreground task runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunningControl {
-    Status,
-    Pause,
-    Cancel,
-    Start,
-}
-
-pub fn running_control(command: &str, line: &str) -> Option<RunningControl> {
-    Some(match control_arguments(command, line)? {
-        "" | "status" => RunningControl::Status,
-        "pause" => RunningControl::Pause,
-        "cancel" => RunningControl::Cancel,
-        _ => RunningControl::Start,
-    })
-}
-
-/// Build the single control host for this process. A second enabled provider is
-/// a hard startup error instead of a silent stacking order, and an owner must
-/// declare a control command first; additional commands remain ordinary commands.
-fn build_task_control(
-    plugins: &[Plugin],
-    workdir: &Path,
-    warnings: &mut Vec<String>,
-    invalid_enabled: &mut Vec<String>,
-) -> Option<Arc<TaskControlHost>> {
-    let owners: Vec<&Plugin> = plugins
-        .iter()
-        .filter(|plugin| plugin.enabled && plugin.manifest.has_capability(TASK_CONTROL_CAPABILITY))
-        .collect();
-    if owners.len() > 1 {
-        for owner in owners {
-            let message = format!(
-                "{}: another enabled plugin already provides task_control",
-                owner.manifest.id
-            );
-            warnings.push(message.clone());
-            invalid_enabled.push(message);
-        }
-        return None;
-    }
-    let owner = owners.first()?;
-    let command = match owner.manifest.commands.first() {
-        Some(one) => one.name.clone(),
-        _ => {
-            let message = format!(
-                "{}: task_control requires a declared control command",
-                owner.manifest.id
-            );
-            warnings.push(message.clone());
-            invalid_enabled.push(message);
-            return None;
-        }
-    };
-    for tool in &owner.manifest.tools {
-        if tool.replace {
-            let message = format!(
-                "{}: task_control tools may not replace core tools",
-                owner.manifest.id
-            );
-            warnings.push(message.clone());
-            invalid_enabled.push(message);
-            return None;
-        }
-    }
-    let adapter = Arc::new(PluginTaskControl::new(
-        owner.manifest.id.clone(),
-        owner.manifest.version.clone(),
-        command,
-        owner
-            .manifest
-            .tools
-            .iter()
-            .map(|tool| tool.name.clone())
-            .collect(),
-        owner.worker.clone(),
-    ));
-    Some(Arc::new(TaskControlHost::new(adapter, workdir)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A new author must start from a plugin that already passes the host's
+    /// own self-check, including the bounded ping each one performs.
+    #[test]
+    fn a_scaffolded_plugin_passes_its_own_check() -> Result<()> {
+        if std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return Ok(());
+        }
+        let base = env::temp_dir().join(format!(
+            "kroma-scaffold-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base)?;
+        let created = scaffold_in(&base, "demo-plugin")?;
+        assert!(created.contains("plugins check"), "{created}");
+        let catalog =
+            PluginCatalog::discover_at(base.join("plugins"), base.join("plugins.toml"), &base)?;
+        let report = catalog.check(&base.join("demo-plugin"))?;
+        assert!(report.contains("plugin=demo-plugin"), "{report}");
+        assert!(report.contains("commands=1"), "{report}");
+        assert!(!report.contains("is_error=true"), "{report}");
+        assert!(
+            report.contains("多出：") && report.contains("/demo-plugin"),
+            "the check must first say in plain words what the plugin adds: {report}"
+        );
+        let _ = fs::remove_dir_all(&base);
+        Ok(())
+    }
+
+    #[test]
+    fn the_plugin_switch_accepts_only_explicit_off_values() {
+        for value in ["off", " OFF ", "0", "false", "none"] {
+            assert!(plugins_off(value), "{value}");
+        }
+        for value in ["", "on", "1", "true", "inherit", "yes"] {
+            assert!(!plugins_off(value), "{value}");
+        }
+    }
 
     #[test]
     fn a_child_runtime_never_offers_a_trusted_human_quote() {
@@ -4623,6 +3958,22 @@ command='node'
 capabilities=['provide_context','task_summary']
 ",
         )?;
+        let ui_bus = Arc::new(PluginUiBus::new());
+        let worker = Arc::new(PluginWorker::unscanned(
+            Path::new("."),
+            Path::new("."),
+            &toml::from_str::<PluginManifest>(
+                "api_version=2
+id='memory'
+name='Memory'
+command='node'
+capabilities=['provide_context','task_summary']
+",
+            )?,
+            json!({}),
+            PathBuf::new(),
+            ui_bus,
+        ));
         let plugin = Plugin {
             manifest: memory,
             enabled: true,
@@ -4630,20 +3981,8 @@ capabilities=['provide_context','task_summary']
             blocked: None,
             project_key: None,
             transient: false,
-            worker: Arc::new(PluginWorker::unscanned(
-                Path::new("."),
-                Path::new("."),
-                &toml::from_str::<PluginManifest>(
-                    "api_version=2
-id='memory'
-name='Memory'
-command='node'
-capabilities=['provide_context','task_summary']
-",
-                )?,
-                json!({}),
-                PathBuf::new(),
-            )),
+            ui_worker: Arc::clone(&worker),
+            worker,
             event_worker: None,
         };
         assert!(plugin.binds_runtime_backend());
@@ -4839,7 +4178,17 @@ first=true
         fs::write(root.join("helper.js"), "module.exports = 1;")?;
         let manifest: PluginManifest =
             toml::from_str("id='helper'\nname='Helper'\ncommand='node'\nargs=['main.js']\n")?;
-        let worker = || PluginWorker::new(&root, &root, &manifest, json!({}), root.join("data"));
+        let ui_bus = Arc::new(PluginUiBus::new());
+        let worker = || {
+            PluginWorker::new(
+                &root,
+                &root,
+                &manifest,
+                json!({}),
+                root.join("data"),
+                ui_bus.clone(),
+            )
+        };
         let before = worker();
         let unchanged = worker();
         assert!(before.same_definition(&unchanged));
@@ -5609,5 +4958,29 @@ description='x'
         )
         .unwrap();
         assert!(process_tool.validate().is_err());
+    }
+
+    #[test]
+    fn before_turn_end_is_admitted_and_unknown_hooks_are_rejected() {
+        let gate: PluginManifest = toml::from_str(
+            "api_version=2
+id='gate'
+name='Gate'
+command='node'
+hooks=['before_turn_end']
+",
+        )
+        .unwrap();
+        gate.validate().unwrap();
+
+        let unknown: PluginManifest = toml::from_str(
+            "id='gate'
+name='Gate'
+command='node'
+hooks=['before_everything']
+",
+        )
+        .unwrap();
+        assert!(unknown.validate().is_err());
     }
 }

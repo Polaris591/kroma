@@ -14,12 +14,15 @@ use std::{
     },
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandAction {
     Continue,
     Exit,
     RunFollowups,
     PauseFollowups,
+    /// A plugin command supplied a task body: run it as the next user task
+    /// exactly once. The text is the user turn, not a second command.
+    Task(String),
 }
 
 pub struct CommandReply {

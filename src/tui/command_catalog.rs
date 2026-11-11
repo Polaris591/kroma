@@ -141,7 +141,7 @@ mod tests {
         let commands = crate::commands::CommandRegistry::builtin(Vec::new()).unwrap();
         for command in COMMANDS {
             let name = command.name;
-            let plugin_owned = name == "/goal" || name.starts_with("/plugin");
+            let plugin_owned = name.starts_with("/plugin");
             assert!(
                 commands.knows(name) || crate::commands::is_full_screen_only(name) || plugin_owned,
                 "catalog lists {name}, but no host dispatches it"

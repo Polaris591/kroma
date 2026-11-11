@@ -4,7 +4,12 @@ use crate::{protocol::ToolCall, shell};
 use anyhow::{bail, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{future::Future, path::Path, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    path::Path,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
 pub type HookFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
@@ -161,7 +166,6 @@ pub trait ToolInterceptor: Send + Sync {
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
     interceptors: Vec<Arc<dyn ToolInterceptor>>,
-    capture_facts: bool,
 }
 
 impl ToolRegistry {
@@ -173,7 +177,6 @@ impl ToolRegistry {
         Self {
             tools: vec![Arc::new(BuiltinShell)],
             interceptors: Vec::new(),
-            capture_facts: false,
         }
     }
 
@@ -213,10 +216,6 @@ impl ToolRegistry {
             .ok_or_else(|| anyhow::anyhow!("unknown tool: {name}"))?;
         self.tools.remove(index);
         Ok(())
-    }
-
-    pub(crate) fn capture_execution_facts(&mut self, enabled: bool) {
-        self.capture_facts = enabled;
     }
 
     pub fn register_interceptor(&mut self, interceptor: Arc<dyn ToolInterceptor>) {
@@ -291,7 +290,6 @@ impl ToolRegistry {
                         .to_string(),
                 ),
                 warnings: Vec::new(),
-                raw: RawExecution::default(),
             };
         }
         // The default (no-hook) execution path performs no ToolCall clone,
@@ -308,20 +306,9 @@ impl ToolRegistry {
                         .to_string(),
                 ),
             };
-            let raw = if self.capture_facts {
-                raw_execution(
-                    &call.function.name,
-                    &call.function.arguments,
-                    &result,
-                    result.is_error,
-                )
-            } else {
-                RawExecution::default()
-            };
             return ToolExecution {
                 result,
                 warnings: Vec::new(),
-                raw,
             };
         }
         let mut effective = call.clone();
@@ -330,7 +317,6 @@ impl ToolRegistry {
                 return ToolExecution {
                     result: ToolResult::error(format!("before_tool_call failed: {error:#}")),
                     warnings: Vec::new(),
-                    raw: RawExecution::default(),
                 };
             }
             if effective.id != call.id
@@ -342,7 +328,6 @@ impl ToolRegistry {
                         "tool interceptor cannot change call id, kind or name",
                     ),
                     warnings: Vec::new(),
-                    raw: RawExecution::default(),
                 };
             }
         }
@@ -363,8 +348,7 @@ impl ToolRegistry {
                         "before_tool_call changed edit_file path after project instruction preflight; ask the model to replan with the new file path",
                     ),
                     warnings: Vec::new(),
-                    raw: RawExecution::default(),
-                };
+                    };
             }
         }
         let mut result = match self
@@ -381,18 +365,6 @@ impl ToolRegistry {
         if effective.function.arguments != call.function.arguments {
             result.executed_arguments = Some(effective.function.arguments.clone());
         }
-        // Capture facts before the after hook: a rewritten result must never
-        // manufacture a passing check.
-        let raw = if self.capture_facts {
-            raw_execution(
-                &effective.function.name,
-                &effective.function.arguments,
-                &result,
-                result.is_error,
-            )
-        } else {
-            RawExecution::default()
-        };
         let mut warnings = Vec::new();
         for hook in &self.interceptors {
             // Hooks receive &mut and may patch the result before failing. Keep
@@ -406,28 +378,13 @@ impl ToolRegistry {
                 break;
             }
         }
-        ToolExecution {
-            result,
-            warnings,
-            raw,
-        }
+        ToolExecution { result, warnings }
     }
-}
-
-/// Raw execution facts captured before any `after_tool_result` hook can rewrite
-/// the result. Host-private: not part of [`ToolResult`] or the [`Tool`] trait, so
-/// third-party tools keep the existing contract.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct RawExecution {
-    pub is_error: bool,
-    pub command: Option<String>,
-    pub exit_code: Option<i32>,
 }
 
 pub(crate) struct ToolExecution {
     pub result: ToolResult,
     pub warnings: Vec<String>,
-    pub raw: RawExecution,
 }
 
 /// The built-in shell reports its own decoded command and exit status in its
@@ -435,11 +392,7 @@ pub(crate) struct ToolExecution {
 /// A tool that produced nothing for a whole idle window is indistinguishable
 /// from a stuck one. Dropping its future stops waiting, but only some tools
 /// (notably the shell) can guarantee process cancellation; side effects remain.
-pub(crate) fn idle_timeout(
-    name: &str,
-    limit: std::time::Duration,
-    arguments: &str,
-) -> ToolExecution {
+pub(crate) fn idle_timeout(name: &str, limit: std::time::Duration) -> ToolExecution {
     let content = format!(
         "[no output] tool '{name}' produced no output for {}s; Kroma stopped waiting for the result. \
 The operation may have partially completed, or a remote/plugin task may still be running. \
@@ -449,33 +402,9 @@ Set KROMA_TOOL_IDLE_SECS=0 to disable this guard.",
     );
     let result = ToolResult::error(content);
     ToolExecution {
-        raw: raw_execution(name, arguments, &result, true),
         result,
         warnings: Vec::new(),
     }
-}
-
-fn raw_execution(name: &str, arguments: &str, result: &ToolResult, is_error: bool) -> RawExecution {
-    let mut raw = RawExecution {
-        is_error,
-        ..RawExecution::default()
-    };
-    if name != builtin_shell_tool_name() {
-        return raw;
-    }
-    raw.command = serde_json::from_str::<Value>(arguments)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("command")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        });
-    raw.exit_code = serde_json::from_str::<Value>(&result.content)
-        .ok()
-        .and_then(|value| value.get("exit_code").and_then(Value::as_i64))
-        .and_then(|code| i32::try_from(code).ok());
-    raw
 }
 
 // One stable wire name independent of the selected platform shell dialect.
@@ -688,6 +617,13 @@ impl Tool for AskTool {
 }
 
 fn parse_ask(arguments: &str) -> Result<AskRequest> {
+    ask_request_from_value(&serde_json::from_str(arguments)?)
+}
+
+/// One question in the shape a plugin or the model can send: `question`,
+/// `options` and optional `multiple`. Validation lives here so every caller
+/// asks for the same thing.
+pub fn ask_request_from_value(arguments: &Value) -> Result<AskRequest> {
     #[derive(Deserialize)]
     struct Args {
         question: String,
@@ -695,7 +631,7 @@ fn parse_ask(arguments: &str) -> Result<AskRequest> {
         #[serde(default)]
         multiple: bool,
     }
-    let args: Args = serde_json::from_str(arguments)?;
+    let args: Args = serde_json::from_value(arguments.clone())?;
     let question = args.question.trim();
     if question.is_empty() {
         bail!("question must not be empty");
@@ -877,7 +813,7 @@ mod tests {
 
     #[test]
     fn idle_timeout_never_claims_remote_operation_stopped() {
-        let outcome = idle_timeout("plugin_tool", Duration::from_secs(1), "{}");
+        let outcome = idle_timeout("plugin_tool", Duration::from_secs(1));
         assert!(outcome.result.is_error);
         assert!(outcome.result.content.contains("outcome is unknown"));
         assert!(!outcome.result.content.contains("was stopped"));
@@ -1464,4 +1400,21 @@ mod ask_tests {
         assert_eq!(parsed.options, vec!["a".to_owned(), "b".to_owned()]);
         assert!(parsed.multiple);
     }
+}
+
+/// The one interactive surface this process can offer a plugin. A frontend
+/// registers it once; a headless run leaves it unset and `ui.ask` fails fast.
+fn host_asker_slot() -> &'static Mutex<Option<Arc<dyn Asker>>> {
+    static ASKER: std::sync::OnceLock<Mutex<Option<Arc<dyn Asker>>>> = std::sync::OnceLock::new();
+    ASKER.get_or_init(|| Mutex::new(None))
+}
+
+pub fn set_host_asker(asker: Arc<dyn Asker>) {
+    if let Ok(mut slot) = host_asker_slot().lock() {
+        *slot = Some(asker);
+    }
+}
+
+pub fn host_asker() -> Option<Arc<dyn Asker>> {
+    host_asker_slot().lock().ok().and_then(|slot| slot.clone())
 }

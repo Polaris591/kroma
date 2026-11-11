@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>UI Lab</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="card">
+    <div class="row">
+      <strong>UI Lab 自定义页面</strong>
+      <span id="session" class="muted">等待会话…</span>
+    </div>
+    <div class="metric">
+      <div><small>计数</small><div id="counter" class="val">0</div></div>
+      <div><small>最近工具</small><div id="tool" class="val">—</div></div>
+    </div>
+    <div class="actions">
+      <button id="btn-inc" class="primary">+1 并同步</button>
+      <button id="btn-composer">填入输入框</button>
+      <button id="btn-notify">发通知</button>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

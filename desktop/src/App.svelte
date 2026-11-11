@@ -1,17 +1,18 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
+  import { listen } from '@tauri-apps/api/event';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { AlertCircle, LoaderCircle, Paperclip, X } from '@lucide/svelte';
   import {
-    api, type Bootstrap, type SessionSnapshot, type DesktopEvent, type StreamEnvelope,
+    api, type Bootstrap, type DesktopSurface, type PluginUiEvent,
+    type SessionSnapshot, type DesktopEvent, type StreamEnvelope,
   } from './lib/api';
   import { createLatestNavigation, sessionLabel } from './lib/chat-ui';
   import {
     applySnapshot, applySessionSwitch, createOperationGuard, isActiveTask, sessionPreview,
   } from './lib/snapshot';
   import { steerNotice, type SteerOutcome } from './lib/steering';
-  import { goalAllowsFollowup, goalFromSnapshot, goalControlLine, goalNotice, type GoalActionId, type GoalState } from './lib/goal';
   import {
     enqueueFollowup, hasPersistedSessionId, loadFollowups, moveFollowup,
     saveFollowups, shouldStartNextFollowup, MAX_FOLLOWUPS, type FollowupTask,
@@ -27,7 +28,13 @@
   import type { SessionDestination, SessionTarget, Tab, TaskResultStatus } from './lib/ui-types';
   import type { LiveActivity } from './lib/transcript';
   import { foldLiveEvents } from './lib/live-events';
-  import { loadPresentation, pluginShortcuts, shortcutFor } from './lib/plugin-ui';
+  import {
+    applyPluginUiEvent, applyPresentation, applySnapshotPluginUi, desktopSurfaces, livePluginPanel,
+    loadPresentation, pluginColors, pluginShortcuts, pluginThemeStyle, pluginWidgets, shortcutFor,
+  } from './lib/plugin-ui';
+  import {
+    dismissAnswer, nextAsk, readAsk, type AskAnswer, type AskQuestion,
+  } from './lib/ask-question';
   import SessionSidebar from './components/SessionSidebar.svelte';
   import Topbar from './components/Topbar.svelte';
   import ChatTranscript from './components/ChatTranscript.svelte';
@@ -35,6 +42,9 @@
   import AppBanner from './components/AppBanner.svelte';
   import SettingsView from './components/SettingsView.svelte';
   import PluginsView from './components/PluginsView.svelte';
+  import PanelBlocksView from './components/PanelBlocksView.svelte';
+  import PluginWidgets from './components/PluginWidgets.svelte';
+  import PluginDesktopFrame from './components/PluginDesktopFrame.svelte';
   import AddModelDialog from './components/AddModelDialog.svelte';
   import AbilitiesDialog from './components/AbilitiesDialog.svelte';
   import RewindDialog from './components/RewindDialog.svelte';
@@ -67,12 +77,8 @@
   let taskResult: TaskResultStatus = '';
   let cancellationRequested = false;
   let taskSnapshotReceived = false;
-  // Goal state is host-published (kind: task_control); the renderer never
-  // infers it from the transcript.
-  let goal: GoalState | null = null;
-  let goalStatusPending = false;
-  let goalActionBusy = false;
-  let goalStatusTimer: ReturnType<typeof setTimeout> | null = null;
+  // The plugin question that currently owns the composer slot.
+  let pendingAsk: AskQuestion | null = null;
   let followups: FollowupTask[] = [];
   let followupScope = '';
   let followupPaused = true;
@@ -83,6 +89,9 @@
   let navigationBusy = false;
   let navigationProject = '';
   let previewSnapshot: SessionSnapshot | null = null;
+  let lastSnapshotRef: SessionSnapshot | null = null;
+  let widgetActionBusy = false;
+  let openDesktopModal: DesktopSurface | null = null;
   const previewCache = new Map<string, SessionSnapshot>();
   let sidebar: SessionSidebar;
   let chat: ChatTranscript;
@@ -93,7 +102,24 @@
   const bootstrapGuard = createOperationGuard();
 
   $: snapshot = switchingTo ? previewSnapshot : (data?.snapshot ?? null);
-  $: if (!running) goal = goalFromSnapshot(snapshot);
+  $: if (data?.snapshot !== lastSnapshotRef) {
+    lastSnapshotRef = data?.snapshot ?? null;
+    applySnapshotPluginUi(lastSnapshotRef);
+  }
+  $: if (openDesktopModal && !$desktopSurfaces.some(s => s.plugin_id === openDesktopModal?.plugin_id)) {
+    openDesktopModal = null;
+  }
+  $: if (tab.startsWith('plugin:') && !$desktopSurfaces.some(s => s.plugin_id === tab.slice('plugin:'.length))) {
+    tab = 'chat';
+  }
+  $: sidebarWidgets = $pluginWidgets.filter(w => w.placement === 'sidebar');
+  $: sidebarDesktopSurfaces = $desktopSurfaces.filter(s => s.slot === 'sidebar');
+  $: composerDesktopSurfaces = $desktopSurfaces.filter(s => s.slot === 'above_composer');
+  $: activePluginTabSurface = tab.startsWith('plugin:')
+    ? $desktopSurfaces.find(s => s.plugin_id === tab.slice('plugin:'.length)) ?? null
+    : null;
+  $: hasRightDock = sidebarWidgets.length > 0 || sidebarDesktopSurfaces.length > 0;
+  $: appThemeStyle = pluginThemeStyle($pluginColors);
   $: modelName = data?.connected_model || '未连接模型';
   // The taskbar is the cheapest "still working" signal on a desktop.
   $: windowTitle = `${running ? '● ' : ''}${currentSessionName || 'Kroma'} — Kroma`;
@@ -111,15 +137,8 @@
   $: currentSessionName = currentSessionEntry ? sessionLabel(currentSessionEntry) : '新会话';
   $: hasSession = !!snapshot?.session_id && snapshot.session_id !== 'unknown';
   // Mirrors the original render branches: the chat pane owns the fallback case.
-  $: chatVisible = initialized && !(tab === 'settings' && data) && !(tab === 'plugins' && data);
+  $: chatVisible = initialized && !(tab === 'settings' && data) && !(tab === 'plugins' && data) && !tab.startsWith('plugin:');
 
-  // A goal belongs to one conversation generation; a switch, fork or rewind
-  // must not keep showing the previous goal.
-  function resetGoal() {
-    goal = goalFromSnapshot(data?.snapshot);
-    goalStatusPending = false;
-    if (goalStatusTimer !== null) { clearTimeout(goalStatusTimer); goalStatusTimer = null; }
-  }
   function showError(failure: unknown) { error = failure instanceof Error ? failure.message : String(failure); }
   function toast(message: string) { notice = message; }
   function sessionProject(): string { return data?.project || ''; }
@@ -164,7 +183,6 @@
     clearDeletedSessions() { recentlyDeleted = []; },
     showError,
     toast,
-    resetGoal,
     syncHistory() { chat?.syncHistory(); },
     restoreDraft,
     restoreFollowups,
@@ -241,7 +259,8 @@
         data = await api.openProject(project);
         chat?.clearReview();
         liveActivities = [];
-        resetGoal();
+        applyPresentation(null);
+        openDesktopModal = null;
       }
       // A previous project change may have released the Runtime, even if a
       // newer click now targets that same project. Reconnect before resuming.
@@ -249,6 +268,7 @@
       if (!data.ready) {
         if (data.profiles.profiles.length || data.plugins.some(plugin => plugin.enabled && plugin.has_model)) {
           data = await api.connect();
+          void loadPresentation();
         } else {
           tab = 'settings';
           throw new Error('请先连接模型，然后再打开该工作区的会话');
@@ -257,6 +277,8 @@
       if (navigation.hasPending) return;
       if (data.snapshot?.session_id !== id) {
         const result = await api.switchSession(id);
+        livePluginPanel.set(null);
+        openDesktopModal = null;
         data = {
           ...applySessionSwitch(data, result.snapshot, result.title),
           connected_model: result.connected_model,
@@ -264,7 +286,6 @@
           thinking_levels: result.thinking_levels,
         };
         rememberPreview(project, result.snapshot);
-        resetGoal();
       }
     } catch (failure) {
       // An interrupted openProject/switchSession can leave the backend in a
@@ -324,7 +345,20 @@
     }, 1000);
     void commands.initialize();
     let stop: (() => void) | undefined;
+    let stopPluginUi: (() => void) | undefined;
     let mounted = true;
+    void listen<PluginUiEvent>('plugin_ui', event => {
+      if (!mounted || !event.payload) return;
+      applyPluginUiEvent(event.payload, {
+        onNotify: (message, level) => {
+          if (level === 'error') error = message;
+          else toast(message);
+        },
+        onComposerSet: (text, mode) => {
+          composer?.setDraftText(text, mode);
+        },
+      });
+    }).then(fn => { if (mounted) stopPluginUi = fn; else fn(); }).catch(() => {});
     void getCurrentWebview().onDragDropEvent(event => {
       if (event.payload.type === 'enter') draggingFiles = tab === 'chat';
       else if (event.payload.type === 'leave') draggingFiles = false;
@@ -334,7 +368,7 @@
       }
     }).then(fn => { if (mounted) stop = fn; else fn(); }).catch(() => {});
     return () => {
-      mounted = false; stop?.();
+      mounted = false; stop?.(); stopPluginUi?.();
       saveOnExit();
       composer?.cancelDraftTimer();
       window.removeEventListener('beforeunload', saveOnExit);
@@ -350,7 +384,6 @@
     const sameSession = previous?.session_id === next.session_id;
     if (previous && sameSession) chat?.carrySnapshot(previous, next);
     data = applySnapshot(data, next);
-    goal = goalFromSnapshot(next);
     if (sessions) data = {...data, sessions};
     if (groups) data = {...data, session_groups:groups};
     if (!sameSession) {
@@ -370,24 +403,36 @@
     liveSequence = folded.state.sequence;
     modelStartIndex = folded.state.modelStartIndex;
     for (const warning of folded.warnings) toast(warning);
-    if (folded.goal) {
-      goal = folded.goal;
-      // A /goal status request answers with the host's committed state, which
-      // arrives here; only now can the notice report the real status.
-      if (goalStatusPending) {
-        goalStatusPending = false;
-        if (goalStatusTimer !== null) { clearTimeout(goalStatusTimer); goalStatusTimer = null; }
-        toast(goalNotice(folded.goal));
-      }
-    }
     // Dropped live events leave a gap that only the durable history can fill.
     if (folded.resync) void commands.refresh();
     void chat?.scrollIfBottom();
   }
 
+  // One question at a time: a newer one supersedes the open bar, and the
+  // superseded question is answered `dismissed` so no plugin waits forever.
+  function receiveAsk(raw: unknown) {
+    const incoming = readAsk(raw);
+    if (!incoming) return;
+    const {pending, dismiss} = nextAsk(pendingAsk, incoming);
+    pendingAsk = pending;
+    if (dismiss !== null) void answerQuestion(dismissAnswer(dismiss));
+  }
+
+  // Closing the bar is never approval: only a real pick or a typed answer
+  // leaves `dismissed` false. The bar disappears first, so the composer is
+  // usable again even if the host rejects an answer for a finished question.
+  async function answerQuestion(answer: AskAnswer) {
+    if (pendingAsk?.id === answer.id) pendingAsk = null;
+    try { await api.answerQuestion(answer); }
+    catch (failure) { showError(failure); }
+    // The composer is back in its slot; the person keeps typing where they left off.
+    void tick().then(() => composer?.focus());
+  }
+
   function onStream(event: StreamEnvelope, generation: number) {
     if (!isActiveTask(generation, taskGeneration)) return;
     if (event.kind === 'batch') applyEvents(event.events);
+    if (event.kind === 'ask') receiveAsk(event.ask);
     if (event.kind === 'snapshot' && data) {
       taskSnapshotReceived = true;
       installTaskSnapshot(event.snapshot, event.sessions, event.session_groups);
@@ -418,6 +463,7 @@
     taskResult = '';
     cancellationRequested = false;
     taskSnapshotReceived = false;
+    pendingAsk = null;
     error = '';
     await chat?.scrollDown();
     try {
@@ -441,10 +487,9 @@
       // A plugin may have been installed or edited outside this window.
       void loadPresentation();
 
-      const finalGoal = goalFromSnapshot(result.snapshot);
-      completed = result.result.status === 'completed' && goalAllowsFollowup(finalGoal);
+      completed = result.result.status === 'completed';
       void announceTaskResult({
-        status: taskResult, sessionName: currentSessionName, messages: result.snapshot.messages, goal: finalGoal,
+        status: taskResult, sessionName: currentSessionName, messages: result.snapshot.messages,
       });
       if (result.result.status === 'cancelled') {
         toast('任务已停止；后续任务已暂停，之前执行的操作不会自动撤销');
@@ -463,6 +508,8 @@
         running = false;
         draftPrompt = '';
         liveActivities = [];
+        // A finished task cannot still be waiting for an answer.
+        pendingAsk = null;
         if (!completed && followups.length) {
           followupPaused = true;
           followupExpanded = true;
@@ -488,21 +535,7 @@
   async function steerTask(instruction: string): Promise<SteerOutcome | null> {
     try {
       const outcome = await api.steer(instruction);
-      // A /goal status or stop line is not an inserted instruction. The status
-      // request re-emits the host's committed goal, so the notice is deferred
-      // until that event lands (see applyEvents).
-      if (outcome?.kind === 'status') {
-        goalStatusPending = true;
-        // Fallback for a host that does not re-publish its state: never leave
-        // the user without an answer.
-        if (goalStatusTimer !== null) clearTimeout(goalStatusTimer);
-        goalStatusTimer = setTimeout(() => {
-          goalStatusTimer = null;
-          if (!goalStatusPending) return;
-          goalStatusPending = false;
-          toast(steerNotice(outcome, goal));
-        }, 800);
-      } else toast(steerNotice(outcome));
+      toast(steerNotice(outcome));
       return outcome ?? {};
     } catch (failure) {
       showError(failure); // Keep the text intact for a deliberate retry.
@@ -527,34 +560,6 @@
     persistFollowups();
     toast('已加入后续任务队列');
     return true;
-  }
-
-  // Goal controls reuse the existing IPC: a running goal is paused or
-  // cancelled through steer_task, a paused one needs a real user turn because
-  // the host only resumes a goal from a submitted control line.
-  async function runGoalAction(action: GoalActionId) {
-    const target = goal;
-    if (!target || goalActionBusy || busy || compacting || !data?.ready) return;
-    goalActionBusy = true;
-    if (action === 'pause' || action === 'cancel') {
-      cancellationRequested = true;
-      followupPaused = true;
-    }
-    error = '';
-    try {
-      if (action === 'resume' || (action === 'cancel' && !running)) {
-        await executeTask(goalControlLine(action, target.command), [], false);
-        return;
-      }
-      const outcome = await api.steer(goalControlLine(action));
-      toast(action === 'pause'
-        ? '已请求暂停目标；已完成的修改会保留'
-        : steerNotice(outcome));
-    } catch (failure) {
-      showError(failure);
-    } finally {
-      goalActionBusy = false;
-    }
   }
 
   async function runNextFollowup() {
@@ -644,9 +649,39 @@
   function setBusy(value: boolean) { busy = value; }
   function clearError() { error = ''; }
 
+  async function handleWidgetAction(pluginId: string, widgetId: string, actionId: string) {
+    if (widgetActionBusy) return;
+    widgetActionBusy = true;
+    try {
+      const reply = await api.pluginUiAction(pluginId, widgetId, actionId);
+      if (reply.content?.trim()) toast(reply.content);
+      if (reply.task?.trim()) {
+        tab = 'chat';
+        if (running) queueFollowup(reply.task);
+        else void executeTask(reply.task, [], true);
+      }
+    } catch (failure) {
+      showError(failure);
+    } finally {
+      widgetActionBusy = false;
+    }
+  }
+
+  function openDesktopPanel(pluginId: string) {
+    const surface = $desktopSurfaces.find(s => s.plugin_id === pluginId);
+    if (!surface) return;
+    if (surface.slot === 'tab') {
+      tab = `plugin:${surface.plugin_id}`;
+    } else {
+      openDesktopModal = surface;
+    }
+  }
+
   function handleGlobalKey(event: KeyboardEvent) {
     if (event.key === 'Escape') {
-      if (showAddModel) { showAddModel = false; event.preventDefault(); }
+      if (openDesktopModal) { openDesktopModal = null; event.preventDefault(); }
+      else if ($livePluginPanel) { livePluginPanel.set(null); event.preventDefault(); }
+      else if (showAddModel) { showAddModel = false; event.preventDefault(); }
       else if (sidebar?.closeDeleteDialog()) { event.preventDefault(); }
       else if (chat?.closeReview()) { event.preventDefault(); }
       else if (sidebar?.closeSearch()) { event.preventDefault(); }
@@ -656,7 +691,7 @@
     }
     // Modal dialogs own their keyboard interaction; global shortcuts must
     // never unexpectedly switch tabs or sessions behind an open dialog.
-    if (showAddModel || sidebar?.hasBlockingDialog() || chat?.isReviewOpen()) return;
+    if (openDesktopModal || $livePluginPanel || showAddModel || sidebar?.hasBlockingDialog() || chat?.isReviewOpen()) return;
     // A plugin's declared Alt+letter shortcut runs its command as if typed.
     const shortcut = shortcutFor(event, $pluginShortcuts);
     if (shortcut) {
@@ -689,7 +724,7 @@
 
 <svelte:head><title>Kroma Desktop</title></svelte:head>
 <svelte:window onkeydown={handleGlobalKey} />
-<div class="app-shell" class:sidebar-visible={sidebarVisible} class:narrow-layout={narrowLayout}>
+<div class="app-shell" class:sidebar-visible={sidebarVisible} class:narrow-layout={narrowLayout} style={appThemeStyle}>
   {#if narrowLayout && sidebarVisible}
     <button class="sidebar-backdrop" aria-label="关闭侧边栏" onclick={() => sidebarVisible = false}></button>
   {/if}
@@ -716,6 +751,7 @@
       onExport={() => void commands.exportCurrentSession()}
       onSelectModel={commands.changeModel} onAddModel={() => showAddModel = true}
       onManageModels={() => tab = 'settings'} onSelectReasoning={commands.changeReasoning}/>
+    <PluginWidgets placement="header" busy={widgetActionBusy} onAction={(p, w, a) => void handleWidgetAction(p, w, a)}/>
     <AppBanner error={error} notice={notice} undoAvailable={recentlyDeleted.length > 0} {busy} {running}
       onDismissError={clearError}
       onDismissNotice={() => { notice = ''; recentlyDeleted = []; }}
@@ -728,7 +764,19 @@
         onAdd={() => showAddModel=true}/></div>
     {:else if tab === 'plugins' && data}
       <div class="page-scroll"><PluginsView plugins={data.plugins} onAction={commands.pluginAction}
-        onInstall={commands.installPlugin}/></div>
+        onInstall={commands.installPlugin} onOpenDesktopPanel={openDesktopPanel}/></div>
+    {:else if activePluginTabSurface && data}
+      <div class="plugin-tab-page">
+        <PluginDesktopFrame
+          surface={activePluginTabSurface}
+          sessionId={snapshot?.session_id ?? ''}
+          project={data.project}
+          fullHeight={true}
+          onRunTask={(text) => { tab = 'chat'; void executeTask(text, [], true); }}
+          onSetComposer={(text, mode) => composer?.setDraftText(text, mode)}
+          onNotify={(msg, level) => level === 'error' ? (error = msg) : toast(msg)}
+          onError={showError}/>
+      </div>
     {/if}
     <!-- The chat pane stays mounted while another tab is active so the draft,
          attachments and loaded history survive a tab switch, exactly as they
@@ -745,30 +793,74 @@
             <button title="稍后" onclick={() => mcpDismissed = true}><X size={15}/></button>
           </div>
         {/if}
-        <ChatTranscript bind:this={chat} {data} {snapshot} {switchingTo} {previewSnapshot} {running} {busy}
-          ready={!!data?.ready} {draftPrompt} {liveActivities} {activeElapsed} {taskSnapshotReceived}
-          getData={() => data} getTaskGeneration={() => taskGeneration}
-          onRewind={turns.askRewind} onFork={(index) => void turns.forkFromTurn(index)}
-          onEdit={(index, text) => void turns.editFromTurn(index, text)}
-          onUsePrompt={(text) => composer?.setPrompt(text)}
-          onSetTab={(next) => tab = next} showError={showError}/>
-        <ComposerPanel bind:this={composer}
-          project={data?.project ?? ''} sessionId={snapshot?.session_id ?? ''}
-          ready={!!data?.ready} {running} {busy} {compacting} {navigationBusy} {snapshot}
-          {goal} {goalActionBusy} {followups} {followupPaused} {followupExpanded} {taskResult}
-          onSend={sendTask} onSteer={steerTask} onBlocked={blockedSend}
-          onQueueFollowup={queueFollowup}
-          onGoalAction={(action) => void runGoalAction(action)}
-          onCompact={turns.compactNow}
-          onShowAbilities={() => abilitiesOpen = true}
-          onCancelTask={() => void cancelTask()}
-          onToggleFollowups={toggleFollowups}
-          onPauseFollowups={pauseFollowups}
-          onResumeFollowups={resumeFollowups}
-          onRemoveFollowup={removeFollowup}
-          onReorderFollowup={reorderFollowup}
-          onClearFollowups={clearFollowups}
-          {showError} {clearError} {toast}/>
+        <div class="chat-body-row">
+          <div class="chat-main-column">
+            <ChatTranscript bind:this={chat} {data} {snapshot} {switchingTo} {previewSnapshot} {running} {busy}
+              ready={!!data?.ready} {draftPrompt} {liveActivities} {activeElapsed} {taskSnapshotReceived}
+              getData={() => data} getTaskGeneration={() => taskGeneration}
+              onRewind={turns.askRewind} onFork={(index) => void turns.forkFromTurn(index)}
+              onEdit={(index, text) => void turns.editFromTurn(index, text)}
+              onUsePrompt={(text) => composer?.setPrompt(text)}
+              onSetTab={(next) => tab = next} showError={showError}/>
+            <PluginWidgets placement="above_composer" busy={widgetActionBusy}
+              onAction={(p, w, a) => void handleWidgetAction(p, w, a)}/>
+            {#each composerDesktopSurfaces as surface (surface.plugin_id)}
+              <div class="composer-desktop-slot">
+                <PluginDesktopFrame
+                  {surface}
+                  sessionId={snapshot?.session_id ?? ''}
+                  project={data?.project ?? ''}
+                  onRunTask={(text) => void executeTask(text, [], true)}
+                  onSetComposer={(text, mode) => composer?.setDraftText(text, mode)}
+                  onNotify={(msg, level) => level === 'error' ? (error = msg) : toast(msg)}
+                  onError={showError}/>
+              </div>
+            {/each}
+            <ComposerPanel bind:this={composer}
+              project={data?.project ?? ''} sessionId={snapshot?.session_id ?? ''}
+              ready={!!data?.ready} {running} {busy} {compacting} {navigationBusy} {snapshot}
+              {followups} {followupPaused} {followupExpanded} {taskResult}
+              ask={pendingAsk} onAnswer={(answer) => void answerQuestion(answer)}
+              onSend={sendTask} onSteer={steerTask} onBlocked={blockedSend}
+              onQueueFollowup={queueFollowup}
+              onCompact={turns.compactNow}
+              onShowAbilities={() => abilitiesOpen = true}
+              onCancelTask={() => void cancelTask()}
+              onToggleFollowups={toggleFollowups}
+              onPauseFollowups={pauseFollowups}
+              onResumeFollowups={resumeFollowups}
+              onRemoveFollowup={removeFollowup}
+              onReorderFollowup={reorderFollowup}
+              onClearFollowups={clearFollowups}
+              {showError} {clearError} {toast}/>
+            <PluginWidgets placement="below_composer" busy={widgetActionBusy}
+              onAction={(p, w, a) => void handleWidgetAction(p, w, a)}/>
+            <PluginWidgets placement="footer" busy={widgetActionBusy}
+              onAction={(p, w, a) => void handleWidgetAction(p, w, a)}/>
+          </div>
+          {#if hasRightDock}
+            <aside class="plugin-right-dock" aria-label="插件侧边区">
+              <PluginWidgets placement="sidebar" busy={widgetActionBusy}
+                onAction={(p, w, a) => void handleWidgetAction(p, w, a)}/>
+              {#each sidebarDesktopSurfaces as surface (surface.plugin_id)}
+                <section class="plugin-widget-card plugin-dock-frame">
+                  <header class="plugin-widget-head">
+                    <strong>{surface.title}</strong>
+                    <span>{surface.plugin_id}</span>
+                  </header>
+                  <PluginDesktopFrame
+                    {surface}
+                    sessionId={snapshot?.session_id ?? ''}
+                    project={data?.project ?? ''}
+                    onRunTask={(text) => void executeTask(text, [], true)}
+                    onSetComposer={(text, mode) => composer?.setDraftText(text, mode)}
+                    onNotify={(msg, level) => level === 'error' ? (error = msg) : toast(msg)}
+                    onError={showError}/>
+                </section>
+              {/each}
+            </aside>
+          {/if}
+        </div>
       </div>
   </main>
   {#if showAddModel}
@@ -783,5 +875,43 @@
     <RewindDialog files={rewindTarget.files} added={rewindTarget.added} removed={rewindTarget.removed}
       busy={rewinding} onCancel={() => rewindTarget = null}
       onConfirm={(restore) => void turns.confirmRewind(restore)}/>
+  {/if}
+  {#if $livePluginPanel}
+    <div class="panel-overlay">
+      <button class="panel-scrim" aria-label="关闭面板" onclick={() => livePluginPanel.set(null)}></button>
+      <div class="panel-card" role="dialog" aria-modal="true" aria-label={$livePluginPanel.title}>
+        <div class="panel-head">
+          <h3>{$livePluginPanel.title}</h3>
+          <button class="icon-button" aria-label="关闭面板" onclick={() => livePluginPanel.set(null)}>×</button>
+        </div>
+        {#if $livePluginPanel.blocks.length}
+          <PanelBlocksView blocks={$livePluginPanel.blocks} actions={$livePluginPanel.actions}
+            busy={widgetActionBusy}
+            onAction={(actionId) => void handleWidgetAction($livePluginPanel!.plugin_id, 'panel', actionId)} />
+        {:else}
+          <pre class="panel-body">{$livePluginPanel.text}</pre>
+        {/if}
+      </div>
+    </div>
+  {/if}
+  {#if openDesktopModal}
+    <div class="panel-overlay">
+      <button class="panel-scrim" aria-label="关闭自定义界面" onclick={() => openDesktopModal = null}></button>
+      <div class="panel-card panel-card-wide" role="dialog" aria-modal="true" aria-label={openDesktopModal.title}>
+        <div class="panel-head">
+          <h3>{openDesktopModal.title}</h3>
+          <button class="icon-button" aria-label="关闭自定义界面" onclick={() => openDesktopModal = null}>×</button>
+        </div>
+        <PluginDesktopFrame
+          surface={openDesktopModal}
+          sessionId={snapshot?.session_id ?? ''}
+          project={data?.project ?? ''}
+          fullHeight={true}
+          onRunTask={(text) => { openDesktopModal = null; tab = 'chat'; void executeTask(text, [], true); }}
+          onSetComposer={(text, mode) => composer?.setDraftText(text, mode)}
+          onNotify={(msg, level) => level === 'error' ? (error = msg) : toast(msg)}
+          onError={showError}/>
+      </div>
+    </div>
   {/if}
 </div>

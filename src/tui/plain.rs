@@ -59,6 +59,11 @@ impl UiState {
             (String::new(), format!(" · {cache_label} {cache}")),
             (String::new(), format!(" · {cache}")),
         ];
+        let plugin_text = if self.plugin_statuses.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", self.plugin_statuses.join(" · "))
+        };
         for (prefix, suffix) in &right_variants {
             let right = format!("{prefix}{context}{suffix}");
             for think in [
@@ -76,6 +81,13 @@ impl UiState {
                 let left = format!("{}{think}", ellipsize_cells(&self.model, model_width));
                 let used =
                     UnicodeWidthStr::width(left.as_str()) + UnicodeWidthStr::width(right.as_str());
+                let free = width.saturating_sub(used);
+                let plugin_fit = if plugin_text.is_empty() || free < 6 {
+                    String::new()
+                } else {
+                    ellipsize_cells(&plugin_text, free.saturating_sub(1))
+                };
+                let gap = width.saturating_sub(used + UnicodeWidthStr::width(plugin_fit.as_str()));
                 let risk = match (self.context_input, self.context_window) {
                     (Some(input), window) if window > 0 && input as f64 / window as f64 >= 0.9 => {
                         Some(self.semantic_colors().error)
@@ -85,9 +97,15 @@ impl UiState {
                     }
                     _ => None,
                 };
-                return Line::from(vec![
-                    Span::styled(left, Style::default().fg(colors.muted)),
-                    Span::raw(" ".repeat(width.saturating_sub(used))),
+                let mut spans = vec![Span::styled(left, Style::default().fg(colors.muted))];
+                if !plugin_fit.is_empty() {
+                    spans.push(Span::styled(
+                        plugin_fit,
+                        Style::default().fg(colors.accent_text),
+                    ));
+                }
+                spans.extend([
+                    Span::raw(" ".repeat(gap)),
                     Span::styled(prefix.clone(), Style::default().fg(colors.muted)),
                     Span::styled(
                         context.clone(),
@@ -99,6 +117,7 @@ impl UiState {
                     ),
                     Span::styled(suffix.clone(), Style::default().fg(colors.muted)),
                 ]);
+                return Line::from(spans);
             }
         }
         // Extremely small terminals cannot fit four values. Do not wrap,

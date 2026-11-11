@@ -2,10 +2,13 @@
   import type { PluginSummary } from '../lib/api';
   import { api } from '../lib/api';
   import { pluginColors, pluginPanels, slotColor } from '../lib/plugin-ui';
+  import type { PanelBlock } from '../lib/panel-blocks';
+  import PanelBlocksView from './PanelBlocksView.svelte';
   import { Puzzle, Plus, RotateCw, Trash2, SlidersHorizontal, ChevronRight } from '@lucide/svelte';
   export let plugins: PluginSummary[];
   export let onAction: (action: string, id?: string, path?: string, key?: string, value?: unknown) => Promise<void>;
   export let onInstall: () => Promise<void>;
+  export let onOpenDesktopPanel: ((id: string) => void) | undefined = undefined;
   let selected: string | null = null;
   let editing: Record<string, unknown> = {};
   $: current = plugins.find(p => p.id === selected) ?? null;
@@ -30,9 +33,10 @@
   function secretIsSet(key: string) {
     return current?.set_secrets?.includes(key) ?? false;
   }
-  // A panel body is produced by the plugin itself (`title\n\nbody`), so the
-  // interface never guesses what a plugin wants to show.
-  let panel: {title: string; body: string} | null = null;
+  // A panel body is produced by the plugin itself. A current host returns
+  // structured blocks; an older one only knows `title\n\nbody`, which still
+  // renders as plain text, so the interface never has to guess.
+  let panel: {title: string; blocks: PanelBlock[] | null; body: string} | null = null;
   $: panels = current ? $pluginPanels.filter(entry => entry.id === current!.id) : [];
   // A declared theme paints the plugin's own surface, not the whole window.
   $: panelColors = [
@@ -42,11 +46,21 @@
   ].filter(Boolean).join(";");
   async function openPanel(id: string) {
     try {
+      const view = await api.pluginPanelView(id);
+      panel = {
+        title: view?.title || current?.name || '插件面板',
+        blocks: Array.isArray(view?.blocks) ? view.blocks : [],
+        body: '',
+      };
+      return;
+    } catch { /* no structured view: fall back to the string panel below */ }
+    try {
       const content = await api.pluginPanel(id);
       const [title, ...rest] = content.split('\n\n');
-      panel = {title: title.trim() || current?.name || '插件面板', body: rest.join('\n\n') || title};
+      panel = {title: title.trim() || current?.name || '插件面板', blocks: null,
+        body: rest.join('\n\n') || title};
     } catch (failure) {
-      panel = {title: current?.name || '插件面板', body: String(failure)};
+      panel = {title: current?.name || '插件面板', blocks: null, body: String(failure)};
     }
   }
 </script>
@@ -114,7 +128,7 @@
           {:else}
             <p class="muted">此插件没有声明设置字段。</p>
           {/if}
-          {#if panels.length}
+          {#if panels.length || current.has_desktop_ui}
             <div class="plugin-config-head"><Puzzle size={15}/> 插件面板</div>
             <div class="panel-buttons">
               {#each panels as entry (entry.id)}
@@ -122,6 +136,11 @@
                   {entry.title || entry.id}
                 </button>
               {/each}
+              {#if current.has_desktop_ui && current.enabled && onOpenDesktopPanel}
+                <button class="secondary small" onclick={() => onOpenDesktopPanel?.(current!.id)}>
+                  打开桌面自定义界面
+                </button>
+              {/if}
             </div>
           {/if}
           {#if current.has_model || current.has_context}
@@ -146,7 +165,11 @@
           <h3>{panel.title}</h3>
           <button class="icon-button" aria-label="关闭面板" onclick={() => panel = null}>×</button>
         </div>
-        <pre class="panel-body">{panel.body}</pre>
+        {#if panel.blocks}
+          <PanelBlocksView blocks={panel.blocks} />
+        {:else}
+          <pre class="panel-body">{panel.body}</pre>
+        {/if}
       </div>
     </div>
   {/if}

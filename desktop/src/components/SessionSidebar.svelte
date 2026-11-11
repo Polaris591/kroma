@@ -15,6 +15,7 @@
   } from '../lib/selection';
   import type { OperationGuard } from '../lib/snapshot';
   import type { SessionTarget, Tab } from '../lib/ui-types';
+  import { desktopSurfaces } from '../lib/plugin-ui';
   import DeleteConfirmDialog from './DeleteConfirmDialog.svelte';
   import StorageDialog from './StorageDialog.svelte';
 
@@ -372,6 +373,12 @@
       {#if tab !== 'chat'}
         <button onclick={() => onSetTab('chat')}><ArrowLeft size={17}/> 返回对话</button>
       {/if}
+      {#each $desktopSurfaces.filter(s => s.slot === 'tab') as surface (surface.plugin_id)}
+        <button class:active={tab === `plugin:${surface.plugin_id}`}
+          onclick={() => onSetTab(`plugin:${surface.plugin_id}`)}>
+          <Puzzle size={17}/> {surface.title}
+        </button>
+      {/each}
       <button class:active={tab === 'plugins'} onclick={() => onSetTab('plugins')}><Puzzle size={17}/> 插件</button>
       <button class:active={tab === 'settings'} onclick={() => onSetTab('settings')}><Settings2 size={17}/> 模型与设置</button>
       <button onclick={() => void openStorage()}><HardDrive size={17}/> 本机数据</button>

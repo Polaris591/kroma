@@ -8,7 +8,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Paragraph, Wrap},
     Frame,
 };
 use std::{
@@ -232,43 +232,63 @@ impl Overlay {
         }
     }
 
-    pub fn draw(&mut self, frame: &mut Frame, parent: Rect, theme: Theme, language: Language) {
-        if parent.width < 20 || parent.height < 5 {
-            // A waiting question must never be invisible: show one clipped
-            // line until the terminal is large enough for the full box.
-            let row = Rect::new(parent.x, parent.y, parent.width, 1);
-            let line = Line::from(Span::styled(
-                clip(&self.question, usize::from(parent.width).saturating_sub(2)),
-                Style::default()
-                    .fg(theme.accent_text)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            frame.render_widget(Clear, row);
-            frame.render_widget(Paragraph::new(line), row);
-            return;
+    /// Rows this question needs inside the composer. The input box grows to
+    /// fit the question instead of covering the conversation with a popup.
+    pub fn height(&self, width: u16) -> u16 {
+        let question = wrap(&self.question, width as usize).len().min(2);
+        let options = (self.options.len() + 1).min(6);
+        (question + options + 1) as u16
+    }
+
+    /// Draw the question where the composer normally sits: the person keeps
+    /// typing in the same bottom input line, and the conversation stays visible.
+    pub fn draw_in(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: Theme,
+        language: Language,
+    ) -> Option<(u16, u16)> {
+        if area.width == 0 || area.height == 0 {
+            return None;
         }
-        const WINDOW: usize = 8;
-        let width = parent.width.saturating_sub(4).clamp(20, 72);
-        let inner_width = width.saturating_sub(4) as usize;
-        let title = language.text("Question", "请选择");
+        let width = area.width as usize;
         let mut lines: Vec<Line> = Vec::new();
-        for row in wrap(&self.question, inner_width) {
-            lines.push(Line::from(Span::styled(
-                row,
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-            )));
+        for (index, row) in wrap(&self.question, width.saturating_sub(2))
+            .into_iter()
+            .take(2)
+            .enumerate()
+        {
+            let prefix = if index == 0 { "? " } else { "  " };
+            lines.push(Line::from(vec![
+                Span::styled(prefix, Style::default().fg(theme.accent_text)),
+                Span::styled(
+                    row,
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                ),
+            ]));
         }
-        lines.push(Line::default());
-        let start = self.scroll.min(self.options.len());
-        let end = (start + WINDOW).min(self.row_count());
+        // The question and the hint keep their rows; everything left shows
+        // choices, scrolled around the cursor.
+        let window = (area.height as usize)
+            .saturating_sub(lines.len() + 1)
+            .max(1);
+        let rows = self.row_count();
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + window {
+            self.scroll = self.cursor + 1 - window;
+        }
+        self.scroll = self.scroll.min(rows.saturating_sub(1));
+        let start = self.scroll;
+        let end = (start + window).min(rows);
         let mut typed_row = None;
         for index in start..end {
             if index == self.options.len() {
                 typed_row = Some(lines.len());
             }
-            lines.push(self.row_line(index, inner_width, theme, language));
+            lines.push(self.row_line(index, width.saturating_sub(2), theme, language));
         }
-        lines.push(Line::default());
         let hint = if self.typed.is_some() {
             language.text("Enter submits · Esc goes back", "Enter 提交 · Esc 返回")
         } else if self.multiple {
@@ -282,43 +302,31 @@ impl Overlay {
                 "↑↓ 移动 · 数字直选 · Enter 确认 · Esc 关闭",
             )
         };
-        lines.push(Line::from(Span::styled(
-            hint,
-            Style::default().fg(theme.muted),
-        )));
-        let height = (lines.len() as u16 + 2).min(parent.height);
-        let area = Rect::new(
-            parent.x + parent.width.saturating_sub(width) / 2,
-            parent.y + parent.height.saturating_sub(height) / 2,
-            width,
-            height,
-        );
-        frame.render_widget(Clear, area);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(Span::styled(
-                format!(" {title} "),
-                Style::default().fg(theme.accent_text),
-            ))
-            .style(Style::default().bg(theme.overlay));
-        frame.render_widget(
-            Paragraph::new(lines)
-                .block(block)
-                .wrap(Wrap { trim: false }),
-            area,
-        );
-        // Typing needs a real caret position so an IME candidate window opens
-        // next to the text, exactly like the composer.
+        if (lines.len() as u16) < area.height {
+            lines.push(Line::from(Span::styled(
+                hint,
+                Style::default().fg(theme.muted),
+            )));
+        }
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+        // Typing needs a real caret so an IME candidate window opens next to
+        // the text, exactly like the normal composer.
+        let mut caret = None;
         if let (Some(buffer), Some(row)) = (self.typed.as_ref(), typed_row) {
-            let y = area.y.saturating_add(1 + row as u16);
-            let column = 3
-                + clipped_width(buffer, inner_width)
-                + u16::from(self.multiple) * 4
-                + u16::from(self.options.len() > 9) * 3;
-            if y + 1 < area.bottom() {
-                frame.set_cursor_position((area.x.saturating_add(column).min(area.right() - 2), y));
+            let y = area.y.saturating_add(row as u16);
+            let column = 2 + clipped_width(buffer, width.saturating_sub(2));
+            if y < area.bottom() {
+                let at = (
+                    area.x
+                        .saturating_add(column)
+                        .min(area.right().saturating_sub(1)),
+                    y,
+                );
+                frame.set_cursor_position(at);
+                caret = Some(at);
             }
         }
+        caret
     }
 
     fn row_line(

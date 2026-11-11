@@ -15,13 +15,11 @@
   import { draftStorageKey } from '../lib/drafts';
   import { atTokenRange, insertFileReference } from '../lib/file-suggest';
   import type { FollowupTask } from '../lib/followups';
-  import {
-    goalActions, goalNextStep, goalReasonLabel, goalStatusLabel,
-    type GoalActionId, type GoalState,
-  } from '../lib/goal';
   import type { SteerOutcome } from '../lib/steering';
   import type { TaskResultStatus } from '../lib/ui-types';
   import ContextMeter from './ContextMeter.svelte';
+  import AskBar from './AskBar.svelte';
+  import type { AskAnswer, AskQuestion } from '../lib/ask-question';
   import {
     activityFrames, activityGlyph, composerCap, composerMaxRows, pluginColors, pluginStatuses, slotColor,
   } from '../lib/plugin-ui';
@@ -34,17 +32,17 @@
   export let compacting = false;
   export let navigationBusy = false;
   export let snapshot: SessionSnapshot | null = null;
-  export let goal: GoalState | null = null;
-  export let goalActionBusy = false;
   export let followups: FollowupTask[] = [];
   export let followupPaused = true;
   export let followupExpanded = false;
   export let taskResult: TaskResultStatus = '';
+  // An open plugin question owns the composer slot until it is answered.
+  export let ask: AskQuestion | null = null;
+  export let onAnswer: (answer: AskAnswer) => void;
   export let onSend: (text: string, paths: string[]) => void;
   export let onSteer: (instruction: string) => Promise<SteerOutcome | null>;
   export let onBlocked: () => void;
   export let onQueueFollowup: (text: string) => boolean;
-  export let onGoalAction: (action: GoalActionId) => void;
   export let onCompact: () => Promise<void>;
   export let onShowAbilities: () => void;
   export let onCancelTask: () => void;
@@ -134,8 +132,8 @@
     editorInput?.focus();
   }
 
-  export function setDraftText(text: string) {
-    prompt = text;
+  export function setDraftText(text: string, mode = 'replace') {
+    prompt = mode === 'append' ? (prompt ? `${prompt}${text}` : text) : text;
     void tick().then(() => {
       editorInput?.focus();
       if (editorInput) setEditorHeight(editorInput);
@@ -338,35 +336,6 @@
       <span class="plugin-status" style:color={statusAccent ?? undefined}>{$pluginStatuses.join(' · ') || '运行中'}</span>
     </div>
   {/if}
-  {#if goal && goal.status !== 'none'}
-    <div class="goal-shelf" class:goal-running={goal.status === 'running'}
-      class:goal-paused={goal.status === 'paused'} aria-label="当前目标状态">
-      <div class="goal-heading">
-        <span class="goal-state"><span class="goal-state-dot"></span>{goalStatusLabel(goal.status)}</span>
-        <span class="goal-id" title={goal.owner ? '目标由插件 ' + goal.owner + ' 提供' : '目标状态由宿主提供'}>{goal.id || '未命名目标'}</span>
-        <small class="goal-revision">修订 {goal.revision}</small>
-      </div>
-      {#if goal.summary}
-        <p class="goal-summary" title={goal.summary}>{goal.summary}</p>
-      {/if}
-      {#if goalReasonLabel(goal.reason)}
-        <p class="goal-reason">{goalReasonLabel(goal.reason)}</p>
-      {/if}
-      <p class="goal-next">{goalNextStep(goal.status)}</p>
-      {#if goalActions(goal.status).length}
-        <div class="goal-actions">
-          {#each goalActions(goal.status) as action (action.id)}
-            <button class="goal-action" class:goal-action-stop={action.id === 'cancel'}
-              title={action.hint} disabled={goalActionBusy || busy || compacting || !ready}
-              onclick={() => onGoalAction(action.id)}>
-              {#if action.id === 'pause'}<Pause size={13}/>{:else if action.id === 'resume'}<Play size={13}/>{:else}<Square size={12}/>{/if}
-              {action.label}
-            </button>
-          {/each}
-        </div>
-      {/if}
-    </div>
-  {/if}
   {#if followups.length}
     <div class="followup-shelf">
       <div class="followup-heading">
@@ -410,7 +379,7 @@
       {/if}
     </div>
   {/if}
-  {#if fileQuery !== null && fileResults.length}
+  {#if !ask && fileQuery !== null && fileResults.length}
     <div class="file-suggest" role="listbox" aria-label="引用项目文件">
       <div class="file-suggest-head">引用文件 · {fileResults.length}</div>
       {#each fileResults as path, index (path)}
@@ -425,7 +394,16 @@
       <div class="file-suggest-foot">↑↓ 选择 · Enter 插入 · Esc 关闭</div>
     </div>
   {/if}
-  <div class="composer">
+  {#if ask}
+    <!-- The question takes the composer slot as a bar; the normal message box
+         comes back as soon as it is answered or closed. -->
+    {#key ask.id}
+      <AskBar {ask} {onAnswer}/>
+    {/key}
+  {/if}
+  <!-- Kept mounted but hidden, so the draft, attachments and loaded history
+       survive the question exactly as they survive a tab switch. -->
+  <div class="composer" hidden={!!ask}>
     {#if attached.length}
       <div class="draft-files">
         {#each attached as file, i}

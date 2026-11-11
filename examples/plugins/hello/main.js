@@ -17,7 +17,28 @@ input.on("line", (line) => {
     } else if (request.type === "command" && request.name === "/echo") {
       content = `${prefix}${request.arguments} (call ${++calls})`;
     } else if (request.type === "ui" && request.name === "panel") {
-      content = `Echo plugin status\nRequests handled: ${calls}\nPrefix: ${prefix}`;
+      // A panel may return plain text (older plugins) or structured blocks.
+      // The host draws them: no terminal escapes, no widget ownership here.
+      content = JSON.stringify({
+        blocks: [
+          { type: "heading", text: "Echo plugin" },
+          {
+            type: "keyvalue",
+            rows: [
+              { key: "Requests handled", value: String(calls) },
+              { key: "Prefix", value: prefix },
+            ],
+          },
+          { type: "progress", label: "calls", value: Math.min(calls, 5), max: 5 },
+          {
+            type: "table",
+            headers: ["Item", "Value"],
+            rows: [["state", "ready"]],
+          },
+          { type: "divider" },
+          { type: "text", text: "This panel is drawn by the host, not by the plugin." },
+        ],
+      });
     } else {
       throw new Error("unknown request");
     }

@@ -1,6 +1,6 @@
 use super::*;
 use crate::provider::ModelClient;
-use ratatui::{backend::TestBackend, Terminal};
+use ratatui::{backend::TestBackend, layout::Rect, Terminal};
 
 fn setup() -> (UiState, ModelClient) {
     (
@@ -616,4 +616,166 @@ fn multiline_composer_explains_newline_and_send_or_queue_in_both_languages() {
             assert!(compact.contains(action), "{compact}");
         }
     }
+}
+
+/// A waiting question belongs in the input bar: the conversation stays visible
+/// above it, and typing happens on the same bottom line as a normal prompt.
+#[test]
+fn a_waiting_question_replaces_the_input_bar_instead_of_covering_the_chat() {
+    let (mut ui, _model) = setup();
+    ui.add_user("上面这段对话必须还在");
+    let (answer, _waiting) = tokio::sync::oneshot::channel();
+    let mut overlay = ask::Overlay::new(
+        crate::tools::AskRequest {
+            question: "用哪个数据库？".into(),
+            options: vec!["Postgres".into(), "SQLite".into()],
+            multiple: false,
+        },
+        answer,
+    );
+    let theme = ui.themes.colors;
+    let language = preferences::Language::Zh;
+    let mut terminal = Terminal::new(TestBackend::new(64, 20)).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            // The bottom four rows stand in for the composer.
+            overlay.draw_in(
+                frame,
+                Rect::new(area.x, area.y + 16, area.width, 4),
+                theme,
+                language,
+            );
+        })
+        .unwrap();
+    let rows: Vec<String> = terminal
+        .backend()
+        .buffer()
+        .content
+        .chunks(64)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+        .collect();
+    assert!(
+        rows[..16].iter().all(|row| row.trim().is_empty()),
+        "nothing is painted over the conversation: {rows:?}"
+    );
+    let compact = |row: &String| row.split_whitespace().collect::<String>();
+    assert!(
+        compact(&rows[16]).contains("用哪个数据库"),
+        "{:?}",
+        rows[16]
+    );
+    assert!(rows[17].contains("Postgres"), "{:?}", rows[17]);
+    assert!(rows[18].contains("SQLite"), "{:?}", rows[18]);
+    assert!(rows[19].trim_start().starts_with("↑↓"), "{:?}", rows[19]);
+}
+
+/// Typing the free-form answer writes into that same line and leaves the caret
+/// at its end, so an IME candidate window opens where the person is typing.
+#[test]
+fn answering_in_the_input_bar_shows_the_typed_text_and_its_caret() {
+    let (ui, _model) = setup();
+    let (answer, _waiting) = tokio::sync::oneshot::channel();
+    let mut overlay = ask::Overlay::new(
+        crate::tools::AskRequest {
+            question: "用哪个数据库？".into(),
+            options: vec!["Postgres".into(), "SQLite".into()],
+            multiple: false,
+        },
+        answer,
+    );
+    // Move onto "其他（自己输入）" and start typing.
+    assert!(matches!(
+        overlay.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        ask::Key::Taken
+    ));
+    assert!(matches!(
+        overlay.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        ask::Key::Taken
+    ));
+    assert!(matches!(
+        overlay.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ask::Key::Taken
+    ));
+    for character in "mysql".chars() {
+        overlay.key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    let theme = ui.themes.colors;
+    let language = preferences::Language::Zh;
+    let mut terminal = Terminal::new(TestBackend::new(64, 20)).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            overlay.draw_in(
+                frame,
+                Rect::new(area.x, area.y + 16, area.width, 4),
+                theme,
+                language,
+            );
+        })
+        .unwrap();
+    let rows: Vec<String> = terminal
+        .backend()
+        .buffer()
+        .content
+        .chunks(64)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+        .collect();
+    let typed_row = rows
+        .iter()
+        .position(|row| row.contains("mysql"))
+        .expect("the answer is typed in the input bar");
+    assert!(
+        typed_row >= 16,
+        "the answer line stays inside the input bar: {rows:?}"
+    );
+}
+
+/// The whole screen: a question takes over the composer, the conversation above
+/// it stays visible, and the unsent draft is neither shown nor discarded.
+#[test]
+fn a_question_owns_the_composer_and_keeps_the_draft() {
+    let (mut ui, _model) = setup();
+    ui.add_user("上面这段对话必须还在");
+    ui.editor.replace_all("没发出去的草稿");
+    let (answer, _waiting) = tokio::sync::oneshot::channel();
+    ui.ask = Some(ask::Overlay::new(
+        crate::tools::AskRequest {
+            question: "用哪个数据库？".into(),
+            options: vec!["Postgres".into(), "SQLite".into()],
+            multiple: false,
+        },
+        answer,
+    ));
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| ui.draw(frame)).unwrap();
+    let rows: Vec<String> = terminal
+        .backend()
+        .buffer()
+        .content
+        .chunks(80)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect();
+    let compact = |row: &String| row.split_whitespace().collect::<String>();
+    assert_eq!(
+        ui.editor.text(),
+        "没发出去的草稿",
+        "the draft stays in the editor while the question is shown"
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains("没发出去的草稿")),
+        "the composer shows the question, not the draft: {rows:?}"
+    );
+    let question_row = rows
+        .iter()
+        .position(|row| compact(row).contains("用哪个数据库"))
+        .expect("the question is on screen");
+    assert!(
+        question_row >= 14,
+        "the question sits at the bottom, not in the middle: {question_row}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("Postgres")),
+        "the choices are shown in the same box"
+    );
 }

@@ -366,20 +366,6 @@ fn event_bytes(event: &UiEvent) -> usize {
             UiEvent::ToolOutput { id, stream, chunk } => {
                 id.capacity() + stream.capacity() + chunk.capacity()
             }
-            UiEvent::ControlStatus {
-                owner,
-                id,
-                status,
-                reason,
-                summary,
-                ..
-            } => {
-                owner.capacity()
-                    + id.capacity()
-                    + status.capacity()
-                    + reason.capacity()
-                    + summary.capacity()
-            }
             UiEvent::TitleUsage { session_id, .. } => session_id.capacity(),
             UiEvent::GitInfo { session, info, .. } => {
                 session.capacity() + info.branch.as_ref().map_or(0, String::capacity)

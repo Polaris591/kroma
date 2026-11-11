@@ -3736,3 +3736,121 @@ fn overloaded_live_view_recovers_complete_tool_results_from_authoritative_histor
     assert_eq!(tool.details, "hello");
     assert!(ui.entries.iter().any(|entry| entry.body == "完整回复🦀"));
 }
+
+#[test]
+fn plugin_widgets_footer_status_and_custom_tui_overlay_render_and_hit_test() {
+    use crate::plugins::{
+        CustomTuiChannel, CustomTuiClientEvent, CustomTuiFrameUpdate, CustomTuiSpan, CustomTuiSpec,
+        PluginUiAction, PluginWidget, UiScope, WidgetPlacement,
+    };
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use std::sync::{mpsc, Arc};
+
+    let mut ui = UiState::new_default(
+        "mock".into(),
+        "session".into(),
+        ThemeStore::load_at(None).unwrap(),
+        &[],
+    );
+    ui.plugin_statuses = vec!["UI Lab · 计数 2".into()];
+
+    ui.plugin_widgets = vec![PluginWidget {
+        plugin_id: "ui-lab".into(),
+        id: "hud".into(),
+        placement: WidgetPlacement::Sidebar,
+        title: "UI Lab".into(),
+        blocks: crate::panel::parse(r#"[{"type":"progress","label":"任务","value":2,"max":4}]"#),
+        text: "任务 50%".into(),
+        actions: vec![PluginUiAction {
+            id: "inc".into(),
+            label: "+1 计数".into(),
+            primary: true,
+            danger: false,
+        }],
+        scope: UiScope::Session,
+    }];
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|frame| ui.draw(frame)).unwrap();
+    let buffer_text = |buf: &ratatui::buffer::Buffer| -> String {
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            let mut x = 0u16;
+            while x < buf.area.width {
+                let sym = buf.cell((x, y)).unwrap().symbol();
+                out.push_str(sym);
+                let w = unicode_width::UnicodeWidthStr::width(sym).max(1) as u16;
+                x += w;
+            }
+            out.push('\n');
+        }
+        out
+    };
+    let screen = buffer_text(terminal.backend().buffer());
+    assert!(
+        screen.contains("UI Lab · 计数 2"),
+        "footer status visible: {screen}"
+    );
+    assert!(screen.contains("UI Lab"), "sidebar widget rendered");
+    assert!(screen.contains("[+1 计数]"), "action button rendered");
+
+    // Verify exact hit-testing on the rendered button coordinates.
+    let (rect, plugin_id, widget_id, action_id) = ui.widget_action_hits[0].clone();
+    assert_eq!(
+        ui.widget_action_at(rect.x, rect.y),
+        Some((plugin_id, widget_id, action_id))
+    );
+
+    // Custom TUI overlay renders styled lines and exits cleanly on Ctrl+C.
+    let (client_tx, client_rx) = mpsc::channel();
+    let (frame_tx, frame_rx) = mpsc::channel();
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let host = ui.custom_tui_host();
+    assert!(host.open(CustomTuiChannel {
+        spec: CustomTuiSpec {
+            plugin_id: "ui-lab".into(),
+            title: "自定义画布".into(),
+            width: Some(48),
+            height: Some(12),
+            fullscreen: false,
+        },
+        client_tx,
+        frame_rx,
+        wake,
+    }));
+    assert!(ui.pull_custom_ui());
+    assert!(matches!(
+        client_rx.try_recv().unwrap(),
+        CustomTuiClientEvent::Render { .. }
+    ));
+    frame_tx
+        .send(CustomTuiFrameUpdate {
+            lines: vec![vec![CustomTuiSpan {
+                text: "自定义画布内容".into(),
+                fg: Some("accent".into()),
+                bg: None,
+                bold: true,
+                dim: false,
+                reverse: false,
+            }]],
+            cursor: Some((2, 0)),
+            done: false,
+            result: None,
+        })
+        .unwrap();
+    assert!(ui.poll_custom_ui());
+    terminal.draw(|frame| ui.draw(frame)).unwrap();
+    let overlay_screen = buffer_text(terminal.backend().buffer());
+    assert!(overlay_screen.contains("自定义画布"));
+    assert!(overlay_screen.contains("自定义画布内容"));
+
+    assert!(ui.custom_ui_event(&Event::Key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+    ))));
+    assert!(!ui.has_custom_ui());
+    assert!(matches!(
+        client_rx.try_recv().unwrap(),
+        CustomTuiClientEvent::Cancel
+    ));
+}

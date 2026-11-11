@@ -125,11 +125,9 @@ pub struct Agent {
     checkpoints: bool,
     checkpoint_turn: u64,
     execution_limits: Option<ExecutionLimits>,
-    /// Unique task control adapter, installed only when an enabled plugin
-    /// provides the capability. Ordinary tasks pay one Option check.
-    task_control: Option<Arc<crate::plugins::TaskControlHost>>,
-    /// Candidate start snapshot waiting for the first user-message commit.
-    pending_control_start: Option<crate::task_control::ControlUpdate>,
+    /// Generic turn-end gate, installed only when an enabled plugin asked to
+    /// review a finished model answer. Ordinary tasks pay one Option check.
+    turn_gate: Option<Arc<crate::plugins::TurnEndGate>>,
     pending_task_notifications: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -186,7 +184,7 @@ fn history_points(messages: &[Message]) -> Vec<HistoryPoint> {
         let prompt = messages[previous..=index]
             .iter()
             .rev()
-            .find(|m| crate::task_control::is_actual_user_message(m))
+            .find(|m| crate::protocol::is_actual_user_message(m))
             .and_then(|m| m.content.clone())
             .unwrap_or_else(|| "(continuation)".into());
         points.push(HistoryPoint {
@@ -414,8 +412,7 @@ impl Agent {
             checkpoints: false,
             checkpoint_turn: 0,
             execution_limits: None,
-            task_control: None,
-            pending_control_start: None,
+            turn_gate: None,
             pending_task_notifications: Vec::new(),
         };
         agent.sync_session_context();
@@ -467,7 +464,6 @@ impl Agent {
         self.context_budget = budget;
         self.messages = fresh;
         self.task_active = false;
-        self.rebind_control_scope()?;
         if let Some(events) = &self.events {
             events.on_event(RuntimeEvent::SessionCleared {
                 id: self.session_id(),
@@ -760,275 +756,54 @@ impl Agent {
     /// boundary. Context state and the durable transcript remain untouched.
     pub fn reload_extensions(
         &mut self,
-        mut tools: ToolRegistry,
+        tools: ToolRegistry,
         prompt: PromptComposer,
         events: Option<Arc<dyn EventSink>>,
     ) {
-        // Task control may be staged before an idle reload. Preserve raw
-        // execution receipts when swapping the prepared tool registry.
-        tools.capture_execution_facts(self.task_control.is_some());
         self.prompt = prompt.for_registered_tools(tools.is_builtin_only());
         self.tools = tools;
         self.events = events;
         self.sync_session_context();
     }
 
-    /// Install the process-wide task control adapter. The newest record for
-    /// this archive history generation is adopted here; an abandoned `running`
-    /// record is only repaired into `paused` by persisting it.
-    pub fn attach_task_control(
-        &mut self,
-        host: Arc<crate::plugins::TaskControlHost>,
-    ) -> Result<()> {
-        let previous = self.task_control.replace(host);
-        self.tools.capture_execution_facts(true);
-        if let Err(error) = self.settle_control_recovery() {
-            self.task_control = previous;
-            self.tools
-                .capture_execution_facts(self.task_control.is_some());
-            return Err(error);
+    /// Install or replace the generic turn-end gate. `None` removes it, which
+    /// is what a reload without `before_turn_end` plugins must do.
+    pub fn attach_turn_gate(&mut self, gate: Option<Arc<crate::plugins::TurnEndGate>>) {
+        self.turn_gate = gate;
+    }
+
+    /// Host-derived facts for a turn-end gate: this turn's tool calls and the
+    /// answer that would end it. Arguments are truncated, never interpreted.
+    fn turn_gate_facts(&self, final_text: &str) -> crate::plugins::TurnEndFacts {
+        let start = self
+            .messages
+            .iter()
+            .rposition(crate::protocol::is_actual_user_message)
+            .map_or(0, |at| at + 1);
+        let mut tools = Vec::new();
+        for message in &self.messages[start..] {
+            for call in message.tool_calls.iter().flatten() {
+                if tools.len() >= 40 {
+                    break;
+                }
+                tools.push(serde_json::json!({
+                    "name": call.function.name,
+                    "arguments": call.function.arguments.chars().take(400).collect::<String>(),
+                }));
+            }
         }
-        Ok(())
+        crate::plugins::TurnEndFacts {
+            session_id: self.session_id().to_owned(),
+            archive: self.session.archive_path().to_string_lossy().into_owned(),
+            workdir: self.workdir.to_string_lossy().into_owned(),
+            final_text: final_text.to_owned(),
+            tools: serde_json::Value::Array(tools),
+        }
     }
 
-    pub fn task_control(&self) -> Option<&Arc<crate::plugins::TaskControlHost>> {
-        self.task_control.as_ref()
-    }
-
-    /// Drop a controller whose plugin was disabled or replaced by a reload. A
-    /// staged start belongs to that owner, so it is discarded with it.
-    pub fn detach_task_control(&mut self) {
-        self.tools.capture_execution_facts(false);
-        self.task_control = None;
-        self.pending_control_start = None;
-    }
-
-    /// Real history generation of the open session. Control state is bound to
-    /// it, so copies, truncation or a fork cannot inherit a running goal.
+    /// Real history generation of the open session.
     pub fn history_generation(&self) -> u64 {
         self.session.generation()
-    }
-
-    fn control_session(&self) -> crate::commands::CommandSession {
-        crate::commands::CommandSession {
-            workdir: self.workdir.clone(),
-            archive: self.session.archive_path().to_path_buf(),
-            session_id: self.session_id().to_owned(),
-        }
-    }
-
-    pub fn control_scope(&self) -> crate::task_control::ControlScope {
-        crate::task_control::scope_for(self.session.archive_path(), self.session.generation())
-    }
-
-    /// Command name of the enabled controller, if any. Hosts use it to route
-    /// the command through [`Self::task_control_command`] instead of the
-    /// generic text-returning plugin command registry.
-    pub fn task_control_command_name(&self) -> Option<String> {
-        self.task_control
-            .as_ref()
-            .map(|host| host.command().to_string())
-    }
-
-    /// Dispatch one explicit control command line. Without an enabled provider
-    /// this returns `None` and ordinary slash handling is unchanged.
-    pub async fn task_control_command(
-        &mut self,
-        raw_line: &str,
-        arguments: &str,
-    ) -> Result<Option<crate::plugins::ControlCommand>> {
-        let Some(host) = self.task_control.clone() else {
-            return Ok(None);
-        };
-        // An interrupted run is recorded as paused before it can be extended.
-        self.settle_control_recovery()?;
-        let session = self.control_session();
-        let scope = self.control_scope();
-        let command = host
-            .dispatch_command(raw_line, arguments, &session, &self.messages, &scope)
-            .await?;
-        Ok(Some(command))
-    }
-
-    /// Stage one prepared control task for the next [`Self::run`] call. The
-    /// pending snapshot is consumed by the first user-message commit; the body
-    /// is the raw user line that will be stored as the real user turn.
-    pub fn stage_prepared_task(&mut self, task: crate::plugins::PreparedTask) -> Result<String> {
-        let owner = self
-            .task_control
-            .as_ref()
-            .map(|host| host.owner().to_string())
-            .unwrap_or_default();
-        if task.owner != owner {
-            bail!("prepared task belongs to another control owner");
-        }
-        self.pending_control_start = Some(task.update);
-        Ok(task.body)
-    }
-
-    /// Idle host-reserved pause/cancel. The plugin has no veto and is not asked.
-    pub fn control_host_action(
-        &mut self,
-        action: crate::plugins::HostControlAction,
-    ) -> Result<String> {
-        use crate::plugins::HostControlAction;
-        let host = self
-            .task_control
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("no task control provider is enabled"))?;
-        self.settle_control_recovery()?;
-        let update = match action {
-            HostControlAction::Pause => host.pause(crate::task_control::reason::USER_STOP)?,
-            HostControlAction::Cancel => host.cancel()?,
-        };
-        let text = match action {
-            HostControlAction::Pause => format!(
-                "[任务控制] 目标 {} 已按用户要求暂停，未回滚已完成的修改。继续：/{} resume",
-                update.snapshot.id, update.snapshot.owner
-            ),
-            HostControlAction::Cancel => format!(
-                "[任务控制] 目标 {} 已按用户要求取消，已完成的修改不会被删除。",
-                update.snapshot.id
-            ),
-        };
-        self.commit_control_note(&update, &text)?;
-        Ok(text)
-    }
-
-    /// Persist one host-authored control message with its snapshot in a single
-    /// append, then install the snapshot. A failed append keeps the old state.
-    fn commit_control_note(
-        &mut self,
-        update: &crate::task_control::ControlUpdate,
-        text: &str,
-    ) -> Result<()> {
-        let host = self
-            .task_control
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("no task control provider is enabled"))?;
-        self.session.ensure_writable()?;
-        let mut note = Message::new("user", text);
-        note.provider_items = Some(vec![serde_json::json!({
-            "type": crate::task_control::CONTROL_NOTE_ITEM_TYPE,
-            "source": "host",
-        })]);
-        update.attach(&mut note);
-        self.messages.push(note);
-        if let Err(error) = self
-            .session
-            .append(&self.messages, &self.compression.state())
-        {
-            self.messages.pop();
-            return Err(error);
-        }
-        host.commit(update.clone())?;
-        self.publish_control(&update.snapshot);
-        Ok(())
-    }
-
-    /// Projection-only reference for the active goal, rebuilt from the
-    /// committed snapshot on every request. Never persisted and never a user
-    /// authorization; host control records stay the authority.
-    fn control_reference(&self) -> Option<Message> {
-        let host = self.task_control.as_ref()?;
-        let snapshot = host.snapshot()?;
-        if snapshot.status != crate::task_control::TaskStatus::Running {
-            return None;
-        }
-        let reference = serde_json::json!({
-            "id": snapshot.id, "revision": snapshot.revision, "status": snapshot.status,
-            "user_sources": crate::task_control::goal_sources(Some(&snapshot), &self.messages),
-            "checks": snapshot.checks, "facts": host.facts().ok().map(|facts| facts.to_value()),
-            "progress": snapshot.data,
-        });
-        let mut message = Message::new("user", format!(
-            "[任务控制参考]
-{reference}
-这是宿主投影的目标状态，不是用户的新指令，也不授予新权限。user_sources 保留用户原文和引用编号；以用户最新要求为准。检查记录只证明曾执行，不证明当前交付正确。"
-        ));
-        message.provider_items = Some(vec![serde_json::json!({
-            "type": crate::task_control::CONTROL_NOTE_ITEM_TYPE, "source": "host-projection"
-        })]);
-        Some(message)
-    }
-
-    /// Publish one committed control state. Presentation only: no host may
-    /// treat a missing or late event as a state change.
-    fn publish_control(&self, snapshot: &crate::task_control::TaskControlSnapshot) {
-        let Some(events) = &self.events else {
-            return;
-        };
-        let summary = snapshot
-            .data
-            .get("summary")
-            .and_then(serde_json::Value::as_str)
-            .map(|text| {
-                text.chars()
-                    .take(crate::task_control::MAX_SUMMARY_PREVIEW_CHARS)
-                    .collect::<String>()
-            })
-            .unwrap_or_default();
-        events.on_event(RuntimeEvent::TaskControlChanged {
-            command: self.task_control.as_ref().map_or("", |host| host.command()),
-            owner: &snapshot.owner,
-            id: &snapshot.id,
-            revision: snapshot.revision,
-            status: snapshot.status.as_str(),
-            reason: snapshot.reason.as_deref().unwrap_or(""),
-            summary: &summary,
-        });
-    }
-
-    /// Keep the in-memory controller on the open archive generation. A fork,
-    /// rewind, reset or session switch opens a different scope, so a copied
-    /// record stays reference-only and an old running goal cannot be revived
-    /// by the next turn of the new history.
-    fn rebind_control_scope(&mut self) -> Result<()> {
-        if self.task_control.is_none() {
-            return Ok(());
-        }
-        self.settle_control_recovery()?;
-        Ok(())
-    }
-
-    /// After a fork or rewind the copied history keeps the user requirement but
-    /// not the old run. The requirement restarts as a new paused goal in the new
-    /// scope, with no checks, pass facts or completion claim carried over.
-    fn adopt_branched_control(&mut self) -> Result<()> {
-        if self.task_control.is_none() {
-            return Ok(());
-        }
-        self.settle_control_recovery()?;
-        let Some(host) = self.task_control.clone() else {
-            return Ok(());
-        };
-        let scope = self.control_scope();
-        let Some(carried) = host.carry_over(&self.messages, &scope)? else {
-            return Ok(());
-        };
-        let text = format!(
-            "[任务控制] 历史分支保留了目标 {} 的要求，已在新作用域记录为暂停（新目标 {}）；旧检查通过与完成声明不再有效。核对现场后可用 /{} resume 继续。",
-            carried.previous_id, carried.update.snapshot.id, carried.update.snapshot.owner
-        );
-        self.commit_control_note(&carried.update, &text)
-    }
-
-    /// Persist an interrupted `running` record as `paused` before any new work.
-    /// Nothing is replayed: the previous turn's tool results stay untouched.
-    fn settle_control_recovery(&mut self) -> Result<Option<String>> {
-        let Some(host) = self.task_control.clone() else {
-            return Ok(None);
-        };
-        let scope = self.control_scope();
-        let Some(update) = host.adopt(&self.messages, &scope)? else {
-            return Ok(None);
-        };
-        let text = format!(
-            "[任务控制] 上次运行在提交完成状态前中断；目标 {} 已记录为暂停，未重放任何命令。核对现场后可用 /{} resume 继续。",
-            update.snapshot.id, update.snapshot.owner
-        );
-        self.commit_control_note(&update, &text)?;
-        Ok(Some(text))
     }
 
     pub fn with_tools(mut self, tools: ToolRegistry) -> Self {
@@ -1156,7 +931,6 @@ impl Agent {
         self.task_active = false;
         self.sync_session_context();
         self.remember_active_session();
-        self.adopt_branched_control()?;
         if let Some(events) = &self.events {
             events.on_event(RuntimeEvent::SessionForked {
                 from: &source_id,
@@ -1284,7 +1058,6 @@ impl Agent {
         self.compression = next_compression;
         self.task_active = false;
         self.sync_session_context();
-        self.adopt_branched_control()?;
         if let Some(events) = &self.events {
             events.on_event(RuntimeEvent::SessionRewound {
                 id: self.session_id(),
@@ -1349,7 +1122,6 @@ impl Agent {
         self.messages = self.prompt.initial_history(&self.workdir);
         self.task_active = false;
         self.sync_session_context();
-        self.rebind_control_scope()?;
         Ok(())
     }
 
@@ -1398,7 +1170,6 @@ impl Agent {
         self.task_active = false;
         self.sync_session_context();
         self.remember_active_session();
-        self.rebind_control_scope()?;
         if let Some(events) = &self.events {
             if fresh {
                 events.on_event(RuntimeEvent::SessionCreated {
@@ -1416,15 +1187,10 @@ impl Agent {
     /// Called after the currently executing future has been dropped.
     /// Never replay commands interrupted partway through execution.
     pub fn cancel(&mut self) -> Result<()> {
-        self.cancel_task(false)
+        self.cancel_task()
     }
 
-    /// Explicit goal cancellation shares the same durable user-stop boundary.
-    pub fn cancel_goal(&mut self) -> Result<()> {
-        self.cancel_task(true)
-    }
-
-    fn cancel_task(&mut self, cancel_goal: bool) -> Result<()> {
+    fn cancel_task(&mut self) -> Result<()> {
         if !self.task_active {
             return Ok(());
         }
@@ -1475,40 +1241,13 @@ impl Agent {
             self.session
                 .append(&self.messages[..end], &self.compression.state())?;
         }
-        // A user stop wins over any pending finish decision: the goal is
-        // paused in the same commit as the cancellation note.
-        let paused = self
-            .task_control
-            .clone()
-            .filter(|host| {
-                if cancel_goal {
-                    host.is_active()
-                } else {
-                    host.is_running()
-                }
-            })
-            .map(|host| {
-                if cancel_goal {
-                    host.cancel()
-                } else {
-                    host.pause(crate::task_control::reason::USER_STOP)
-                }
-            })
-            .transpose()?;
-        let mut note = Message::new(
+        let note = Message::new(
             "assistant",
             format!("{TASK_CANCELLED_PREFIX} Incomplete commands may have had side effects. The partial streamed response, if any, was not retained.]"),
         );
-        if let Some(update) = paused.as_ref() {
-            update.attach(&mut note);
-        }
         self.messages.push(note);
         self.session
             .append(&self.messages, &self.compression.state())?;
-        if let (Some(update), Some(host)) = (paused, self.task_control.clone()) {
-            host.commit(update.clone())?;
-            self.publish_control(&update.snapshot);
-        }
         // Cancellation has already committed its durable boundary. Notify
         // optional plugins only after the WAL append, without blocking Ctrl+C.
         self.notify_task_plugins("cancelled");
@@ -1559,18 +1298,6 @@ impl Agent {
             // Abandon unconsumed plugin lifecycle notifications. Built-in
             // checkpoints are synchronous and have nothing left to cancel.
             self.compression.task_failed();
-            // Infrastructure failure pauses the goal; it never completes it.
-            if let Some(host) = self.task_control.clone().filter(|host| host.is_running()) {
-                if let Ok(update) = host.pause(crate::task_control::reason::PROVIDER_ERROR) {
-                    let text = format!(
-                        "[任务控制] 本轮执行失败；目标 {} 已暂停，未回滚已完成的修改。用 /{} resume 显式继续。",
-                        update.snapshot.id, update.snapshot.owner
-                    );
-                    if let Err(error) = self.commit_control_note(&update, &text) {
-                        crate::runtime_log!("[control] could not record paused goal: {error:#}");
-                    }
-                }
-            }
         }
         stats.record_compaction(self.compression.take_usage());
         if stats.compaction.requests > 0 {
@@ -1614,7 +1341,7 @@ impl Agent {
             .messages
             .iter()
             .rev()
-            .filter(|message| crate::task_control::is_actual_user_message(message))
+            .filter(|message| crate::protocol::is_actual_user_message(message))
             .take(8)
             .map(|message| {
                 let text = message.content.as_deref().unwrap_or("");
@@ -1757,8 +1484,6 @@ impl Agent {
         // disk. Never send another model request or execute another command
         // in a poisoned session. Restart to replay the authoritative WAL.
         self.session.ensure_writable()?;
-        // An interrupted goal is durably paused before any new work.
-        self.settle_control_recovery()?;
         self.prompt.refresh_for_task(&self.workdir, user_input)?;
         self.compression.set_event_sink(self.events.clone());
         self.compression.new_user_turn();
@@ -1769,24 +1494,11 @@ impl Agent {
         if !attachments.is_empty() {
             message.provider_items = Some(attachments.to_vec());
         }
-        crate::task_control::strip_incoming_host_metadata(&mut message);
-        // A prepared goal task commits its initial running snapshot with the
-        // real user message, before the first model request.
-        let pending_start = self.pending_control_start.take();
-        if let Some(update) = pending_start.as_ref() {
-            update.attach(&mut message);
-        }
         self.messages.push(message);
         let journal_started = Instant::now();
         self.session
             .append(&self.messages, &self.compression.state())?;
         stats.journal_time += journal_started.elapsed();
-        if let Some(update) = pending_start {
-            if let Some(host) = self.task_control.clone() {
-                host.commit(update.clone())?;
-                self.publish_control(&update.snapshot);
-            }
-        }
         self.remember_active_session();
         // The task's attachments are immutable and steering messages are
         // explicitly excluded by the projection. Read small inline logs once,
@@ -1860,15 +1572,6 @@ impl Agent {
                 .await?;
             self.session.ensure_writable()?;
             self.prompt.apply(&mut view);
-            // Host-private control and raw-execution metadata never reach a
-            // provider; only this projection copy is stripped.
-            crate::task_control::strip_host_metadata_all(&mut view);
-            // The active goal is execution-required context: a compact,
-            // rebuilt reference so compaction or a long tool run cannot drop
-            // the requirement. It is projection-only and grants nothing.
-            if let Some(reference) = self.control_reference() {
-                view.push(reference);
-            }
             // Model context is a projection, not the WAL. Keep images for the
             // current task (including its tool rounds), but don't repeatedly
             // re-upload old images for every later user turn.
@@ -2135,7 +1838,6 @@ impl Agent {
             }
             stats.record(&completion);
             let mut response = completion.message;
-            crate::task_control::strip_incoming_host_metadata(&mut response);
             if response
                 .provider_items
                 .as_deref()
@@ -2168,119 +1870,11 @@ impl Agent {
                 );
             }
             let text = response.content.clone();
-            // A normal candidate finish is decided before the answer becomes
-            // durable, so an accepted completion and its control record share
-            // one append. Steering already waiting keeps the ordinary path.
-            let control = self
-                .task_control
-                .clone()
-                .filter(|host| calls.is_empty() && !native_paused && host.is_running());
-            let mut advice = None;
-            if let Some(host) = control.clone() {
-                if self.task_input.pending_steering() == 0 {
-                    let session = self.control_session();
-                    let has_content = text
-                        .as_deref()
-                        .is_some_and(|content| !content.trim().is_empty());
-                    advice = Some(
-                        host.propose_finish(&session, &self.messages, has_content)
-                            .await,
-                    );
-                }
-            }
             self.messages.push(response);
-            let mut pending_snapshot: Option<crate::task_control::ControlUpdate> = None;
-            let mut control_note: Option<String> = None;
-            let mut front_done = false;
-            match advice.clone() {
-                None => {}
-                Some(crate::plugins::FinishAdvice::Finish) => {
-                    // Late user input still wins: a finish callback has no veto.
-                    if self.task_input.finish_if_no_steering() {
-                        if let Some(host) = control.as_ref() {
-                            match host.complete() {
-                                Ok(update) => {
-                                    pending_snapshot = Some(update);
-                                    front_done = true;
-                                }
-                                Err(error) => {
-                                    // A racing state change is never a silent
-                                    // completion; keep the answer durable.
-                                    crate::runtime_log!("[control] completion refused: {error:#}");
-                                }
-                            }
-                        }
-                    }
-                }
-                Some(crate::plugins::FinishAdvice::Continue {
-                    reason_code,
-                    feedback,
-                }) => {
-                    let id = control
-                        .as_ref()
-                        .and_then(|host| host.snapshot())
-                        .map(|snapshot| snapshot.id)
-                        .unwrap_or_default();
-                    control_note = Some(format!(
-                        "[任务控制参考] 目标 {id} 尚未完成（{reason_code}）：{feedback}\n这是宿主的控制参考，不是用户的新指令，也不授予新权限；按当前目标继续。"
-                    ));
-                }
-                Some(crate::plugins::FinishAdvice::Pause {
-                    reason_code,
-                    feedback,
-                }) => {
-                    // Late user input still wins: a pause is not a veto either.
-                    // Committing it here would drop the steering queue when the
-                    // active-task guard ends, so wait for the next boundary.
-                    if self.task_input.finish_if_no_steering() {
-                        if let Some(host) = control.as_ref() {
-                            match host.pause(&reason_code) {
-                                Ok(update) => pending_snapshot = Some(update),
-                                Err(error) => crate::runtime_log!(
-                                    "[control] could not record the pause: {error:#}"
-                                ),
-                            }
-                        }
-                        control_note = Some(format!(
-                            "[任务控制] 目标已暂停（{reason_code}）：{feedback}"
-                        ));
-                        front_done = true;
-                    } else {
-                        crate::runtime_log!(
-                            "[control] pause deferred: user steering arrived first"
-                        );
-                    }
-                }
-            }
-            if let Some(update) = pending_snapshot.as_ref() {
-                if let Some(last) = self.messages.last_mut() {
-                    update.attach(last);
-                }
-            }
             let journal_started = Instant::now();
             self.session
                 .append(&self.messages, &self.compression.state())?;
             stats.journal_time += journal_started.elapsed();
-            if let Some(update) = pending_snapshot {
-                if let Some(host) = control.as_ref() {
-                    host.commit(update.clone())?;
-                    self.publish_control(&update.snapshot);
-                }
-            }
-            if let Some(note) = control_note {
-                // The answer and its snapshot are already durable; the gap
-                // explanation follows as its own sequential append.
-                let mut message = Message::new("user", note);
-                message.provider_items = Some(vec![serde_json::json!({
-                    "type": crate::task_control::CONTROL_NOTE_ITEM_TYPE,
-                    "source": "host",
-                })]);
-                self.messages.push(message);
-                let note_started = Instant::now();
-                self.session
-                    .append(&self.messages, &self.compression.state())?;
-                stats.journal_time += note_started.elapsed();
-            }
             if let Some(events) = &self.events {
                 events.on_event(RuntimeEvent::ModelFinished {
                     request: stats.calls,
@@ -2296,31 +1890,6 @@ impl Agent {
                 });
             }
 
-            if front_done {
-                if let Some(events) = &self.events {
-                    events.on_event(RuntimeEvent::FinalAnswerReady);
-                }
-                let finish_started = Instant::now();
-                if let Err(error) = self
-                    .compression
-                    .finish_task(
-                        &self.messages,
-                        &self.session.context_committer(&self.messages),
-                    )
-                    .await
-                {
-                    crate::runtime_log!(
-                        "[compact] task completed; checkpoint was not committed: {error:#}"
-                    );
-                }
-                stats.apec_finalize_time += finish_started.elapsed();
-                return Ok(text.unwrap_or_default());
-            }
-            if advice.is_some() {
-                // The answer is durable and the goal continues in this loop.
-                continue;
-            }
-
             if native_paused {
                 // Resume the same server tool turn. Normal task limits, if
                 // explicitly configured, still govern model requests.
@@ -2334,6 +1903,34 @@ impl Agent {
                 // turn, and finalization runs exactly once at the real boundary.
                 if !self.task_input.finish_if_no_steering() {
                     continue;
+                }
+                // Generic plugin review of a finished answer. A broken or slow
+                // advisory plugin cannot keep the turn open.
+                if let Some(gate) = self.turn_gate.clone() {
+                    let facts = self.turn_gate_facts(text.as_deref().unwrap_or(""));
+                    if let Some(advice) = gate.gate(&facts).await {
+                        let note = format!(
+                            "[插件复核] 插件 {} 认为这一轮还没完成：{}\n这是插件的复核意见，不是用户的新指令，也不授予新权限；继续完成当前任务。",
+                            advice.plugin, advice.feedback
+                        );
+                        let mut message = Message::new("user", note);
+                        message.provider_items = Some(vec![serde_json::json!({
+                            "type": "kroma_turn_gate",
+                            "plugin": &advice.plugin,
+                        })]);
+                        self.messages.push(message);
+                        let gate_started = Instant::now();
+                        self.session
+                            .append(&self.messages, &self.compression.state())?;
+                        stats.journal_time += gate_started.elapsed();
+                        if let Some(events) = &self.events {
+                            events.on_event(RuntimeEvent::TurnGateContinued {
+                                plugin: &advice.plugin,
+                                feedback: &advice.feedback,
+                            });
+                        }
+                        continue;
+                    }
                 }
                 if let Some(events) = &self.events {
                     events.on_event(RuntimeEvent::FinalAnswerReady);
@@ -2446,17 +2043,17 @@ impl Agent {
                     .messages
                     .iter()
                     .rev()
-                    .find(|m| crate::task_control::is_actual_user_message(m));
+                    .find(|m| crate::protocol::is_actual_user_message(m));
                 let current_user_text = current_user.and_then(|m| m.content.as_deref());
                 let current_user_turn = self
                     .messages
                     .iter()
-                    .filter(|m| crate::task_control::is_actual_user_message(m))
+                    .filter(|m| crate::protocol::is_actual_user_message(m))
                     .count();
                 let (user_images, previous_user_images) =
                     if self.tools.requires_user_attachments(&call.function.name) {
                         let mut image_turns = self.messages.iter().rev().filter(|message| {
-                            crate::task_control::is_actual_user_message(message)
+                            crate::protocol::is_actual_user_message(message)
                                 && !message
                                     .provider_items
                                     .as_deref()
@@ -2479,15 +2076,6 @@ impl Agent {
                         .flatten()
                         .map(|choice| choice.profile);
                 }
-                // The controller tool must see the current read-only task
-                // context for this call, not the one from the command.
-                if let Some(host) = self
-                    .task_control
-                    .as_ref()
-                    .filter(|host| host.is_control_tool(&call.function.name))
-                {
-                    host.refresh_context(&self.messages);
-                }
                 // A tool that waits for a person reports no output by design,
                 // so the silent-tool watchdog does not apply to it.
                 let idle_limit = if self.tools.waits_for_user(&call.function.name)
@@ -2498,7 +2086,6 @@ impl Agent {
                     tool_idle_limit()
                 };
                 let idle_silence = silence.clone();
-                let call_arguments = call.function.arguments.clone();
                 let pending_tool = self.tools.execute_with_warnings(
                     &call,
                     ToolContext {
@@ -2520,9 +2107,7 @@ impl Agent {
                         .await
                     {
                         Ok(execution) => execution,
-                        Err(limit) => {
-                            crate::tools::idle_timeout(&call.function.name, limit, &call_arguments)
-                        }
+                        Err(limit) => crate::tools::idle_timeout(&call.function.name, limit),
                     };
                 // Any tool that declares ephemeral context mutation refreshes
                 // model-side packs. No plugin name is hardcoded into the core.
@@ -2545,7 +2130,7 @@ impl Agent {
                         tool_started.elapsed().as_secs_f64() * 1_000.0
                     );
                 }
-                let mut tool_failed = execution.result.is_error;
+                let tool_failed = execution.result.is_error;
                 let mut message = Message::tool_with_status(
                     call.id.clone(),
                     execution.result.content.clone(),
@@ -2567,66 +2152,11 @@ impl Agent {
                         .get_or_insert_with(Vec::new)
                         .push(serde_json::json!({"type":"kroma_tool_warning","message":warning}));
                 }
-                // Raw facts are recorded before any hook rewriting, and any
-                // resulting snapshot is committed with this tool message.
-                let mut control_updates: Vec<crate::task_control::ControlUpdate> = Vec::new();
-                let mut pending_receipt = None;
-                if let Some(host) = self.task_control.clone().filter(|host| host.is_running()) {
-                    let recorded = host.record_execution(
-                        &call.id,
-                        &call.function.name,
-                        execution.raw.command.as_deref(),
-                        execution.raw.is_error,
-                        execution.raw.exit_code,
-                    )?;
-                    if let Some(receipt) = recorded.receipt.as_ref() {
-                        receipt.attach(&mut message);
-                    }
-                    pending_receipt = recorded.receipt;
-                    control_updates.extend(recorded.update);
-                    if host.is_control_tool(&call.function.name) {
-                        match host.apply_tool_control(&call.id, &self.messages) {
-                            Ok(update) => control_updates.extend(update),
-                            Err(error) => {
-                                tool_failed = true;
-                                message.content =
-                                    Some(format!("goal checkpoint rejected: {error:#}"));
-                                if let Some(items) = message.provider_items.as_mut() {
-                                    for item in items
-                                        .iter_mut()
-                                        .filter(|item| item["type"] == "kroma_tool_status")
-                                    {
-                                        item["is_error"] = serde_json::json!(true);
-                                    }
-                                }
-                                crate::runtime_log!("[control] rejected tool reply: {error:#}");
-                                message.provider_items.get_or_insert_with(Vec::new).push(
-                                    serde_json::json!({
-                                        "type": "kroma_tool_warning",
-                                        "message": format!("control reply rejected: {error}"),
-                                    }),
-                                );
-                            }
-                        }
-                    }
-                }
-                for update in &control_updates {
-                    update.attach(&mut message);
-                }
                 self.messages.push(message);
                 let journal_started = Instant::now();
                 self.session
                     .append(&self.messages, &self.compression.state())?;
                 stats.journal_time += journal_started.elapsed();
-                if let Some(host) = self.task_control.clone() {
-                    if let Some(receipt) = pending_receipt {
-                        host.commit_execution(receipt)?;
-                    }
-                    for update in control_updates {
-                        host.commit(update.clone())?;
-                        self.publish_control(&update.snapshot);
-                    }
-                }
                 if let Some(events) = &self.events {
                     for warning in &execution.warnings {
                         events.on_event(RuntimeEvent::Warning { message: warning });
@@ -2678,24 +2208,6 @@ impl Agent {
             // A steer is not a new user task and must not age out images
             // attached to the task it modifies.
             message.provider_items = Some(vec![serde_json::json!({"type":"kroma_steering"})]);
-            // A real user revision invalidates earlier declarations. The new
-            // snapshot is committed with the steering message itself.
-            let mut revision = if self
-                .task_control
-                .as_ref()
-                .is_some_and(|host| host.is_running())
-            {
-                self.task_control
-                    .as_ref()
-                    .map(|host| host.revise())
-                    .transpose()?
-            } else {
-                None
-            };
-            if let Some(update) = revision.as_mut() {
-                update.snapshot.source_indices.push(self.messages.len());
-                update.attach(&mut message);
-            }
             self.messages.push(message);
             if let Err(error) = self
                 .session
@@ -2705,10 +2217,6 @@ impl Agent {
                 pending.push_front(text);
                 self.task_input.restore_steering(pending);
                 return Err(error);
-            }
-            if let (Some(update), Some(host)) = (revision, self.task_control.clone()) {
-                host.commit(update.clone())?;
-                self.publish_control(&update.snapshot);
             }
         }
         Ok(())

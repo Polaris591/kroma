@@ -96,6 +96,23 @@ mod tool_status_tests {
     }
 }
 
+/// A message the person actually wrote. Host-injected guidance (a turn-end
+/// gate note or a control note) is not a new user instruction.
+pub fn is_actual_user_message(message: &Message) -> bool {
+    message.role == "user"
+        && !message
+            .provider_items
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|item| {
+                matches!(
+                    item["type"].as_str(),
+                    Some("kroma_task_control") | Some("kroma_turn_gate")
+                )
+            })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,

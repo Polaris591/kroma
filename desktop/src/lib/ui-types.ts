@@ -1,5 +1,5 @@
 /** Desktop navigation tabs. Shared by the shell and the panels it renders. */
-export type Tab = 'chat' | 'settings' | 'plugins';
+export type Tab = 'chat' | 'settings' | 'plugins' | `plugin:${string}`;
 
 /** A session addressed by project + id, with its display title for dialogs. */
 export interface SessionTarget {

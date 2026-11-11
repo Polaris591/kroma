@@ -526,45 +526,6 @@ pub(super) enum TaskOutcome {
     Cancelled,
 }
 
-/// Last committed goal state. It is separate from the foreground outcome, so
-/// a completed turn never renders as a completed goal.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ControlStatus {
-    pub owner: String,
-    pub id: String,
-    pub revision: u64,
-    pub status: String,
-    pub reason: String,
-    pub summary: String,
-}
-
-impl ControlStatus {
-    pub(super) fn label(&self, chinese: bool) -> String {
-        let status = match (self.status.as_str(), chinese) {
-            ("running", true) => "执行中",
-            ("paused", true) => "已暂停",
-            (other, true) => other,
-            ("running", false) => "running",
-            ("paused", false) => "paused",
-            (other, false) => other,
-        };
-        let mut line = if chinese {
-            format!("目标 {} · {status} · 修订 {}", self.id, self.revision)
-        } else {
-            format!("Goal {} · {status} · rev {}", self.id, self.revision)
-        };
-        if !self.reason.trim().is_empty() {
-            line.push_str(" · ");
-            line.push_str(self.reason.trim());
-        }
-        if !self.summary.trim().is_empty() {
-            line.push_str(" · ");
-            line.push_str(self.summary.trim());
-        }
-        line
-    }
-}
-
 pub struct UiState {
     #[cfg(any(windows, test))]
     pub(super) native_paste_keys: super::paste::NativePasteKeys,
@@ -601,8 +562,11 @@ pub struct UiState {
     plugin_panel: Option<PluginPanel>,
     pub plugin_commands: Vec<(String, String)>,
     pub plugin_statuses: Vec<String>,
-    /// Last committed goal state; the foreground result never implies it.
-    pub(super) control_status: Option<ControlStatus>,
+    pub plugin_widgets: Vec<crate::plugins::PluginWidget>,
+    pub(super) custom_tui_slot: plugin_panel::CustomTuiSlot,
+    custom_ui: Option<plugin_panel::CustomTuiOverlay>,
+    pub(super) widget_action_hits: Vec<(Rect, String, String, String)>,
+    pub(super) last_terminal_size: (u16, u16),
     plugin_activity_frames: Vec<String>,
     plugin_tool_labels: BTreeMap<String, String>,
     plugin_layout: Option<PluginLayoutSpec>,
@@ -813,7 +777,11 @@ impl UiState {
             plugin_panel: None,
             plugin_commands: Vec::new(),
             plugin_statuses: Vec::new(),
-            control_status: None,
+            plugin_widgets: Vec::new(),
+            custom_tui_slot: plugin_panel::CustomTuiSlot::new(),
+            custom_ui: None,
+            widget_action_hits: Vec::new(),
+            last_terminal_size: (80, 24),
             plugin_activity_frames: Vec::new(),
             plugin_tool_labels: BTreeMap::new(),
             plugin_layout: None,
@@ -1368,24 +1336,6 @@ impl UiState {
             self.history_cache = None;
         }
         match event {
-            UiEvent::ControlStatus {
-                owner,
-                id,
-                revision,
-                status,
-                reason,
-                summary,
-            } => {
-                self.control_status = (!matches!(status.as_str(), "completed" | "cancelled"))
-                    .then_some(ControlStatus {
-                        owner,
-                        id,
-                        revision,
-                        status,
-                        reason,
-                        summary,
-                    });
-            }
             UiEvent::Warning(message) => self.note_with_level(NoticeLevel::Warning, message),
             UiEvent::GitInfo {
                 revision,
@@ -2799,12 +2749,14 @@ impl UiState {
         // A prior frame's IME anchor must not survive an overlay or resize.
         self.ime_cursor_position = None;
         self.recent_session_rows.clear();
+        self.widget_action_hits.clear();
         self.return_latest_area = Rect::default();
         self.editor
             .localize_attachment_labels(self.preferences.language);
         let colors = self.active_colors();
         let message_colors = self.message_colors();
         let full_area = frame.area();
+        self.last_terminal_size = (full_area.width, full_area.height);
         let previous_history_area = self.selection_area;
         let previous_editor_area = self.editor_area;
         if full_area.width < 20 || full_area.height < 8 {
@@ -2836,7 +2788,16 @@ impl UiState {
             Block::default().style(Style::default().bg(colors.background)),
             full_area,
         );
-        let area = reading_area(full_area, self.plain_style);
+        let outer_area = reading_area(full_area, self.plain_style);
+        let (area, sidebar_area) = if outer_area.width >= 96
+            && self.has_widgets(crate::plugins::WidgetPlacement::Sidebar)
+        {
+            let cols =
+                Layout::horizontal([Constraint::Min(62), Constraint::Length(32)]).split(outer_area);
+            (cols[0], Some(cols[1]))
+        } else {
+            (outer_area, None)
+        };
         let header_rows = if self.plain_style {
             u16::from(area.height >= 20)
         } else if area.height < 20 {
@@ -2865,35 +2826,82 @@ impl UiState {
                     )
                     .max(composer_min),
             );
-        let editor_rows = self.editor.display_rows(area.width.saturating_sub(6));
+        // A waiting question replaces the input text, so the box is sized by
+        // the question rather than by the (hidden) draft.
+        let editor_rows = match &self.ask {
+            Some(ask) => ask.height(area.width.saturating_sub(6)),
+            None => self.editor.display_rows(area.width.saturating_sub(6)),
+        };
         let composer_height = editor_rows
             .saturating_add(composer_padding)
             .clamp(composer_min, composer_max);
         let status_rows = u16::from(self.has_activity_tail() && area.height >= 12);
-        let goal_rows = u16::from(self.control_status.is_some() && area.height >= 12);
-        let layout = Layout::vertical([
+        let header_w_rows = if area.height >= 18 {
+            self.widget_slot_height(crate::plugins::WidgetPlacement::Header, area.width)
+                .min(area.height / 5)
+        } else {
+            0
+        };
+        let above_w_rows = if area.height >= 18 {
+            self.widget_slot_height(crate::plugins::WidgetPlacement::AboveComposer, area.width)
+                .min(area.height / 4)
+        } else {
+            0
+        };
+        let below_w_rows = if area.height >= 20 {
+            self.widget_slot_height(crate::plugins::WidgetPlacement::BelowComposer, area.width)
+                .min(area.height / 5)
+        } else {
+            0
+        };
+        let footer_w_rows = if area.height >= 20 {
+            self.widget_slot_height(crate::plugins::WidgetPlacement::Footer, area.width)
+                .min(3)
+        } else {
+            0
+        };
+        let parts = Layout::vertical([
             // A blank row separates the session heading from the first turn.
             Constraint::Length(header_rows),
+            Constraint::Length(header_w_rows),
             Constraint::Min(1),
             Constraint::Length(u16::from(show_navigation)),
             // Pinned status row: the live phase, duration and queued tasks stay
             // visible while the transcript scrolls. Small terminals keep the
             // row out of the layout so the transcript does not collapse.
             Constraint::Length(status_rows),
-            Constraint::Length(goal_rows),
+            Constraint::Length(above_w_rows),
             Constraint::Length(composer_height),
+            Constraint::Length(below_w_rows),
+            Constraint::Length(footer_w_rows),
             Constraint::Length(1),
         ])
         .split(area);
-        let header_line = Rect::new(layout[0].x, layout[0].y, layout[0].width, 1);
+        let header_slot = parts[0];
+        let header_widget_slot = parts[1];
+        let transcript_row = parts[2];
+        let nav_row = parts[3];
+        let status_row = parts[4];
+        let above_widget_slot = parts[5];
+        let composer = parts[6];
+        let below_widget_slot = parts[7];
+        let footer_widget_slot = parts[8];
+        let footer_row = parts[9];
+        let header_line = Rect::new(header_slot.x, header_slot.y, header_slot.width, 1);
         if !self.plain_style {
             self.draw_header(frame, header_line, colors);
         }
+        self.draw_widget_slot(
+            frame,
+            header_widget_slot,
+            crate::plugins::WidgetPlacement::Header,
+            colors,
+        );
         let history_slot = Rect::new(
-            layout[1].x,
-            layout[1].y,
-            layout[1].width.saturating_sub(1),
-            layout[1].height,
+            transcript_row.x,
+            transcript_row.y,
+            transcript_row.width.saturating_sub(1),
+            transcript_row.height,
         );
         // The surface and its text stop before the right gutter, leaving a
         // terminal-background strip next to the scrollbar.
@@ -3488,11 +3496,11 @@ impl UiState {
 
         if show_navigation {
             let area = Rect::new(
-                layout[2]
+                nav_row
                     .x
                     .saturating_add(if self.plain_style { 4 } else { 2 }),
-                layout[2].y,
-                layout[2].width.saturating_sub(4),
+                nav_row.y,
+                nav_row.width.saturating_sub(4),
                 1,
             );
             let action = self
@@ -3536,7 +3544,7 @@ impl UiState {
         }
         // One quiet input surface: a divider, neutral prompt marker and
         // multiline editor. Role colours belong to message rails only.
-        if layout[3].height > 0 {
+        if status_row.height > 0 {
             let mut status = self.activity_line(colors);
             if !self.queued.is_empty() {
                 status.spans.push(Span::styled("   ", Style::default()));
@@ -3554,19 +3562,23 @@ impl UiState {
             frame.render_widget(
                 Paragraph::new(status),
                 Rect::new(
-                    layout[3]
+                    status_row
                         .x
                         .saturating_add(if self.plain_style { 4 } else { 2 }),
-                    layout[3].y,
-                    layout[3]
+                    status_row.y,
+                    status_row
                         .width
                         .saturating_sub(if self.plain_style { 7 } else { 4 }),
                     1,
                 ),
             );
         }
-        self.draw_pinned_status(frame, layout[4], colors);
-        let composer = layout[5];
+        self.draw_widget_slot(
+            frame,
+            above_widget_slot,
+            crate::plugins::WidgetPlacement::AboveComposer,
+            colors,
+        );
         let border = if self.attach_mode {
             colors.accent_text
         } else {
@@ -3650,19 +3662,21 @@ impl UiState {
         } else {
             Paragraph::new(text).style(Style::default().fg(colors.text))
         };
-        frame.render_widget(
-            Paragraph::new("›").style(
-                Style::default()
-                    .fg(colors.text)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Rect::new(
-                composer.x.saturating_add(2),
-                composer.y.saturating_add(editor_inset),
-                1,
-                1,
-            ),
-        );
+        if self.ask.is_none() {
+            frame.render_widget(
+                Paragraph::new("›").style(
+                    Style::default()
+                        .fg(colors.text)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Rect::new(
+                    composer.x.saturating_add(2),
+                    composer.y.saturating_add(editor_inset),
+                    1,
+                    1,
+                ),
+            );
+        }
         frame.render_widget(input, editor_inner);
         if let Some((a, b)) = self.editor_selection {
             if a != b {
@@ -3683,6 +3697,7 @@ impl UiState {
         }
         if self.show_editor_cursor()
             && self.plugin_panel.is_none()
+            && self.ask.is_none()
             // A picker owns the hardware cursor for its own input field.
             && self.picker.is_none()
             && editor_inner.width > 0
@@ -3715,10 +3730,41 @@ impl UiState {
             }
             self.ime_cursor_position = Some(caret);
         }
+        if let Some(ask) = &mut self.ask {
+            // The question replaces the input text in place: no centred popup.
+            frame.render_widget(Clear, editor_inner);
+            self.ime_cursor_position =
+                ask.draw_in(frame, editor_inner, colors, self.preferences.language);
+        }
+        self.draw_widget_slot(
+            frame,
+            below_widget_slot,
+            crate::plugins::WidgetPlacement::BelowComposer,
+            colors,
+        );
+        self.draw_widget_slot(
+            frame,
+            footer_widget_slot,
+            crate::plugins::WidgetPlacement::Footer,
+            colors,
+        );
+        if let Some(side) = sidebar_area {
+            let block = Block::default()
+                .borders(Borders::LEFT)
+                .border_style(Style::default().fg(colors.border));
+            let inner = block.inner(side);
+            frame.render_widget(block, side);
+            self.draw_widget_slot(
+                frame,
+                inner,
+                crate::plugins::WidgetPlacement::Sidebar,
+                colors,
+            );
+        }
         let status_area = Rect::new(
-            layout[6].x.saturating_add(2),
-            layout[6].y,
-            layout[6].width.saturating_sub(4),
+            footer_row.x.saturating_add(2),
+            footer_row.y,
+            footer_row.width.saturating_sub(4),
             1,
         );
         let hovered = self.hover_pointer.and_then(|(x, y)| self.link_at(x, y));
@@ -3753,20 +3799,13 @@ impl UiState {
                 self.preferences.language,
             );
         }
-        if let Some(ask) = &mut self.ask {
-            ask.draw(
-                frame,
-                Rect::new(area.x, history_slot.y, area.width, history_slot.height),
-                colors,
-                self.preferences.language,
-            );
-        }
         self.draw_panel(
             frame,
             full_area,
             Rect::new(area.x, history_slot.y, area.width, history_slot.height),
             colors,
         );
+        self.draw_custom_ui(frame, full_area, colors);
     }
 }
 
@@ -3805,35 +3844,6 @@ mod plain_tests;
 #[cfg(test)]
 #[path = "semantic_tests.rs"]
 mod semantic_tests;
-
-impl UiState {
-    /// One pinned line for the committed goal state. It stays visible while the
-    /// transcript scrolls and is never part of the transcript itself.
-    pub(super) fn draw_pinned_status(
-        &self,
-        frame: &mut ratatui::Frame,
-        area: ratatui::layout::Rect,
-        colors: super::theme::Theme,
-    ) {
-        use ratatui::{style::Style, text::Line, widgets::Paragraph};
-        let Some(status) = self.control_status.as_ref().filter(|_| area.height > 0) else {
-            return;
-        };
-        let chinese = self.preferences.language == super::preferences::Language::Zh;
-        let color = if status.status == "paused" {
-            colors.warning
-        } else {
-            colors.accent
-        };
-        frame.render_widget(
-            Paragraph::new(Line::styled(
-                status.label(chinese),
-                Style::default().fg(color),
-            )),
-            area,
-        );
-    }
-}
 
 #[cfg(test)]
 #[path = "message_tests.rs"]
@@ -3913,72 +3923,5 @@ mod hardening_tests {
         let mut normal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         normal.draw(|frame| ui.draw(frame)).unwrap();
         assert!(ui.selected_text().is_none());
-    }
-    #[test]
-    fn a_committed_goal_state_is_pinned_and_terminal_states_clear_it() {
-        let mut ui = state();
-        let control = |status: &str| UiEvent::ControlStatus {
-            owner: "goal".into(),
-            id: "task-1".into(),
-            revision: 2,
-            status: status.into(),
-            reason: "user_stop".into(),
-            summary: "修复登录失败".into(),
-        };
-        ui.event(control("running"));
-        let running = ui.control_status.clone().expect("running goal is pinned");
-        let line = running.label(false);
-        assert!(line.contains("Goal task-1"), "{line}");
-        assert!(line.contains("running"), "{line}");
-        assert!(!line.contains('%'), "no completion percentage: {line}");
-        assert!(running.label(true).contains("执行中"));
-
-        // The foreground outcome never renders as a completed goal.
-        ui.task_outcome = Some(TaskOutcome::Completed);
-        assert!(ui.control_status.is_some());
-
-        ui.event(control("paused"));
-        let paused = ui.control_status.clone().expect("paused goal is pinned");
-        assert!(paused.label(false).contains("paused"));
-        assert!(paused.label(false).contains("user_stop"));
-        assert!(paused.label(true).contains("已暂停"));
-
-        for terminal in ["completed", "cancelled"] {
-            ui.event(control(terminal));
-            assert!(
-                ui.control_status.is_none(),
-                "{terminal} must clear the line"
-            );
-        }
-    }
-
-    #[test]
-    fn the_pinned_goal_line_renders_on_a_small_terminal() {
-        let mut ui = state();
-        ui.event(UiEvent::ControlStatus {
-            owner: "goal".into(),
-            id: "task-1".into(),
-            revision: 1,
-            status: "paused".into(),
-            reason: "user_stop".into(),
-            summary: String::new(),
-        });
-        for (width, height) in [(40u16, 12u16), (24, 8), (80, 24)] {
-            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            terminal.draw(|frame| ui.draw(frame)).unwrap();
-            let text: String = terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect();
-            if height >= 12 {
-                assert!(
-                    text.contains("task-1"),
-                    "{width}x{height} must show the pinned goal line: {text}"
-                );
-            }
-        }
     }
 }

@@ -71,7 +71,6 @@ function fakeHost(state: Record<string, unknown>, trace: Trace): DesktopHost {
     expandProject() {},
     showError(error) { trace.calls.push('error:' + String(error)); },
     toast(message) { trace.calls.push('toast:' + message); },
-    resetGoal() { trace.calls.push('resetGoal'); },
     syncHistory() { trace.calls.push('syncHistory'); },
     restoreDraft() { trace.calls.push('restoreDraft'); },
     restoreFollowups() { trace.calls.push('restoreFollowups'); },
@@ -102,14 +101,13 @@ describe('createSessionCommands', () => {
     expect(apiMock.newSession).not.toHaveBeenCalled();
   });
 
-  it('saves the draft, resets the goal and installs the new bootstrap', async () => {
+  it('saves the draft and installs the new bootstrap', async () => {
     const trace: Trace = {calls: []};
     const { host } = freshHost(trace);
     apiMock.newSession.mockResolvedValue(bootstrap('s2'));
     const commands = createSessionCommands(host);
     await commands.newSession();
     expect(host.data?.snapshot?.session_id).toBe('s2');
-    expect(trace.calls.indexOf('resetGoal')).toBeLessThan(trace.calls.indexOf('saveDraft'));
     expect(trace.calls.indexOf('saveDraft')).toBeLessThan(trace.calls.indexOf('clearError'));
     expect(trace.calls).toContain('syncHistory');
     expect(trace.calls).toContain('restoreDraft');

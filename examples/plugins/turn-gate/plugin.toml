@@ -1,0 +1,15 @@
+api_version = 2
+id = "turn-gate"
+name = "Turn gate demo"
+version = "0.1.0"
+description = "Ask the model to keep working until the answer carries a review marker"
+command = "node"
+args = ["main.js"]
+hooks = ["before_turn_end"]
+
+prompt = """
+End a turn only after you reviewed the work: the final answer must contain the marker `[reviewed]`. When the marker is missing, Kroma hands you one short review note and a fresh step instead of ending the task.
+"""
+
+[settings]
+marker = "[reviewed]"

@@ -139,27 +139,3 @@ describe('Live resync', () => {
   });
 });
 
-describe('Goal projection inside a stream batch', () => {
-  it('surfaces the host goal event without touching the transcript', () => {
-    const result = foldLiveEvents(empty(), [
-      {kind:'text_delta', text:'处理中'},
-      {kind:'task_control', owner:'kroma-goal', id:'goal-7', revision:4,
-        status:'paused', reason:'user_stop', summary:'把登录页改成深色'},
-    ]);
-    expect(result.goal).toMatchObject({
-      owner:'kroma-goal', id:'goal-7', revision:4, status:'paused', reason:'user_stop',
-    });
-    expect(result.state.activities).toHaveLength(1);
-    expect(result.state.activities[0].text).toBe('处理中');
-    expect(result.warnings).toEqual([]);
-  });
-
-  it('keeps the last goal of a batch and reports none otherwise', () => {
-    const batch = foldLiveEvents(empty(), [
-      {kind:'task_control', id:'goal-7', status:'running', revision:1},
-      {kind:'task_control', id:'goal-7', status:'completed', revision:2, reason:'completed'},
-    ]);
-    expect(batch.goal).toMatchObject({status:'completed', revision:2});
-    expect(foldLiveEvents(empty(), [{kind:'text_delta', text:'ok'}]).goal).toBeNull();
-  });
-});

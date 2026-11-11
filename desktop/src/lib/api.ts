@@ -1,6 +1,7 @@
-import type { GoalState } from './goal';
 import { invoke, Channel } from '@tauri-apps/api/core';
 import type { SteerOutcome } from './steering';
+import type { AskAnswer, AskQuestion } from './ask-question';
+import type { PanelBlock, PanelView } from './panel-blocks';
 
 export interface Message {
   role: string;
@@ -20,14 +21,61 @@ export interface ContextSegment { key: string; tokens: number }
 export interface ContextReport {
   window: number; available_input: number; output_reserve: number; segments: ContextSegment[];
 }
+export interface PluginUiAction {
+  id: string;
+  label: string;
+  primary?: boolean;
+  danger?: boolean;
+}
+export type WidgetPlacement = 'above_composer' | 'below_composer' | 'sidebar' | 'header' | 'footer';
+export interface PluginWidget {
+  plugin_id: string;
+  id: string;
+  placement: WidgetPlacement;
+  title: string;
+  blocks: PanelBlock[];
+  text: string;
+  actions: PluginUiAction[];
+  scope?: 'session' | 'global';
+}
+export interface DesktopSurface {
+  plugin_id: string;
+  title: string;
+  slot: 'sidebar' | 'tab' | 'above_composer' | 'panel';
+  height?: number | null;
+}
+export interface DesktopBundle {
+  plugin_id: string;
+  title: string;
+  slot: string;
+  height?: number | null;
+  html: string;
+}
+export interface PluginLivePanel {
+  plugin_id: string;
+  title: string;
+  blocks: PanelBlock[];
+  text: string;
+  actions: PluginUiAction[];
+}
+export type PluginUiEvent =
+  | {kind: 'status_changed'; statuses: string[]}
+  | {kind: 'widgets_changed'; widgets: PluginWidget[]}
+  | {kind: 'notify'; plugin_id: string; message: string; level: string}
+  | {kind: 'composer_set'; plugin_id: string; text: string; mode: string}
+  | {kind: 'panel_opened'; plugin_id: string; title: string; blocks: PanelBlock[]; text: string; actions: PluginUiAction[]}
+  | {kind: 'panel_closed'; plugin_id: string}
+  | {kind: 'desktop_message'; plugin_id: string; payload: unknown};
+
 export interface SessionSnapshot {
-  control?: GoalState | null;
   session_id: string; messages: Message[]; usage: SessionUsage;
   total_messages?: number; history_truncated?: boolean;
   next_before?: number | null;
   context_window: number; available_input: number; tool_names: string[];
   context?: ContextReport | null;
   skills?: Array<{name: string; description?: string}> | null;
+  plugin_status?: string[];
+  plugin_widgets?: PluginWidget[];
 }
 export interface PluginSummary {
   id: string; name: string; version: string; description: string;
@@ -35,12 +83,15 @@ export interface PluginSummary {
   secret_settings?: string[];
   /// Sensitive fields that currently have a non-empty value.
   set_secrets?: string[];
-  has_model: boolean; has_context: boolean; has_ui: boolean;
+  has_model: boolean; has_context: boolean; has_ui: boolean; has_desktop_ui?: boolean;
 }
 export interface PluginPresentation {
   tool_labels: Record<string, string>;
   activity_frames: string[];
   statuses: string[];
+  widgets?: PluginWidget[];
+  desktop_surfaces?: DesktopSurface[];
+  live_panel?: PluginLivePanel | null;
   shortcuts: {key: string; command: string}[];
   panels: {id: string; title: string; dynamic: boolean}[];
   /// Slot colours a plugin declared, as `#rgb`/`#rrggbb`.
@@ -101,6 +152,8 @@ export interface DesktopEvent {
 export type StreamEnvelope =
   | {kind: 'batch'; events: DesktopEvent[]}
   | {kind: 'snapshot'; snapshot: SessionSnapshot; sessions?: SessionEntry[]; session_groups?: SessionGroup[]}
+  // A plugin asks the person mid-run; the composer slot turns into the question.
+  | {kind: 'ask'; ask: AskQuestion}
   | {kind: 'done'; result: {status: string; error?: string}};
 
 export type ProfileInput = {
@@ -154,6 +207,19 @@ export const api = {
   // Plugin-declared presentation. Nothing here names a specific plugin.
   pluginPresentation: () => invoke<PluginPresentation>('plugin_presentation'),
   pluginPanel: (id: string) => invoke<string>('plugin_panel', {id}),
+  // Structured panel content; older hosts only know the string form.
+  pluginPanelView: (id: string) => invoke<PanelView>('plugin_panel_view', {id}),
+  pluginDesktopBundle: (id: string) => invoke<DesktopBundle>('plugin_desktop_bundle', {id}),
+  pluginUiAction: (pluginId: string, widgetId: string, actionId: string, payload?: unknown) =>
+    invoke<{content: string; task?: string | null}>('plugin_ui_action', {
+      pluginId, widgetId, actionId, payload: payload ?? null,
+    }),
+  pluginUiMessage: (pluginId: string, payload: unknown) =>
+    invoke<unknown>('plugin_ui_message', {pluginId, payload}),
+  // Answering a plugin's question; `dismissed` means the person closed the bar.
+  answerQuestion: (answer: AskAnswer) => invoke<null>('answer_question', {
+    id: answer.id, picked: answer.picked, typed: answer.typed, dismissed: answer.dismissed,
+  }),
   send: async (text: string, paths: string[], onEvent: (event: StreamEnvelope) => void) => {
     const channel = new Channel<StreamEnvelope>();
     channel.onmessage = onEvent;

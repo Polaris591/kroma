@@ -1,24 +1,27 @@
 api_version = 2
 id = "goal"
 name = "Goal"
-version = "0.2.0"
-description = "Keep working toward the user's goal; record progress and real checks, pause when blocked"
+version = "0.3.0"
+description = "Keep working toward one goal per conversation; record progress or cancel"
 command = "node"
 args = ["main.js"]
-capabilities = ["task_control"]
+hooks = ["before_turn_end"]
 prompt = """
 仅在有活动目标时使用 Goal；直接执行，不要求预填验收表。
-仅在重要进展、完成或受阻时登记 checkpoint；用户最新指令优先。
-宿主核验真实执行记录，模型结论不等于证明。
+用 goal_checkpoint 记录关键进展、结论或阻塞；claim 设为 done 才算完成，blocked 会暂停目标。
+这个插件只在自己的存档里记状态；它不会替你批准任何操作，也不授予新权限。用户最新指令优先。
 """
+
+[settings]
+live_status = true
 
 [[commands]]
 name = "/goal"
-description = "启动、查看、暂停、继续或取消目标"
+description = "开始、查看或取消目标"
 
 [[tools]]
 name = "goal_checkpoint"
-description = "活动目标的进度、完成或阻塞记录。只需 summary 和 claim；其余可选。省略保留既有条目，空数组清空；宿主独立核验执行事实。"
+description = "记录活动目标的进展、结论或阻塞。claim 只能是 working、done 或 blocked；done 结束目标，blocked 暂停目标。"
 invalidates_context = true
 
 [tools.parameters]
@@ -28,8 +31,7 @@ required = ["summary", "claim"]
 
 [tools.parameters.properties.summary]
 type = "string"
-minLength = 1
-maxLength = 2048
+description = "这一轮实际做了什么、看到了什么证据"
 
 [tools.parameters.properties.claim]
 type = "string"
@@ -37,53 +39,8 @@ enum = ["working", "done", "blocked"]
 
 [tools.parameters.properties.next_step]
 type = "string"
-maxLength = 1024
+description = "下一步要做什么；working 时建议填写"
 
 [tools.parameters.properties.block_reason]
 type = "string"
-maxLength = 1024
-
-[tools.parameters.properties.unverified]
-type = "array"
-items = { type = "string", maxLength = 200 }
-
-[tools.parameters.properties.criteria]
-type = "array"
-description = "可选验收点，省略则继承。"
-[tools.parameters.properties.criteria.items]
-type = "object"
-additionalProperties = false
-required = ["id", "text"]
-[tools.parameters.properties.criteria.items.properties.id]
-type = "string"
-[tools.parameters.properties.criteria.items.properties.text]
-type = "string"
-[tools.parameters.properties.criteria.items.properties.assessment]
-type = "string"
-enum = ["pending", "satisfied", "blocked"]
-
-# Optional execution references remain available to the model and are checked
-# against actual host receipts, rather than accepted as a claim of success.
-[tools.parameters.properties.criteria.items.properties.evidence]
-type = "array"
-[tools.parameters.properties.criteria.items.properties.evidence.items]
-type = "object"
-additionalProperties = false
-required = ["kind"]
-[tools.parameters.properties.criteria.items.properties.evidence.items.properties.kind]
-type = "string"
-enum = ["tool", "final_answer"]
-[tools.parameters.properties.criteria.items.properties.evidence.items.properties.call_id]
-type = "string"
-
-[tools.parameters.properties.checks]
-type = "array"
-description = "可选检查登记，宿主会核对实际执行。"
-[tools.parameters.properties.checks.items]
-type = "object"
-additionalProperties = false
-required = ["id", "command"]
-[tools.parameters.properties.checks.items.properties.id]
-type = "string"
-[tools.parameters.properties.checks.items.properties.command]
-type = "string"
+description = "claim 为 blocked 时说明卡在哪里"

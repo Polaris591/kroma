@@ -1,6 +1,5 @@
 import type { DesktopEvent } from './api';
 import type { LiveActivity } from './transcript';
-import { goalFromEvent, type GoalState } from './goal';
 
 export interface LiveStreamState {
   activities: LiveActivity[];
@@ -31,7 +30,7 @@ export function liveActivityKey(sequence: number, kind: 'text' | 'reasoning' | '
 export function foldLiveEvents(
   current: LiveStreamState,
   events: readonly DesktopEvent[],
-): {state: LiveStreamState; warnings: string[]; resync: boolean; goal: GoalState | null} {
+): {state: LiveStreamState; warnings: string[]; resync: boolean} {
   const activities = [...current.activities];
   const cloned = new Set<number>();
   const toolPositions = new Map<string, number[]>();
@@ -42,9 +41,6 @@ export function foldLiveEvents(
   // A dropped batch means this projection is no longer contiguous, so the
   // caller must refetch authoritative history instead of trusting it.
   let resync = false;
-  // The last goal projection in this batch. Goal state is host-published, so a
-  // batch that only reports a goal must not create a transcript entry.
-  let goal: GoalState | null = null;
   let pending: Pending | null = null;
 
   // Positions are indexed by the provider's call id, never by the UI key.
@@ -166,10 +162,6 @@ export function foldLiveEvents(
               : '实时事件积压；正在重新同步会话历史');
             break;
           }
-          case 'task_control': {
-            goal = goalFromEvent(event) ?? goal;
-            break;
-          }
           case 'tool_finished': {
             for (const index of targets(String(event.id))) {
               const tool = writable(index);
@@ -192,6 +184,5 @@ export function foldLiveEvents(
     },
     warnings,
     resync,
-    goal,
   };
 }

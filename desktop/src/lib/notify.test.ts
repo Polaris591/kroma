@@ -41,9 +41,3 @@ describe('taskNotification', () => {
   });
 });
 
-it('announces a paused goal instead of its rejected completion text', () => {
-  const paused = {owner:'goal', id:'g', revision:1, status:'paused' as const, reason:'BLOCKED', summary:'等待凭据'};
-  expect(taskNotification('completed', 'Chat', messages, paused)).toEqual({
-    title:'Chat · 目标已暂停', body:'进度已保留，打开窗口查看原因并继续',
-  });
-});

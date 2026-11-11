@@ -1,5 +1,25 @@
 # Kroma 插件架构后续规划（V2–V4）
 
+## 2026-11-11（续）：插件 UI 实时总线与双端自由扩展落地
+
+- 解决桌面端任务运行中不刷新插件状态，以及全局静态 `live_statuses` 跨会话/跨项目串台的问题：重构为按 `PluginCatalog` 隔离的 `PluginUiBus`，同步修复了真实默认 TUI 渲染器（`plain_footer_line` 与 `active_colors`）忽略插件状态行与 `[ui.colors]` 的问题。
+- 跨端通用实时 UI（一次编写、终端与桌面通用）：新增 `ui.notify`、`ui.composer`、`ui.widget`（支持 `above_composer`/`below_composer`/`sidebar`/`header`/`footer` 槽位与可点击 `ui_action` 按钮）以及 `ui.panel` 主动弹窗/刷新。
+- 终端自由画布与桌面自由网页区（方案 B）：终端支持 `ui.custom` 交互式全屏/弹层画布（`ui_render`/`ui_input`/`ui_close`）；桌面端支持 `[ui.desktop]` 沙盒网页组件（`sidebar`/`tab`/`above_composer`/`panel`）及 `window.kroma` 双向通信桥；完整示例见 `examples/plugins/ui-lab`。
+- 模块瘦身：拆分 `src/plugins/ui.rs`、`src/plugins/manifest.rs` 与 `desktop/src-tauri/src/plugins_ui.rs`，避免单文件继续膨胀。
+
+## 2026-11-11：插件系统收尾（四条缺口全部落地）
+
+- 提问框从"屏幕中央弹窗"改成"占用底部输入栏"：问题、选项、打字都在同一条输入栏里，草稿不丢、对话不被遮住。
+- 桌面端补上问答通道（`DesktopAsker` + `answer_question`），插件在桌面也能中途问人；`ui.ask` 现在终端和桌面都可用。
+- 插件面板支持结构化内容（标题/文字/列表/键值/进度/表格/分隔线）：终端排版成对齐文本，桌面画成真组件，同一份 JSON。
+- 顺手修掉一个真实问题：桌面端 Rust 仍在引用已删除的目标控制接口，编译不过；已清干净。
+
+- `ui.ask` 宿主调用：插件在命令/工具/收工把关过程中可以直接问用户，终端里占用底部输入栏，桌面端有自己的问答条；没人看着的场合（`--print`、管道）立刻回 `ok:false`，插件必须自己决定，不许卡住。
+- 安装即说明：`kroma plugins install` 与 `check` 先打印一段人话（多出哪些命令/工具/接入点/界面/设置项、怎么跑、插件是你信任的本机程序），再提示启用。
+- 一键起手：`kroma plugins new <id>` 生成 `plugin.toml` + `main.js` + `README.md`，不改一行就能过 `kroma plugins check`。
+- 界面能力盘点和剩余缺口写进 `docs/plugin-contract-v1.md`：声明式 UI 与结构化面板已完成；"插件自己画任意界面"仍未做。
+- 核心中的 Goal 专属代码全部删除；Goal 变成只用通用接缝的普通插件（`examples/plugins/goal`，`tests/goal_plugin_e2e.rs`）。
+
 ## 2026-10-30 独立审查后的九项修复（未扩展官方插件）
 
 - 模型替换：启用但损坏/初始化失败/冲突的插件不再静默回退默认 Provider；TUI 的 `/model` 与恢复历史会话均尊重活跃模型插件。

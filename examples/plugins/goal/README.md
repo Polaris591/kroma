@@ -1,94 +1,39 @@
-# Goal plugin
+# Goal 插件（自带状态）
 
-One goal, one host-owned controller, one normal Agent loop. The plugin supplies
-Goal rules and the `goal_checkpoint` tool; the host keeps execution, persistence
-and cancellation. Installing or enabling it never changes an existing setting by
-itself.
+目标管理是**普通插件**：Kroma 核心不认识「目标」，只提供三个通用口子。
 
-Status: implemented and covered by the host end-to-end suite
-(`tests/task_control_e2e.rs`, 22 goal cases) plus the plugin's own contract
-tests. What is still pending is release validation — a full closed loop on a real
-provider and a manual deployment rehearsal — so treat the
-[design document](../../../docs/goal-plugin-design.md) as the contract and the
-source plus tests as the authority.
+- `/goal ...` 命令返回一个 `task`，宿主把它当成你的下一句话立刻开跑。
+- `before_turn_end` 钩子：AI 想收工时，插件可以回一句「还没完」和一段提示，宿主继续这一轮。
+- `ui.status` 宿主调用：插件把自己那行状态文字改掉（底部状态栏/桌面快照都会显示）。
 
-```bash
-kroma plugins install examples/plugins/goal
-kroma plugins enable goal
+## 状态存在哪里
+
+每个对话一个文件：`plugin-data/goal/goal-<session_id>.json`。
+换对话、`/fork`、`/rewind` 打开的是另一个会话文件，所以目标不会串台；插件也不读别的对话。
+
+## 用法
+
+```
+/goal <目标正文>      开始目标并直接开干
+/goal 或 /goal status  看当前目标
+/goal cancel          放弃目标（不删除已完成的工作）
+Ctrl+C                停止当前这一轮（目标本身还在，说句话就能接着干）
 ```
 
-Restart Kroma or run `/plugins reload` while idle.
+模型用 `goal_checkpoint` 记录进展：`claim=working` 继续、`done` 结束、`blocked` 先停住不再催（目标保留）。
 
-```text
-/goal 修复登录失败，补上回归测试，并通过相关检查
-/goal                       # current goal, progress and pause reason
-/goal pause                 # pause; completed edits are kept
-/goal resume                # continue, re-checking the workspace as needed
-/goal resume 先只支持邮箱登录  # add a user revision, then continue
-/goal cancel                # give up; completed work is not deleted
+## 与旧版区别（重要）
+
+旧版把目标状态机放在核心里（`src/task_control.rs`），核心会替插件核验命令回执、写入存档。
+现在这一切都不在核心里：**插件只看得见宿主递给它的事实**（`before_turn_end` 里的本轮工具调用、
+命令回执不再单独提供）。因此：
+
+- 插件不会阻止你结束对话，也**不授予任何权限**；
+- AI 说「做完了」时，插件只根据自己记录的 `goal_checkpoint` 判断，不再由宿主校验；
+- 你随时可以 `/goal cancel` 或按 Esc 停手。
+
+## 测试
+
 ```
-
-A new `/goal <task>` starts one real turn immediately; it is refused while the
-current goal is still running. **No acceptance form is required up front**: work
-starts at once, and `goal_checkpoint` only records progress, a completion claim
-or a blocker. The goal is not the foreground task: a normal answer, a streamed
-draft or an assistant message never means it is complete.
-
-## Recording progress
-
-`goal_checkpoint` needs only `summary` and `claim` (`working` / `done` /
-`blocked`). Everything else is optional:
-
-- `criteria` — requirements you want tracked; omit to inherit, `[]` to clear.
-  The model may refine or correct its own list at any time.
-- `checks` — commands worth running as evidence; omit to inherit, `[]` to clear.
-  A check may be registered **after** it ran, and it stays valid evidence for the
-  rest of the goal. Running other tools only makes the *completion claim* stale,
-  so no rerun is forced.
-- `evidence` — tool call ids; the host verifies each id is a real execution of
-  this goal and revision, otherwise the checkpoint is rejected as a tool error.
-- `unverified` — what a person still has to confirm.
-
-Explicitly stopping a task (`Ctrl+C`, the stop button, `/goal pause`) pauses the
-goal. `/goal cancel` ends it. `/goal resume` reopens a paused *or* finished goal
-because the user explicitly asked for it; nothing reopens on its own.
-
-## What the host guarantees
-
-- The accepted final answer and the `completed` record are one message append.
-- An interrupted `running` record is persisted as `paused` before any new work;
-  nothing is replayed.
-- A fork or rewind keeps the requirement and its check plan as a *new paused*
-  goal: new id, no pass facts, no completion claim. A finished goal is never
-  revived, and `/clear` drops the control state.
-- Host metadata coming from a model backend is stripped before it is stored, so
-  a provider cannot forge a goal record.
-- Every model request carries the complete active goal — id, revision, status,
-  the user's own words for each revision, the check plan, real execution facts
-  and recorded progress. It is a projection, never a durable user instruction.
-- User requirements live as exact message references, so a long conversation
-  never blocks or truncates a new goal.
-- While a turn runs, `/goal pause` and `/goal cancel` stop it through the same
-  user-stop path on every host. The plugin is never asked to approve a stop.
-- A plugin fault or provider error pauses the goal instead of reporting success.
-
-## Host support
-
-| Host | Start, status, pause, resume, cancel |
-| --- | --- |
-| CLI, JSONL | Yes (`/goal pause` and `/goal cancel` also stop a running turn) |
-| TUI | Yes (`/goal` idle; `pause`/`cancel` while running) |
-| Desktop | Yes; the goal shelf is restored from the durable snapshot and survives reloads |
-
-## Settings
-
-There is no request, time or token budget and no refusal counter: the host never
-pauses a goal because it "tried too often". A goal ends when the model delivers a
-checked result, when it reports a real blocker, or when the user stops it.
-
-## Limits
-
-Command checks compare the exact command line and working directory; the host
-does not interpret shell syntax. A passing check is evidence that a command ran,
-not proof that the requirement was understood correctly, and no completion
-percentage is shown. Nothing here claims exactly-once external side effects.
+cd examples/plugins/goal && node --test goal.test.js
+```

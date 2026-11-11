@@ -76,17 +76,8 @@ impl EventSink for JsonEvents {
             RuntimeEvent::TaskFinished { status } => {
                 json!({"type":"task_finished","status":status})
             }
-            RuntimeEvent::TaskControlChanged {
-                command,
-                owner,
-                id,
-                revision,
-                status,
-                reason,
-                summary,
-            } => json!({
-                "type":"task_control","command":command,"owner":owner,"id":id,"revision":revision,
-                "status":status,"reason":reason,"summary":summary
+            RuntimeEvent::TurnGateContinued { plugin, feedback } => json!({
+                "type":"turn_gate_continued","plugin":plugin,"feedback":feedback
             }),
             RuntimeEvent::SessionCreated { id } => json!({"type":"session_created","id":id}),
             RuntimeEvent::SessionSwitched { from, to } => {

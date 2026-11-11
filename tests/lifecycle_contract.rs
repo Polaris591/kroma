@@ -96,9 +96,6 @@ impl EventSink for RecordingEvents {
                 self.durable(marker);
                 format!("task-end-{status}")
             }
-            RuntimeEvent::TaskControlChanged { status, .. } => {
-                format!("task-control-{status}")
-            }
             _ => return,
         };
         self.events.lock().unwrap().push(label);
@@ -272,7 +269,7 @@ impl EventSink for OrderEvents {
             | RuntimeEvent::SessionCleared { .. }
             | RuntimeEvent::SessionForked { .. }
             | RuntimeEvent::SessionRewound { .. } => return,
-            RuntimeEvent::TaskControlChanged { status, .. } => format!("task-control-{status}"),
+            RuntimeEvent::TurnGateContinued { plugin, .. } => format!("gate-continue-{plugin}"),
         };
         self.0.lock().unwrap().push(label);
     }

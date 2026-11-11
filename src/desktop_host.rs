@@ -231,17 +231,8 @@ impl EventSink for DesktopEvents {
             RuntimeEvent::TaskFinished { status } => {
                 self.push(json!({"kind":"task_finished","status":status}))
             }
-            RuntimeEvent::TaskControlChanged {
-                command,
-                owner,
-                id,
-                revision,
-                status,
-                reason,
-                summary,
-            } => self.push(json!({
-                "kind":"task_control","command":command,"owner":owner,"id":id,"revision":revision,
-                "status":status,"reason":reason,"summary":summary
+            RuntimeEvent::TurnGateContinued { plugin, feedback } => self.push(json!({
+                "kind":"turn_gate_continued","plugin":plugin,"feedback":feedback
             })),
             RuntimeEvent::SessionCreated { id } => {
                 self.push(json!({"kind":"session_created","id":id}))
@@ -273,12 +264,28 @@ impl EventSink for DesktopEvents {
 const MAX_SNAPSHOT_MESSAGES: usize = 1_000;
 
 pub fn snapshot(agent: &Agent) -> Result<Value> {
-    snapshot_page(agent, None, MAX_SNAPSHOT_MESSAGES)
+    snapshot_page_with_plugins(agent, None, MAX_SNAPSHOT_MESSAGES, None)
+}
+
+pub fn snapshot_with_plugins(
+    agent: &Agent,
+    plugins: Option<&crate::plugins::PluginCatalog>,
+) -> Result<Value> {
+    snapshot_page_with_plugins(agent, None, MAX_SNAPSHOT_MESSAGES, plugins)
+}
+
+pub fn snapshot_page(agent: &Agent, before: Option<usize>, limit: usize) -> Result<Value> {
+    snapshot_page_with_plugins(agent, before, limit, None)
 }
 
 /// Return one contiguous slice of the durable transcript. `before` is an
 /// exclusive end index; `next_before` is the cursor for older pages.
-pub fn snapshot_page(agent: &Agent, before: Option<usize>, limit: usize) -> Result<Value> {
+pub fn snapshot_page_with_plugins(
+    agent: &Agent,
+    before: Option<usize>,
+    limit: usize,
+    plugins: Option<&crate::plugins::PluginCatalog>,
+) -> Result<Value> {
     let catalog = SessionCatalog::new(agent.workdir())?;
     let usage = if agent.session_id() == "unknown" {
         SessionUsage::default()
@@ -289,19 +296,15 @@ pub fn snapshot_page(agent: &Agent, before: Option<usize>, limit: usize) -> Resu
     let total = messages.len();
     let end = before.unwrap_or(total).min(total);
     let start = end.saturating_sub(limit.clamp(1, MAX_SNAPSHOT_MESSAGES));
+    let plugin_status = plugins.map_or_else(Vec::new, |p| p.ui_statuses());
+    let plugin_widgets = plugins.map_or_else(Vec::new, |p| {
+        p.ui_widgets().iter().map(|w| w.to_json()).collect()
+    });
     Ok(json!({
         "session_id":agent.session_id(),
-        // Committed goal state is separate from the foreground result; the
-        // frontend must never derive completion from an assistant message.
-        "control":agent.task_control().and_then(|host| host.snapshot()).map(|snapshot| json!({
-            "command":agent.task_control().map(|host| host.command()),
-            "owner":snapshot.owner,
-            "id":snapshot.id,
-            "revision":snapshot.revision,
-            "status":snapshot.status.as_str(),
-            "reason":snapshot.reason,
-            "summary":snapshot.data.get("summary").cloned(),
-        })),
+        // Live one-line statuses and widgets pushed by this catalog's plugins.
+        "plugin_status": plugin_status,
+        "plugin_widgets": plugin_widgets,
         "messages":&messages[start..end],
         "total_messages":total,
         "history_truncated":start > 0,

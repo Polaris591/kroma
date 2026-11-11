@@ -1,0 +1,30 @@
+api_version = 2
+id = "ui-lab"
+name = "UI Lab"
+version = "0.1.0"
+description = "跨端挂件、交互按钮、终端自由画布与桌面自定义网页面板示例"
+command = "node"
+args = ["main.js"]
+events = ["task_started", "task_finished", "tool_started", "tool_finished"]
+
+[[commands]]
+name = "/uilab"
+description = "演示插件 UI：/uilab [widget|clear|panel|custom|status <字>|notify <字>|composer <字>]"
+
+[[tools]]
+name = "uilab_widget"
+description = "更新或清除当前会话的实时挂件卡片（含进度与操作按钮）"
+
+[tools.parameters]
+type = "object"
+properties = { title = { type = "string" }, label = { type = "string" }, value = { type = "number" }, max = { type = "number" }, clear = { type = "boolean" } }
+
+[ui]
+panel_title = "UI Lab 面板"
+dynamic_panel = true
+
+[ui.desktop]
+entry = "ui/index.html"
+slot = "sidebar"
+title = "UI Lab 看板"
+height = 280

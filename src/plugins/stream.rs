@@ -170,13 +170,10 @@ impl PluginWorker {
                 loop {
                     let frame = process.read_frame()?;
                     process.validate_frame(&frame, request_id, true, protocol_version)?;
-                    let event = frame
-                        .get("event")
-                        .and_then(Value::as_str)
-                        .context(format!(
-                            "plugin '{}' streamed a frame without an event name. Update the plugin.",
-                            process.name
-                        ))?;
+                    let event = frame.get("event").and_then(Value::as_str).context(format!(
+                        "plugin '{}' streamed a frame without an event name. Update the plugin.",
+                        process.name
+                    ))?;
                     if !matches!(
                         event,
                         "text_delta"

@@ -2,41 +2,45 @@
 
 ## Accepted runtime boundary
 
-Kroma's **core** owns the agent loop, tool execution, raw execution receipts, context
-projection, session WAL and snapshot scope, and the generic owner-bound task
-control state machine. **Plugins** own domain instructions, model-facing tool
-schemas, command interpretation, and UI/extension policies. No extra approvals,
-planners, verification-model calls or independent goal loops were introduced.
+Kroma's **core** owns the agent loop, tool execution, context projection, the
+session WAL and snapshot scope, and four generic seams: the `before_turn_end`
+hook, a command reply that may carry one `task`, and the `ui.status` / `ui.ask`
+host calls.
+**Plugins** own domain instructions, model-facing tool schemas, command
+interpretation, their own state, and UI/extension policies. No extra approvals,
+planners, verification-model calls or independent goal loops exist.
 
 ### Goal
 
-The model-visible `goal_checkpoint` schema now requires only `summary` and
-`claim`; progress details, criteria, check commands and evidence references
-are optional. `evidence[].kind/call_id` remains exposed so a model can cite
-real executed calls. The host continues to validate references and check
-execution facts before completing a goal.
+The core has **no goal code**. `src/task_control.rs`, `src/plugins/task_control.rs`,
+the host controller API, the `task_control` capability, the `TaskControlChanged`
+event, the desktop goal panel and the raw-execution receipt capture were all
+removed. `examples/plugins/goal` owns its own per-session file and uses only the
+four generic seams.
 
-The core's `task_control.rs` still includes `CheckSpec`, `SourceRef`, and
-`goal_sources`. They are entangled with serialized WAL/snapshot
-compatibility and the existing Goal plugin protocol. **We deliberately did
-not move these persisted types into JavaScript or remove them**: that would
-change the recovery format for existing users, with no measured runtime
-benefit. A future migration should first establish a versioned data adapter
-with round-trip tests on old sessions. Line-count reduction is not sufficient
-justification for breaking recoverability.
+Scaffolding is deliberately thin: `kroma plugins new <id>` writes a working
+`plugin.toml` + `main.js` that already answers `ping`, commands and tools, so a
+new author starts from a passing `kroma plugins check` instead of a blank file.
 
-The old extra schema fields remain accepted by the plugin's host protocol and
-stored data. They are not advertised to ordinary requests, and schema is not
-silently used to erase existing goal state. Advanced structured source
-references are intentionally not emitted by the compact model-facing schema;
-the original user message remains authoritative.
+What this costs, stated plainly: the host no longer verifies a goal claim against
+real command receipts, and an existing conversation keeps its old archived
+`kroma_task_control` items as inert history (they are ignored, not migrated).
+The plugin is advisory; you can always stop it with Esc or `/goal cancel`.
 
 ### Ask
 
-The host still owns `host = "ask_user"`: interactive rendering, response
-collection, dismissal and free-text behavior are impossible to implement from
-a pure declaration without a host callback. This is a legitimate narrow
-host implementation, not a second approval subsystem.
+The host owns the interactive surface: `host = "ask_user"` for a model-facing
+tool, and the `ui.ask` host call for a plugin that needs an answer mid-call.
+Both render the same overlay and return the same ``AskAnswer``, so a dismissed
+question can never be reported as approval. When no interface is attached
+(`--print`, pipes) `ui.ask` fails fast and the plugin is told to decide for
+itself. In the terminal the question takes over the input bar instead of
+covering the conversation; the desktop window draws its own question bar and
+answers through `answer_question`. In both, a dismissed question is reported
+as `ok:false`, so closing it is never consent. Panel content is likewise
+host-rendered: a plugin returns structured blocks, the terminal lays them out
+as text and the desktop draws real widgets. This is one narrow host
+capability, not a second approval subsystem.
 
 ### Model capability identity
 

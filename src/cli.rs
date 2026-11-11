@@ -532,7 +532,7 @@ pub fn help_for(topic: &str) -> &'static str {
 
 Removes saved conversations whose newest file is older than DAYS (minimum 1).
 A conversation used recently always survives any cutoff; nothing else in the directory is touched.",
-        "plugins" => "Usage: kroma plugins [list|enable <id>|disable <id>|install <path>|check <path>|uninstall <id>|config <id>|set <id> <key> <value>|reset <id> <key>]\n\nInstalled plugins are disabled until enabled; restart or /plugins reload after enabling.\nPlugins with a [settings] table reject unknown keys; 'set' converts the value to the type of that key's manifest default (bool, integer, string array, string).",
+        "plugins" => "Usage: kroma plugins [list|enable <id>|disable <id>|install <path|git-url>|check <path>|new <id>|uninstall <id>|config <id>|set <id> <key> <value>|reset <id> <key>]\n\n'install' and 'check' print what the plugin adds and how it runs; nothing runs until you enable it.\n'new <id>' writes a working plugin into ./<id> (plugin.toml, main.js, README.md).\nInstalled plugins are disabled until enabled; restart or /plugins reload after enabling.\nPlugins with a [settings] table reject unknown keys; 'set' converts the value to the type of that key's manifest default (bool, integer, string array, string).",
         "diagnostics" => "Usage: kroma diagnostics [--output <new-directory>]\n\nWrites a local-only allowlisted bundle. No upload, model request or plugin process.",
         "trust-project" => "Usage: kroma trust-project [--revoke]\n\nApproves or revokes this project's .kroma/mcp.json. The approval is bound to its content.",
         "recover-context" => "Usage: kroma recover-context [session-id]\n\nResets unavailable custom context memory while preserving raw history.",

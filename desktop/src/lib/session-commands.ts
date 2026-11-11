@@ -2,7 +2,7 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 import { api, type ProfileInput } from './api';
 import type { DesktopHost } from './desktop-host';
 import { exportFileStem } from './session-export';
-import { loadPresentation } from './plugin-ui';
+import { applyPresentation, clearSessionPluginUi, loadPresentation } from './plugin-ui';
 
 /** Bootstrap lifecycle and every command that installs a whole Bootstrap or
  * touches model/plugin configuration. All state stays in the shell. */
@@ -73,6 +73,8 @@ export function createSessionCommands(host: DesktopHost) {
       const next = await host.guard.settleBootstrap(generation, api.openProject(selected));
       if (!next) return;
       host.data = next;
+      clearSessionPluginUi();
+      applyPresentation(null);
       host.expandProject(selected);
       host.clearWorkspaceReview();
       host.resetHistoryWindow();
@@ -96,7 +98,6 @@ export function createSessionCommands(host: DesktopHost) {
   async function newSession() {
     if (host.running || host.busy || host.compacting) return;
     host.resetTaskResult();
-    host.resetGoal();
     host.saveDraft();
     host.taskGeneration += 1;
     const generation = host.guard.begin();
@@ -106,6 +107,7 @@ export function createSessionCommands(host: DesktopHost) {
       const next = await host.guard.settleBootstrap(generation, api.newSession());
       if (!next) return;
       host.data = next;
+      clearSessionPluginUi();
       host.syncHistory();
       host.clearLiveActivities();
       host.restoreDraft();

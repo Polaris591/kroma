@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use kroma::{
     agent::Agent,
-    commands::CommandRegistry,
+    commands::{CommandAction, CommandRegistry},
     context::{ContextConfig, ContextFactory},
     context_state::PersistedContext,
     model::{Completion, ModelBackend, ModelFuture, StreamFuture, TextResult},
@@ -294,7 +294,7 @@ async fn install_enable_configure_execute_disable() -> Result<()> {
         );
         let dynamic_panel = enabled.ui_panel_async("hello").await?;
         assert!(
-            dynamic_panel.contains("Requests handled: 3"),
+            dynamic_panel.contains("Requests handled") && dynamic_panel.contains('3'),
             "{dynamic_panel}"
         );
         assert!(dynamic_panel.contains("Configured: "), "{dynamic_panel}");
@@ -3943,7 +3943,7 @@ require("node:readline").createInterface({input:process.stdin}).on("line",line=>
     model.set_session_context("s1", &archive);
     let mut note = Message::new("user", "[任务控制参考] 目标 mem-1 · 修订 2 · 状态 running");
     note.provider_items = Some(vec![serde_json::json!({
-        "type": kroma::task_control::CONTROL_NOTE_ITEM_TYPE,
+        "type": "kroma_turn_gate",
         "source": "host"
     })]);
     let history = vec![
@@ -4434,6 +4434,766 @@ async fn an_unseen_plugin_needs_no_core_change() -> Result<()> {
     assert!(
         enabled.ui_panel("timeline-note")?.contains("检查恢复路径"),
         "the panel shows the same state the tool wrote"
+    );
+    Ok(())
+}
+
+#[derive(Default)]
+struct TurnGateEvents(Mutex<Vec<String>>);
+
+impl kroma::events::EventSink for TurnGateEvents {
+    fn on_event(&self, event: kroma::events::RuntimeEvent<'_>) {
+        if let kroma::events::RuntimeEvent::TurnGateContinued { plugin, .. } = event {
+            self.0.lock().unwrap().push(plugin.to_owned());
+        }
+    }
+}
+
+#[tokio::test]
+async fn before_turn_end_gate_keeps_the_turn_open_and_is_durable_and_visible() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    let temp = TestDirectory::new()?;
+    let dir = temp.path().join("plugins").join("gate");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("plugin.toml"),
+        "api_version=2\nid='gate'\nname='Gate'\ncommand='node'\nargs=['main.js']\nhooks=['before_turn_end']\n",
+    )?;
+    fs::write(
+        dir.join("main.js"),
+        r#"require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
+  const req=JSON.parse(line);
+  const text=String(req.arguments?.final_text||"");
+  const decision=text.includes("[reviewed]")
+    ? {decision:"finish"}
+    : {decision:"continue",feedback:"include [reviewed] before finishing"};
+  process.stdout.write(JSON.stringify({protocol_version:2,request_id:req.request_id,
+    content:JSON.stringify(decision)})+"\n");
+});"#,
+    )?;
+    let global = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(global.clone(), state.clone(), temp.path())?
+        .set_enabled("gate", true)?;
+    let catalog = PluginCatalog::discover_at(global, state, temp.path())?;
+    let gate = catalog
+        .turn_end_gate()
+        .map(Arc::new)
+        .context("an enabled before_turn_end plugin must provide a gate")?;
+
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    listener.set_nonblocking(true)?;
+    let server = std::thread::spawn(move || -> Result<usize> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(25);
+        let mut served = 0;
+        for answer in ["first answer", "second answer [reviewed]"] {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream.set_nonblocking(false)?;
+                        break stream;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() > deadline {
+                            anyhow::bail!("mock provider timed out after {served} request(s)");
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            };
+            let _request = read_mock_provider_request(&mut stream)?;
+            let body = format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{answer}\"}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )?;
+            stream.flush()?;
+            // Let Windows TCP deliver the last frame before the socket closes.
+            std::thread::sleep(Duration::from_millis(25));
+            served += 1;
+        }
+        Ok(served)
+    });
+
+    let model = ModelClient::new(
+        &format!("http://{address}/v1"),
+        Some("mock".into()),
+        "mock".into(),
+    )?;
+    let events = Arc::new(TurnGateEvents::default());
+    let budget = ContextConfig::with_output_reserve(32768, 1024)?;
+    let mut agent = Agent::with_runtime_budget(
+        Arc::new(model),
+        ToolRegistry::builtin(),
+        Arc::new(kroma::context::BuiltinContextFactory),
+        PromptComposer::default(),
+        Some(events.clone()),
+        temp.path().to_path_buf(),
+        budget,
+    )?;
+    agent.attach_turn_gate(Some(gate));
+
+    let answer = tokio::time::timeout(
+        Duration::from_secs(40),
+        agent.run("do the work", &mut |_| {}),
+    )
+    .await
+    .context("the gated turn did not finish")??;
+    assert_eq!(answer, "second answer [reviewed]");
+    assert_eq!(
+        events.0.lock().unwrap().as_slice(),
+        ["gate"],
+        "the host must report which plugin kept the turn open"
+    );
+    assert!(
+        agent.messages().iter().any(|message| message
+            .provider_items
+            .as_deref()
+            .is_some_and(|items| items.iter().any(|item| item["type"] == "kroma_turn_gate"))),
+        "the gate note must be part of the durable transcript"
+    );
+    assert_eq!(server.join().expect("mock provider panicked")?, 2);
+    Ok(())
+}
+
+#[test]
+fn turn_gate_example_passes_the_static_check() -> Result<()> {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/turn-gate");
+    let temp = TestDirectory::new()?;
+    let catalog = PluginCatalog::discover_at(
+        temp.path().join("plugins"),
+        temp.path().join("plugins.toml"),
+        temp.path(),
+    )?;
+    let report = catalog.check(&source)?;
+    assert!(report.contains("turn-gate"), "{report}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn plugin_command_can_start_one_real_task() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let dir = temp.path().join("plugins").join("draft");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("plugin.toml"),
+        "id='draft'\nname='Draft'\ncommand='node'\nargs=['main.js']\n[[commands]]\nname='/draft'\ndescription='Draft a request and start it'\n",
+    )?;
+    fs::write(
+        dir.join("main.js"),
+        r#"require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
+  const req=JSON.parse(line);
+  if(req.type!=="command") return process.stdout.write(JSON.stringify({content:"{}"})+"\n");
+  process.stdout.write(JSON.stringify({
+    protocol_version:req.protocol_version,request_id:req.request_id,
+    content:"Drafted a request from "+req.arguments,
+    task:"summarize the repository",
+  })+"\n");
+});"#,
+    )?;
+    let global = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(global.clone(), state.clone(), temp.path())?
+        .set_enabled("draft", true)?;
+    let catalog = PluginCatalog::discover_at(global, state, temp.path())?;
+
+    let mut registry = CommandRegistry::new();
+    assert!(catalog.register_commands(&mut registry).is_empty());
+    assert!(registry.knows("/draft"));
+
+    let model = ModelClient::new("http://127.0.0.1:9/v1", None, "mock".into())?;
+    let mut agent = Agent::with_runtime_budget(
+        Arc::new(model),
+        ToolRegistry::builtin(),
+        Arc::new(kroma::context::BuiltinContextFactory),
+        PromptComposer::default(),
+        None,
+        temp.path().to_path_buf(),
+        ContextConfig::with_output_reserve(32768, 1024)?,
+    )?;
+    let input = agent.task_input();
+    let reply = registry
+        .execute_async("/draft", &mut agent, &input)
+        .await?
+        .context("the plugin command must be dispatchable")?;
+    assert_eq!(
+        reply.action,
+        CommandAction::Task("summarize the repository".into()),
+        "the plugin supplied the user turn"
+    );
+    assert!(reply.output.contains("Drafted a request"));
+    Ok(())
+}
+
+#[test]
+fn installing_from_a_git_url_reuses_the_local_install_path() -> Result<()> {
+    if Command::new("git").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo)?;
+    fs::write(
+        repo.join("plugin.toml"),
+        "id='remote-demo'\nname='Remote'\ncommand='node'\nargs=['main.js']\n[[tools]]\nname='remote_demo'\ndescription='Remote install'\n",
+    )?;
+    fs::write(repo.join("main.js"), "process.stdin.resume();\n")?;
+    let git = |args: &[&str]| -> Result<()> {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "kroma test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "kroma test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .status()?;
+        assert!(status.success(), "git {args:?} failed");
+        Ok(())
+    };
+    git(&["init", "-q"])?;
+    git(&["add", "."])?;
+    git(&["-c", "commit.gpgsign=false", "commit", "-q", "-m", "init"])?;
+    let url = format!("file:///{}", repo.display().to_string().replace('\\', "/"));
+
+    let global = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    let catalog = PluginCatalog::discover_at(global.clone(), state.clone(), temp.path())?;
+    let message = catalog.install_source(&url)?;
+    assert!(message.contains("remote-demo"), "{message}");
+    fs::remove_dir_all(&repo)?;
+    assert!(
+        !message.contains("enabled"),
+        "a remote install stays disabled until the user enables it"
+    );
+    let installed = PluginCatalog::discover_at(global, state, temp.path())?;
+    let mut tools = ToolRegistry::builtin();
+    let mut prompt = PromptComposer::default();
+    let warnings = installed.contribute(&mut tools, &mut prompt);
+    assert!(
+        !warnings
+            .iter()
+            .any(|warning| warning.contains("remote-demo")),
+        "installed plugin must be discoverable without warnings: {warnings:?}"
+    );
+    assert!(
+        !tools
+            .definitions()
+            .iter()
+            .any(|schema| schema["function"]["name"] == "remote_demo"),
+        "a freshly installed plugin stays disabled"
+    );
+    installed.set_enabled("remote-demo", true)?;
+    let enabled = PluginCatalog::discover_at(
+        temp.path().join("plugins"),
+        temp.path().join("plugins.toml"),
+        temp.path(),
+    )?;
+    let mut tools = ToolRegistry::builtin();
+    let mut prompt = PromptComposer::default();
+    enabled.contribute(&mut tools, &mut prompt);
+    assert!(tools
+        .definitions()
+        .iter()
+        .any(|schema| schema["function"]["name"] == "remote_demo"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn plugin_can_push_a_live_status_line_during_a_call() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let dir = temp.path().join("plugins").join("live-status");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("plugin.toml"),
+        "api_version=2\nid='live-status'\nname='Live status'\ncommand='node'\nargs=['main.js']\n[[tools]]\nname='live_status'\ndescription='Show a live status line'\n",
+    )?;
+    fs::write(
+        dir.join("main.js"),
+        r#"require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
+  const req=JSON.parse(line);
+  if(req.type==="host_call_result"){
+    process.stdout.write(JSON.stringify({protocol_version:2,request_id:req.request_id,
+      content:"status accepted"})+"\n");
+    return;
+  }
+  process.stdout.write(JSON.stringify({type:"host_call",request_id:req.request_id,
+    name:"ui.status",arguments:{text:"indexing 3/10"}})+"\n");
+});"#,
+    )?;
+    let global = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(global.clone(), state.clone(), temp.path())?
+        .set_enabled("live-status", true)?;
+    let catalog = PluginCatalog::discover_at(global, state, temp.path())?;
+    let mut tools = ToolRegistry::builtin();
+    let mut prompt = PromptComposer::default();
+    assert!(catalog.contribute(&mut tools, &mut prompt).is_empty());
+
+    let call = ToolCall {
+        id: "status-1".into(),
+        kind: "function".into(),
+        function: FunctionCall {
+            name: "live_status".into(),
+            arguments: "{}".into(),
+        },
+    };
+    let ctx = ToolContext {
+        model_connection: None,
+        user_message: None,
+        user_turn: None,
+        user_images: None,
+        previous_user_images: None,
+        workdir: temp.path(),
+        archive: temp.path(),
+        on_output: None,
+        ask: None,
+    };
+    let result = tokio::time::timeout(Duration::from_secs(20), tools.execute(&call, ctx)).await?;
+    assert!(!result.is_error, "{}", result.content);
+    assert_eq!(result.content, "status accepted");
+    assert_eq!(
+        catalog.ui_statuses(),
+        vec!["indexing 3/10".to_string()],
+        "a pushed status replaces the manifest line until it is cleared"
+    );
+    let isolated = PluginCatalog::discover_at(
+        temp.path().join("other-plugins"),
+        temp.path().join("other-plugins.toml"),
+        temp.path(),
+    )?;
+    assert!(
+        isolated.ui_statuses().is_empty(),
+        "live status updates must stay scoped to their own catalog"
+    );
+    Ok(())
+}
+
+/// A plugin can ask the person mid-call through the same single overlay the
+/// model's ask tool uses: one host call, one answer, no second channel.
+#[tokio::test]
+async fn plugin_can_ask_the_person_during_a_call() -> Result<()> {
+    use kroma::tools::{AskAnswer, AskRequest, Asker};
+    use std::{future::Future, pin::Pin, sync::Mutex as StdMutex};
+
+    struct Fixed {
+        seen: StdMutex<Option<AskRequest>>,
+    }
+
+    impl Asker for Fixed {
+        fn ask<'a>(
+            &'a self,
+            request: AskRequest,
+        ) -> Pin<Box<dyn Future<Output = Option<AskAnswer>> + Send + 'a>> {
+            if let Ok(mut seen) = self.seen.lock() {
+                *seen = Some(request);
+            }
+            Box::pin(async move {
+                Some(AskAnswer::Answered {
+                    picked: vec!["Postgres".into()],
+                    typed: None,
+                })
+            })
+        }
+    }
+
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = TestDirectory::new()?;
+    let dir = temp.path().join("plugins").join("asker-test");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("plugin.toml"),
+        "api_version=2\nid='asker-test'\nname='Asker'\ncommand='node'\nargs=['main.js']\n[[tools]]\nname='choose_database'\ndescription='Pick a database'\n",
+    )?;
+    fs::write(
+        dir.join("main.js"),
+        r#"require("node:readline").createInterface({input:process.stdin}).on("line",line=>{
+  const req=JSON.parse(line);
+  if(req.type==="host_call_result"){
+    const answer=req.result;
+    process.stdout.write(JSON.stringify({protocol_version:2,request_id:req.request_id,
+      content:answer.ok?`picked ${answer.picked.join(",")}`:`failed ${answer.error}`})+"\n");
+    return;
+  }
+  process.stdout.write(JSON.stringify({type:"host_call",request_id:req.request_id,
+    name:"ui.ask",arguments:{question:"Which database?",options:["Postgres","SQLite"]}})+"\n");
+});"#,
+    )?;
+    let global = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(global.clone(), state.clone(), temp.path())?
+        .set_enabled("asker-test", true)?;
+    let catalog = PluginCatalog::discover_at(global, state, temp.path())?;
+    let mut tools = ToolRegistry::builtin();
+    let mut prompt = PromptComposer::default();
+    assert!(catalog.contribute(&mut tools, &mut prompt).is_empty());
+
+    let asker = Arc::new(Fixed {
+        seen: StdMutex::new(None),
+    });
+    kroma::tools::set_host_asker(asker.clone());
+    let call = ToolCall {
+        id: "ask-1".into(),
+        kind: "function".into(),
+        function: FunctionCall {
+            name: "choose_database".into(),
+            arguments: "{}".into(),
+        },
+    };
+    let ctx = ToolContext {
+        model_connection: None,
+        user_message: None,
+        user_turn: None,
+        user_images: None,
+        previous_user_images: None,
+        workdir: temp.path(),
+        archive: temp.path(),
+        on_output: None,
+        ask: None,
+    };
+    let result = tokio::time::timeout(Duration::from_secs(20), tools.execute(&call, ctx)).await?;
+    assert_eq!(result.content, "picked Postgres", "{}", result.content);
+    assert_eq!(
+        asker
+            .seen
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|request| request.question),
+        Some("Which database?".to_string()),
+        "the plugin's own question reached the interface"
+    );
+    Ok(())
+}
+
+/// A dynamic panel may return structured blocks; the terminal gets readable
+/// text and a widget frontend gets the same structure, from one payload.
+#[tokio::test]
+async fn a_dynamic_panel_can_return_structured_blocks() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/hello");
+    let temp = TestDirectory::new()?;
+    let user = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?.install(&source)?;
+    PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?
+        .set_enabled("hello", true)?;
+    let catalog = PluginCatalog::discover_at(user, state, temp.path())?;
+
+    let panel = catalog.ui_panel_async("hello").await?;
+    assert!(
+        panel.starts_with("Hello plugin · live state\n\n"),
+        "{panel}"
+    );
+    assert!(panel.contains("Echo plugin"), "{panel}");
+    assert!(panel.contains("Requests handled"), "{panel}");
+    assert!(
+        panel.contains('[') && panel.contains('░') && panel.contains("0%"),
+        "the progress block renders as a bar: {panel}"
+    );
+    assert!(
+        !panel.contains('\\'),
+        "the panel must not leak escaped newlines: {panel}"
+    );
+
+    let view = catalog.ui_panel_blocks_async("hello").await?;
+    assert_eq!(view["title"], "Hello plugin · live state");
+    let blocks = view["blocks"].as_array().context("blocks array")?;
+    assert_eq!(blocks[0]["type"], "heading", "{view}");
+    assert!(
+        blocks
+            .iter()
+            .any(|block| block["type"] == "progress" && block["max"] == 5.0),
+        "{view}"
+    );
+    assert!(view["text"]
+        .as_str()
+        .is_some_and(|text| text.contains("Echo plugin")));
+    Ok(())
+}
+
+#[tokio::test]
+async fn ui_lab_widgets_actions_notify_composer_and_desktop_bundle_roundtrip() -> Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/ui-lab");
+    let temp = TestDirectory::new()?;
+    let user = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?.install(&source)?;
+    PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?
+        .set_enabled("ui-lab", true)?;
+    let catalog = PluginCatalog::discover_at(user, state, temp.path())?;
+    let mut ui_rx = catalog.ui_bus().subscribe();
+
+    let mut registry = kroma::commands::CommandRegistry::new();
+    assert!(catalog.register_commands(&mut registry).is_empty());
+    let model = kroma::provider::ModelClient::new("http://127.0.0.1:9/v1", None, "mock".into())?;
+    let mut agent = kroma::agent::Agent::with_runtime_budget(
+        Arc::new(model),
+        ToolRegistry::builtin(),
+        Arc::new(kroma::context::BuiltinContextFactory),
+        PromptComposer::default(),
+        None,
+        temp.path().to_path_buf(),
+        kroma::context::ContextConfig::with_output_reserve(32768, 1024)?,
+    )?;
+    let input = agent.task_input();
+
+    let w = registry
+        .execute_async("/uilab widget", &mut agent, &input)
+        .await?
+        .context("widget command")?;
+    assert!(w.output.contains("挂件"));
+    assert_eq!(catalog.ui_widgets().len(), 1);
+    assert_eq!(catalog.ui_widgets()[0].id, "hud");
+
+    registry
+        .execute_async("/uilab notify hello-world", &mut agent, &input)
+        .await?;
+    registry
+        .execute_async("/uilab composer draft-from-plugin", &mut agent, &input)
+        .await?;
+    registry
+        .execute_async("/uilab panel", &mut agent, &input)
+        .await?;
+
+    let mut saw_widget = false;
+    let mut saw_notify = false;
+    let mut saw_composer = false;
+    let mut saw_panel = false;
+    while let Ok(ev) = ui_rx.try_recv() {
+        match ev {
+            kroma::plugins::PluginUiEvent::WidgetsChanged { widgets } if widgets.len() == 1 => {
+                saw_widget = true;
+            }
+            kroma::plugins::PluginUiEvent::Notify { message, .. } if message == "hello-world" => {
+                saw_notify = true;
+            }
+            kroma::plugins::PluginUiEvent::ComposerSet { text, .. }
+                if text == "draft-from-plugin" =>
+            {
+                saw_composer = true;
+            }
+            kroma::plugins::PluginUiEvent::PanelOpened { title, .. }
+                if title == "UI Lab 实时面板" =>
+            {
+                saw_panel = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_widget && saw_notify && saw_composer && saw_panel);
+    assert!(catalog.ui_bus().live_panel().is_some());
+
+    // Widget button click (`ui_action`) increments state, updates widget, and emits Desktop event.
+    let (reply, _) = catalog
+        .ui_action_async(
+            "ui-lab",
+            "hud",
+            "inc",
+            None,
+            agent.session_id(),
+            agent.archive_path(),
+        )
+        .await?;
+    assert!(reply.contains('1'), "{reply}");
+    let mut saw_desktop_emit = false;
+    while let Ok(ev) = ui_rx.try_recv() {
+        if let kroma::plugins::PluginUiEvent::DesktopMessage { plugin_id, payload } = ev {
+            if plugin_id == "ui-lab" && payload["counter"] == 1 {
+                saw_desktop_emit = true;
+            }
+        }
+    }
+    assert!(saw_desktop_emit);
+
+    // Custom Desktop HTML surface bundles local CSS/JS and injects window.kroma bridge.
+    let surfaces = catalog.ui_desktop_surfaces();
+    assert_eq!(surfaces.len(), 1);
+    assert_eq!(surfaces[0]["slot"], "sidebar");
+    let bundle = catalog.ui_desktop_bundle("ui-lab")?;
+    let html = bundle["html"].as_str().context("html")?;
+    assert!(html.contains("window.kroma"), "bridge injected");
+    assert!(html.contains("#111722"), "local style.css inlined");
+    assert!(html.contains("btn-inc"), "local app.js inlined");
+
+    // Bidirectional UI message from Desktop iframe updates shared plugin state + live status.
+    let msg_reply = catalog
+        .ui_message_async(
+            "ui-lab",
+            serde_json::json!({"action": "increment"}),
+            agent.session_id(),
+            agent.archive_path(),
+        )
+        .await?;
+    assert_eq!(msg_reply["counter"], 2);
+    assert!(catalog.ui_statuses().iter().any(|s| s.contains("计数 2")));
+
+    let snap = kroma::desktop_host::snapshot_with_plugins(&agent, Some(&catalog))?;
+    assert_eq!(snap["plugin_widgets"].as_array().unwrap().len(), 1);
+    assert!(!snap["plugin_status"].as_array().unwrap().is_empty());
+
+    catalog.clear_session_ui();
+    assert!(catalog.ui_widgets().is_empty());
+    assert!(catalog.ui_statuses().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn plugin_custom_tui_screen_renders_and_handles_input_roundtrip() -> Result<()> {
+    use kroma::plugins::{CustomTuiChannel, CustomTuiClientEvent, CustomTuiHost};
+    use std::sync::Mutex as StdMutex;
+
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+
+    struct MockTuiDriver {
+        opened: StdMutex<Option<CustomTuiChannel>>,
+    }
+
+    impl CustomTuiHost for MockTuiDriver {
+        fn open(&self, channel: CustomTuiChannel) -> bool {
+            if let Ok(mut guard) = self.opened.lock() {
+                if guard.is_some() {
+                    return false;
+                }
+                *guard = Some(channel);
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/ui-lab");
+    let temp = TestDirectory::new()?;
+    let user = temp.path().join("plugins");
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?.install(&source)?;
+    PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?
+        .set_enabled("ui-lab", true)?;
+    let catalog = PluginCatalog::discover_at(user, state, temp.path())?;
+
+    let driver = Arc::new(MockTuiDriver {
+        opened: StdMutex::new(None),
+    });
+    catalog.ui_bus().set_custom_tui_host(Some(driver.clone()));
+
+    let mut registry = kroma::commands::CommandRegistry::new();
+    assert!(catalog.register_commands(&mut registry).is_empty());
+    let model = kroma::provider::ModelClient::new("http://127.0.0.1:9/v1", None, "mock".into())?;
+    let mut agent = kroma::agent::Agent::with_runtime_budget(
+        Arc::new(model),
+        ToolRegistry::builtin(),
+        Arc::new(kroma::context::BuiltinContextFactory),
+        PromptComposer::default(),
+        None,
+        temp.path().to_path_buf(),
+        kroma::context::ContextConfig::with_output_reserve(32768, 1024)?,
+    )?;
+    let input = agent.task_input();
+
+    let driver_task = tokio::task::spawn_blocking(move || {
+        let ch = loop {
+            if let Some(ch) = driver.opened.lock().unwrap().take() {
+                break ch;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(ch.spec.title, "UI Lab 自定义画布");
+        ch.client_tx
+            .send(CustomTuiClientEvent::Render {
+                width: 48,
+                height: 12,
+                theme: serde_json::json!({}),
+            })
+            .unwrap();
+        let first = ch.frame_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(!first.done);
+        assert!(first.lines[0][0].text.contains("UI Lab"));
+
+        ch.client_tx
+            .send(CustomTuiClientEvent::Input {
+                key: "Down".into(),
+                ch: None,
+                modifiers: vec![],
+                width: 48,
+                height: 12,
+            })
+            .unwrap();
+        let moved = ch.frame_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(moved
+            .lines
+            .iter()
+            .flatten()
+            .any(|s| s.text.contains("› 填充输入栏")));
+
+        ch.client_tx
+            .send(CustomTuiClientEvent::Input {
+                key: "Enter".into(),
+                ch: None,
+                modifiers: vec![],
+                width: 48,
+                height: 12,
+            })
+            .unwrap();
+        let finished = ch.frame_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(finished.done);
+        assert_eq!(finished.result.unwrap()["choice"], "填充输入栏");
+    });
+
+    let cmd = tokio::time::timeout(
+        Duration::from_secs(20),
+        registry.execute_async("/uilab custom", &mut agent, &input),
+    )
+    .await??
+    .context("custom ui command")?;
+    driver_task.await?;
+    assert!(cmd.output.contains("填充输入栏"), "{}", cmd.output);
+    Ok(())
+}
+
+#[test]
+fn desktop_ui_manifest_rejects_path_traversal_outside_plugin_dir() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let dir = temp.path().join("plugins").join("bad-desktop");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("plugin.toml"),
+        "api_version=2\nid='bad-desktop'\nname='Bad'\n[ui]\n[ui.desktop]\nentry='../secret.html'\nslot='sidebar'\n",
+    )?;
+    let catalog = PluginCatalog::discover_at(
+        temp.path().join("plugins"),
+        temp.path().join("plugins.toml"),
+        temp.path(),
+    )?;
+    assert!(
+        catalog.warnings.iter().any(|w| w.contains("relative path")),
+        "{:?}",
+        catalog.warnings
     );
     Ok(())
 }

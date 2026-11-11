@@ -43,7 +43,11 @@ pub fn prune(dir: &Path, older_than: Duration, now: SystemTime) -> Result<PruneR
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        let Some(id) = path.file_name().and_then(|name| name.to_str()).and_then(session_id) else {
+        let Some(id) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(session_id)
+        else {
             continue;
         };
         let Ok(metadata) = entry.metadata() else {
@@ -65,7 +69,10 @@ pub fn prune(dir: &Path, older_than: Duration, now: SystemTime) -> Result<PruneR
             .map(|(_, modified, _)| *modified)
             .max()
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        if !now.duration_since(newest).is_ok_and(|age| age >= older_than) {
+        if !now
+            .duration_since(newest)
+            .is_ok_and(|age| age >= older_than)
+        {
             continue;
         }
         let mut deleted = 0;

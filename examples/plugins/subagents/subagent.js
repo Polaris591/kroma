@@ -600,6 +600,7 @@ async function runTask(entry, context) {
           KROMA_CHILD_POLICY_FILE: policyPath,
           KROMA_CHILD_DEPTH: "1",
           KROMA_CHILD_SKIP_TASK_SUMMARY: "1",
+          ...(context.plugins === "inherit" ? {} : {KROMA_PLUGINS: "off"}),
           ...(connection?.base_url ? {KROMA_BASE_URL: connection.base_url} : {}),
           ...(connection?.api_protocol ? {KROMA_API_PROTOCOL: connection.api_protocol} : {}),
           ...(connection?.provider_profile ? {KROMA_PROVIDER_PROFILE: connection.provider_profile} : {}),
@@ -751,6 +752,13 @@ async function startBatch(request, options = {}) {
     MAX_CUSTOM_TIMEOUT_SECS, LIMITS.taskTimeoutSecs);
   const taskTimeoutMs = integer(options.taskTimeoutMs, "taskTimeoutMs", 0,
     MAX_CUSTOM_TIMEOUT_SECS * 1000, taskTimeoutSecs * 1000);
+  // Children start without plugins by default: no plugin prompt to pay for,
+  // no plugin process to start, no plugin state to inherit. A user who wants
+  // the same tools in a child sets child_plugins = "inherit".
+  const childPlugins = String(config.child_plugins ?? "none").trim().toLowerCase();
+  if (!["none", "inherit"].includes(childPlugins)) {
+    throw new SubagentError("INVALID_SETTING", "child_plugins must be \"none\" or \"inherit\"");
+  }
   const executable = String(config.kroma_bin || process.env.KROMA_BIN || "kroma");
   const rawDataDir = options.dataDir ?? request?.data_dir;
   const dataDir = rawDataDir ? localPath(rawDataDir) : null;
@@ -792,7 +800,7 @@ async function startBatch(request, options = {}) {
     for (const stop of [...run.stops]) stop(error.message);
   };
   const context = {runId: id, runDir, executable, connection, taskTimeoutMs,
-    killGraceMs, run, depth: depth + 1, total: entries.length,
+    killGraceMs, run, depth: depth + 1, total: entries.length, plugins: childPlugins,
     progress: typeof options.onProgress === "function" ? options.onProgress : () => {}};
 
   let next = 0;

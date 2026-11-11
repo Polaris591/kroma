@@ -14,7 +14,6 @@ export function createTurnActions(host: DesktopHost) {
     try {
       const payload = await apply();
       host.data = payload.view;
-      host.resetGoal();
       host.syncHistory();
       host.restoreDraft();
       host.restoreFollowups();
