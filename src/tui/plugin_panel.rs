@@ -395,6 +395,49 @@ impl UiState {
         }
     }
 
+    /// Widget content is part of the cached transcript document in the
+    /// `transcript` placement, so a change has to drop that cache.
+    pub fn set_plugin_widgets(&mut self, widgets: Vec<crate::plugins::PluginWidget>) {
+        if self.plugin_widgets == widgets {
+            return;
+        }
+        self.plugin_widgets = widgets;
+        self.history_cache = None;
+    }
+
+    /// Plugin blocks that belong to the conversation itself. They are part of
+    /// the cached history document, so they scroll, wrap and copy like a card
+    /// instead of sitting in a fixed slot.
+    pub(super) fn push_transcript_widgets(
+        &self,
+        lines: &mut Vec<Line<'static>>,
+        theme: Theme,
+        width: usize,
+    ) {
+        for widget in self
+            .plugin_widgets
+            .iter()
+            .filter(|widget| widget.placement == WidgetPlacement::Transcript)
+        {
+            lines.push(Line::default());
+            if !widget.title.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("▎ ", Style::default().fg(theme.accent)),
+                    Span::styled(
+                        widget.title.clone(),
+                        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            }
+            for row in crate::panel::render_text(&widget.blocks, width.saturating_sub(2)) {
+                lines.push(Line::from(Span::styled(
+                    format!("  {row}"),
+                    Style::default().fg(theme.muted),
+                )));
+            }
+        }
+    }
+
     pub(super) fn has_widgets(&self, placement: WidgetPlacement) -> bool {
         self.plugin_widgets
             .iter()

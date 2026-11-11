@@ -802,6 +802,10 @@
               onEdit={(index, text) => void turns.editFromTurn(index, text)}
               onUsePrompt={(text) => composer?.setPrompt(text)}
               onSetTab={(next) => tab = next} showError={showError}/>
+            <!-- A transcript block belongs to the conversation itself, so it
+                 sits at the end of the transcript instead of a fixed slot. -->
+            <PluginWidgets placement="transcript" busy={widgetActionBusy}
+              onAction={(p, w, a) => void handleWidgetAction(p, w, a)}/>
             <PluginWidgets placement="above_composer" busy={widgetActionBusy}
               onAction={(p, w, a) => void handleWidgetAction(p, w, a)}/>
             {#each composerDesktopSurfaces as surface (surface.plugin_id)}

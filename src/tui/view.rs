@@ -2183,6 +2183,7 @@ impl UiState {
                     .text("   ◆  Ready for a task.", "   ◆  可以开始任务了。"),
                 Style::default().fg(theme.muted),
             )));
+            self.push_transcript_widgets(&mut lines, theme, width);
             return (
                 Text::from(lines),
                 markdown_targets,
@@ -2709,6 +2710,7 @@ impl UiState {
         if self.plain_style {
             self.close_plain_block(&mut lines, &mut decor, &mut plain_block);
         }
+        self.push_transcript_widgets(&mut lines, theme, width);
         for (row, line) in lines.iter().enumerate() {
             if let Some(span) = line.spans.get(1) {
                 if (preformatted_rows.binary_search(&row).is_ok() && span.content == "│ ")

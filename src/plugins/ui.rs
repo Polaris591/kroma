@@ -49,6 +49,8 @@ pub enum WidgetPlacement {
     Sidebar,
     Header,
     Footer,
+    /// Inside the message stream, so the block scrolls with the conversation.
+    Transcript,
 }
 
 impl WidgetPlacement {
@@ -59,8 +61,9 @@ impl WidgetPlacement {
             "sidebar" => Ok(Self::Sidebar),
             "header" => Ok(Self::Header),
             "footer" => Ok(Self::Footer),
+            "transcript" => Ok(Self::Transcript),
             other => bail!(
-                "unknown widget placement '{other}'; expected above_composer, below_composer, sidebar, header, or footer"
+                "unknown widget placement '{other}'; expected above_composer, below_composer, sidebar, header, footer, or transcript"
             ),
         }
     }
@@ -670,6 +673,11 @@ pub fn parse_widget_args(plugin_id: &str, args: &Value) -> Result<Option<PluginW
         return Ok(None);
     }
     let placement = WidgetPlacement::parse(args.get("placement").and_then(Value::as_str))?;
+    // A transcript block is conversation content, not a control surface: its
+    // buttons could not be clicked in a scrolling, selectable stream.
+    if placement == WidgetPlacement::Transcript && !actions.is_empty() {
+        bail!("transcript widgets render content only; use above_composer for buttons");
+    }
     let scope = UiScope::from_value(args.get("scope"));
     Ok(Some(PluginWidget {
         plugin_id: plugin_id.to_owned(),

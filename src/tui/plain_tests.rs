@@ -468,6 +468,43 @@ fn plain_panels_and_recent_session_hit_regions_keep_drafts_intact() {
 }
 
 #[test]
+fn plugin_transcript_widgets_scroll_with_the_conversation() {
+    use serde_json::json;
+    let mut ui = ui();
+    ui.add_user("first question");
+    ui.finish_task();
+    draw(&mut ui, 80, 24);
+    let widget = crate::plugins::ui::parse_widget_args(
+        "demo",
+        &json!({
+            "placement": "transcript",
+            "title": "REVIEW CARD",
+            "blocks": [{"type": "text", "text": "file changed"}]
+        }),
+    )
+    .unwrap()
+    .expect("widget");
+    ui.set_plugin_widgets(vec![widget]);
+    let rows = text(&draw(&mut ui, 80, 24));
+    assert!(rows.contains("REVIEW CARD"), "{rows}");
+    assert!(rows.contains("file changed"), "{rows}");
+    // A transcript block is content in a selectable stream; buttons belong to
+    // a slot widget, so the host refuses instead of silently dropping them.
+    assert!(crate::plugins::ui::parse_widget_args(
+        "demo",
+        &json!({
+            "placement": "transcript",
+            "text": "body",
+            "actions": [{"id": "go", "label": "Go"}]
+        }),
+    )
+    .is_err());
+    ui.set_plugin_widgets(Vec::new());
+    let rows = text(&draw(&mut ui, 80, 24));
+    assert!(!rows.contains("REVIEW CARD"), "{rows}");
+}
+
+#[test]
 fn plain_activity_animates_above_the_composer_without_rebuilding_history() {
     let mut ui = ui();
     ui.add_user("run tests");

@@ -186,7 +186,7 @@ kroma plugins install <本地目录 | git 地址>
 | 一行状态 | `[ui] status` 或 `ui.status`（支持 `key`、`scope = "session"\|"global"`） | 终端与桌面底部实时刷新（按会话/实例隔离） |
 | 实时通知 | `ui.notify`（`message`, `level`） | 终端通知行 / 桌面 Toast 实时提示 |
 | 修改输入栏 | `ui.composer`（`text`, `mode = "replace"\|"append"`） | 直接预填或追加用户输入栏草稿 |
-| 常驻挂件与按钮 | `ui.widget`（`id`, `placement`, `title`, `blocks`, `actions`, `clear`） | 在 `above_composer` / `below_composer` / `sidebar` / `header` / `footer` 实时渲染并接收 `ui_action` 点击事件 |
+| 常驻挂件与按钮 | `ui.widget`（`id`, `placement`, `title`, `blocks`, `actions`, `clear`） | 在 `above_composer` / `below_composer` / `sidebar` / `header` / `footer` 实时渲染并接收 `ui_action` 点击事件；`placement = "transcript"` 把内容块插进消息流（随对话滚动，仅内容、不带按钮） |
 | 主动弹出/刷新面板 | `ui.panel`（`action = "open"\|"update"\|"close"`, `title`, `blocks`, `actions`） | 无需等待用户敲 `/plugins view`，插件主动弹窗展示结构化内容 |
 | 面板文字与按需面板 | `[ui] panel_title` / `panel_text` / `dynamic_panel = true` | `/plugins view <id>` 与插件页卡片查看 |
 | 快捷键 / 名称 / 动画 / 颜色 / 布局 | `[[ui.shortcuts]]`、`[ui.tool_labels]`、`[ui] activity_frames`、`[ui.colors]`、`[ui.layout]` | 快捷键触发命令、改工具显示名、覆盖主题色等 |

@@ -27,7 +27,7 @@ export interface PluginUiAction {
   primary?: boolean;
   danger?: boolean;
 }
-export type WidgetPlacement = 'above_composer' | 'below_composer' | 'sidebar' | 'header' | 'footer';
+export type WidgetPlacement = 'above_composer' | 'below_composer' | 'sidebar' | 'header' | 'footer' | 'transcript';
 export interface PluginWidget {
   plugin_id: string;
   id: string;

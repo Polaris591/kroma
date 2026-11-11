@@ -1489,7 +1489,7 @@ fn apply_plugin_ui_event(
             true
         }
         crate::plugins::PluginUiEvent::WidgetsChanged { .. } => {
-            state.plugin_widgets = plugins.ui_widgets();
+            state.set_plugin_widgets(plugins.ui_widgets());
             true
         }
         crate::plugins::PluginUiEvent::Notify { message, level, .. } => {
@@ -1540,7 +1540,7 @@ fn drain_plugin_ui(
             }
             Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
                 state.plugin_statuses = plugins.ui_statuses();
-                state.plugin_widgets = plugins.ui_widgets();
+                state.set_plugin_widgets(plugins.ui_widgets());
                 dirty = true;
             }
             Err(_) => break,
@@ -1665,7 +1665,7 @@ async fn execute_task(
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             state.plugin_statuses = plugins.ui_statuses();
-                            state.plugin_widgets = plugins.ui_widgets();
+                            state.set_plugin_widgets(plugins.ui_widgets());
                             dirty = true;
                         }
                         Err(_) => {}
@@ -1706,7 +1706,7 @@ async fn execute_task(
     state.cancel_custom_ui();
     // A finished call leaves the last line the plugin pushed.
     state.plugin_statuses = plugins.ui_statuses();
-    state.plugin_widgets = plugins.ui_widgets();
+    state.set_plugin_widgets(plugins.ui_widgets());
     let mut task_notice = None;
     let completed = match result {
         Some(Ok(_)) => true,
@@ -2004,7 +2004,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
         Default::default()
     });
     state.set_plugin_presentation(activity_frames, tool_labels, layout, colors);
-    state.plugin_widgets = runtime.plugins.ui_widgets();
+    state.set_plugin_widgets(runtime.plugins.ui_widgets());
     runtime
         .plugins
         .ui_bus()
@@ -2274,7 +2274,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                             plugin_shortcuts = shortcuts;
                             state.plugin_commands = runtime.plugins.command_descriptions();
                             state.plugin_statuses = runtime.plugins.ui_statuses();
-                            state.plugin_widgets = runtime.plugins.ui_widgets();
+                            state.set_plugin_widgets(runtime.plugins.ui_widgets());
                             state.set_plugin_presentation(
                                 activity_frames,
                                 tool_labels,
@@ -2332,7 +2332,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                     state.switch_session_draft(&state.session.clone(), true);
                     runtime.plugins.clear_session_ui();
                     state.plugin_statuses = runtime.plugins.ui_statuses();
-                    state.plugin_widgets = runtime.plugins.ui_widgets();
+                    state.set_plugin_widgets(runtime.plugins.ui_widgets());
                     state.enter_home();
                     continue;
                 }
@@ -2674,7 +2674,7 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                         if state.session != before {
                             runtime.plugins.clear_session_ui();
                             state.plugin_statuses = runtime.plugins.ui_statuses();
-                            state.plugin_widgets = runtime.plugins.ui_widgets();
+                            state.set_plugin_widgets(runtime.plugins.ui_widgets());
                             if let Err(error) = state.restore_usage() {
                                 state.note(format!("Unable to restore session usage: {error:#}"));
                             }

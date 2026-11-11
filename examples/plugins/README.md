@@ -564,7 +564,10 @@ notifications are dropped. High-volume streaming deltas are not forwarded.
 There is **no plugin sandbox, marketplace, hot replacement of live
 model/context policies, or raw Ratatui widget/terminal API**. TUI plugins
 may declare status, on-demand panels, bounded animation frames, tool labels,
-colors and layout dimensions; the host still owns terminal input and rendering.
+colors and layout dimensions; a `ui.widget` with `placement = "transcript"`
+also inserts a content block into the message stream so it scrolls with the
+conversation, while the host still owns terminal input, message cards,
+the composer and all rendering.
 TUI extensions also include idle-reloadable commands and Alt+letter
 bindings. Version 2 context plugins can observe and recover,
 but production custom compression strategies must supply their own code and
