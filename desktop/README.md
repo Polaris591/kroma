@@ -101,8 +101,9 @@ actions and a restrained grey-violet interaction accent, not green as the
 default brand/action/running colour. Model settings distinguish viewing,
 connecting, startup defaults and unsaved drafts. Plugin settings show details
 immediately and retain unsaved secrets only inside the mounted inspector.
-The current frontend verification is **198 unit tests and 15 browser suites**,
-including light themes, custom-accent legibility and system high-contrast mode.
+The current frontend verification is **211 unit tests and 16 browser suites**,
+including frozen running snapshots, live request/usage metrics, long-history
+navigation, scoped diagnostics, light themes and system high-contrast mode.
 See the [visual system](../docs/desktop-visual-system.md) and
 [design review](../docs/desktop-design-review.md). These remain synthetic-host
 checks, not a new native-window or installer certification.

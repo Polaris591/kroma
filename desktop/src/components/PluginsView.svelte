@@ -6,8 +6,10 @@
   import { pluginColors, pluginPanels, slotColor } from '../lib/plugin-ui';
   import type { PanelBlock } from '../lib/panel-blocks';
   import PanelBlocksView from './PanelBlocksView.svelte';
+  import SettingsDiagnostics from './SettingsDiagnostics.svelte';
   import { Puzzle, Plus, RotateCw, Trash2, SlidersHorizontal, ChevronRight } from '@lucide/svelte';
   export let plugins: PluginSummary[];
+  export let warnings: string[] = [];
   export let disabled = false;
   export let onAction: (action: string, id?: string, path?: string, key?: string, value?: unknown) => Promise<void>;
   export let onInstall: () => Promise<void>;
@@ -144,6 +146,8 @@
         <RotateCw size={16} class={busyKey?.startsWith('reload') ? 'spin' : undefined}/></button>
     </div>
   </div>
+  <SettingsDiagnostics messages={warnings} title="插件检查提示"
+    hint="检查插件来源或清单。重复项会被跳过，其他插件仍可管理；无需因此删除整个插件目录。"/>
   {#if !uninstallConfirm && actionError}<p class="settings-error" role="alert">{actionError}</p>{/if}
   <p class="settings-hint" role="status">{busyKey ? '正在处理，请稍候…' : actionMessage}</p>
   {#if plugins.length === 0}

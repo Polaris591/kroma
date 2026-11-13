@@ -67,7 +67,7 @@
     <div class="context-popover" role="dialog" aria-label="上下文使用详情" tabindex="-1"
       use:popover={{trigger, onClose: () => showDetails = false}}>
       <div class="context-popover-heading"><strong>上下文窗口</strong><CircleHelp size={15}/></div>
-      <div class="context-big">{percent === null ? '—' : `${percent}%`} <span>{percent === null ? '尚无占用估算' : '估算占用'}</span></div>
+      <div class="context-big">{percent === null ? '—' : `${percent}%`} <span>{percent === null ? '尚无占用估算' : report?.basis === 'request' ? '最近请求估算' : '估算占用'}</span></div>
 
       {#if slices.length}
         <div class="context-stack" aria-hidden="true">
@@ -93,7 +93,9 @@
       <div class="context-kv"><span>输出预留</span><strong>{compactCount(outputReserve)} tokens</strong></div>
       <div class="context-kv"><span>当前可用输入空间</span><strong>{compactCount(free)} tokens</strong></div>
       <div class="context-kv"><span>上下文总容量</span><strong>{capacity ? compactCount(capacity) : '—'} tokens</strong></div>
-      <p>{percent === null ? '尚未取得请求内容的占用估算；已知总容量不代表当前会话占用为零。' : '条状图展示已占用内容的构成。占用按下一次请求内容估算，不等同于计费 Token；可用输入空间同时受模型输入上限和输出预留约束。'}</p>
+      <p>{percent === null ? '尚未取得请求内容的占用估算；已知总容量不代表当前会话占用为零。'
+        : report?.basis === 'request' ? '按本次任务最近一次请求前的实际上下文估算，随每轮请求更新，不是累计计费 Token。工具执行中的新结果会在下一轮请求时计入；分项构成在任务结束后更新。'
+        : '条状图展示已占用内容的构成。占用按下一次请求内容估算，不等同于计费 Token；可用输入空间同时受模型输入上限和输出预留约束。'}</p>
       {#if onCompact && percent !== null && percent >= 75}
         <button class="context-action" disabled={compacting || compactDisabled}
           title={compactDisabled ? '请在当前任务或操作结束后压缩' : '压缩下一次请求的上下文，保留原始记录'}

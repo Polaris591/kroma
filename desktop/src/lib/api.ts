@@ -20,6 +20,8 @@ export interface SessionUsage {
 export interface ContextSegment { key: string; tokens: number }
 export interface ContextReport {
   window: number; available_input: number; output_reserve: number; segments: ContextSegment[];
+  estimated_input?: number;
+  basis?: 'request';
 }
 export interface PluginUiAction {
   id: string;
@@ -78,6 +80,9 @@ export interface SessionSnapshot {
   plugin_status?: string[];
   plugin_widgets?: PluginWidget[];
 }
+export type HistoryPage = Pick<SessionSnapshot,
+  'session_id' | 'messages' | 'total_messages' | 'history_truncated' | 'next_before'>;
+
 export interface PluginSummary {
   id: string; name: string; version: string; description: string;
   enabled: boolean; project: boolean; settings: Record<string, unknown>;
@@ -157,6 +162,7 @@ export interface CapabilityItem {
 export interface CapabilitySettings {
   items: Record<CapabilityKey, CapabilityItem[]>;
   warnings?: string[];
+  warning_groups?: Partial<Record<CapabilityKey, string[]>>;
 }
 export interface SessionState {
   project: string;
@@ -281,7 +287,7 @@ export const api = {
   setReasoning: (level: string) => invoke<Bootstrap>('set_reasoning', {level}),
   saveProfile: (profile: ProfileInput) => invoke<Profiles>('save_profile', {profile}),
   setDefaultProfile: (name: string) => invoke<Profiles>('set_default_profile', {name}),
-  historyPage: (before: number, limit = 200) => invoke<SessionSnapshot>("history_page", {before, limit}),
+  historyPage: (before: number, limit = 200) => invoke<HistoryPage>("history_page", {before, limit}),
   switchSession: (project: string, id: string) => invoke<{project: string; session: string; snapshot: SessionSnapshot; title?: string | null; connected_model: string | null; reasoning_level: string | null; thinking_levels: string[] | null}>('switch_session', {project, id}),
   newSession: () => invoke<Bootstrap>('new_session'),
   deleteSession: (project: string, id: string) => invoke<Bootstrap>('delete_session', {project, id}),

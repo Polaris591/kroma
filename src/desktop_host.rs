@@ -278,6 +278,25 @@ impl EventSink for DesktopEvents {
 /// never treat a partial streamed answer as durable history.
 const MAX_SNAPSHOT_MESSAGES: usize = 1_000;
 
+/// Read a bounded durable page while a task owns the Agent. The archive reader
+/// replays valid WAL records without acquiring the live writer's session lock,
+/// recovering tool calls, changing context state, or writing any session file.
+pub fn archive_history_page(
+    archive: &std::path::Path,
+    session: &str,
+    before: Option<usize>,
+    limit: usize,
+) -> Result<Value> {
+    let messages = crate::session::read_archive_messages(archive)?;
+    let total = messages.len();
+    let end = before.unwrap_or(total).min(total);
+    let start = end.saturating_sub(limit.clamp(1, MAX_SNAPSHOT_MESSAGES));
+    Ok(json!({
+        "session_id":session,"messages":&messages[start..end],"total_messages":total,
+        "history_truncated":start > 0,"next_before":(start > 0).then_some(start),
+    }))
+}
+
 pub fn snapshot_with_plugins(
     agent: &Agent,
     plugins: Option<&crate::plugins::PluginCatalog>,
@@ -398,6 +417,56 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[1]["text"], "warning!");
     }
+    #[test]
+    fn archive_history_pages_work_without_disturbing_a_live_writer() -> Result<()> {
+        use crate::{context_state::CompactionState, protocol::Message, session::SessionStore};
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!(
+            "kroma-live-history-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos(),
+        ));
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("history.json");
+        let store = SessionStore::open_at(path.clone(), &dir)?;
+        let state = CompactionState::default();
+        let mut messages = vec![Message::new("system", "system")];
+        for index in 1..12 {
+            messages.push(Message::new("user", format!("saved-{index}")));
+        }
+        store.save(&messages, &state)?;
+        messages.push(Message::new("assistant", "already durable in WAL"));
+        store.append(&messages, &state)?;
+        let bytes = || -> Result<std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>> {
+            let mut files = std::collections::BTreeMap::new();
+            for entry in fs::read_dir(&dir)? {
+                let path = entry?.path();
+                // The writer's Windows lock handle deliberately denies reads.
+                if path.extension().is_some_and(|extension| extension == "lock") {
+                    continue;
+                }
+                files.insert(path.clone(), fs::read(path)?);
+            }
+            Ok(files)
+        };
+        let before = bytes()?;
+        let page = archive_history_page(&path, "A", Some(6), 5)?;
+        assert_eq!(page["messages"][0]["content"], "saved-1");
+        assert_eq!(page["messages"].as_array().unwrap().len(), 5);
+        assert_eq!(page["next_before"], 1);
+        assert_eq!(page["total_messages"], 13);
+        assert_eq!(bytes()?, before, "reading history changed a session file");
+        // The original writer still owns the lock and can keep appending.
+        messages.push(Message::new("user", "writer still active"));
+        store.append(&messages, &state)?;
+        let tail = archive_history_page(&path, "A", None, 1)?;
+        assert_eq!(tail["messages"][0]["content"], "writer still active");
+        assert_eq!(tail["total_messages"], 14);
+        drop(store);
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
     #[test]
     fn corrupt_usage_sidecar_does_not_block_new_usage() -> Result<()> {
         let dir = std::env::temp_dir().join(format!(

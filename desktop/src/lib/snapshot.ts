@@ -72,6 +72,26 @@ export function applySessionSwitch(data: Bootstrap, snapshot: SessionSnapshot, n
   };
 }
 
+/** The initial task may receive its real ID after navigation has moved on.
+ * Update its own sidebar entry, never relabel another visible conversation.
+ */
+export function applyTaskSessionId(data: Bootstrap, project: string, previousId: string | undefined, id: string): Bootstrap {
+  const add = (sessions: Bootstrap['sessions']) => sessions.some(session => session.id === id)
+    ? sessions : [{id, name: null, recent: true}, ...sessions];
+  const ownsView = data.project === project && data.snapshot?.session_id === (previousId || 'unknown');
+  const groups = data.session_groups?.map(group => group.project === project
+    ? {...group, sessions: add(group.sessions)} : group);
+  if (groups && !groups.some(group => group.project === project)) {
+    groups.push({project, is_default: data.default_project === project, sessions: add([])});
+  }
+  return {
+    ...data,
+    snapshot: ownsView && data.snapshot ? {...data.snapshot, session_id: id} : data.snapshot,
+    sessions: data.project === project ? add(data.sessions) : data.sessions,
+    session_groups: groups,
+  };
+}
+
 /** Cache a small, bounded, read-only preview for instant repeat navigation.
  * The actual Agent session remains authoritative; the preview must never be
  * used to execute tools or to overwrite the durable history. */

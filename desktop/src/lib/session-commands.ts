@@ -251,6 +251,7 @@ export function createSessionCommands(host: DesktopHost) {
       const next = await host.guard.settleBootstrap(generation, api.bootstrap());
       if (!next) return;
       host.data = next;
+      host.syncHistory();
       void loadPresentation();
       host.restoreFollowups();
       if (host.data.profiles.profiles.length || host.data.plugins.some(plugin => plugin.enabled && plugin.has_model)) {

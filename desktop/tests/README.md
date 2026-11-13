@@ -29,6 +29,7 @@ change the production API. The fixture is never imported by `src/`.
    import { verifyWorkflowCompletion } from './desktop/tests/workflow-completion-ui.mjs';
    import { verifyDesignReview } from './desktop/tests/design-review-ui.mjs';
    import { verifyVisualPolish } from './desktop/tests/visual-polish-ui.mjs';
+   import { verifyRuntimeHistory } from './desktop/tests/runtime-history-ui.mjs';
 
    const baseURL = 'http://127.0.0.1:1420/';
    for (const verify of [
@@ -36,7 +37,7 @@ change the production API. The fixture is never imported by `src/`.
      verifyFileSuggestions, verifyAttachments, verifyWorkspaceReview,
      verifyTurnReview, verifyCodeCopy, verifyMessageLayout,
      verifyDesktopFeatures, verifyDesktopBasics, verifySessionRuntime,
-     verifyWorkflowCompletion, verifyDesignReview, verifyVisualPolish,
+     verifyWorkflowCompletion, verifyDesignReview, verifyVisualPolish, verifyRuntimeHistory,
    ]) {
      const context = await browser.newContext();
      try { console.log(await verify(await context.newPage(), baseURL)); }
@@ -64,7 +65,8 @@ change the production API. The fixture is never imported by `src/`.
    `turn-review-ui.mjs`, `code-copy-ui.mjs`, `message-layout-ui.mjs` and
    `desktop-features-ui.mjs` suites
    are run through the import form in step 2 only; the single-file generator
-   still covers the three suites above.
+   covers UI, settings, capabilities and workflow completion; the import form
+   above covers all 16 suites.
 
 The main assertions cover message layout and reading/input column alignment,
 wide/narrow sidebar state, the combined model/effort panel and focus, draft
@@ -222,7 +224,7 @@ console message was the dev server's missing `/favicon.ico`.
 
 ## Current design-review verification
 
-The full 15-suite browser run passed against the real Svelte application and a
+The full 16-suite browser run passed against the real Svelte application and a
 synthetic host, each in its own fresh Edge context. Every suite reported no
 uncaught page errors. This includes the attachment, concurrent-session and
 workflow-completion suites, not only visual smoke checks.
@@ -244,8 +246,16 @@ composites actual browser colours to check representative normal text, helper
 text, placeholders and button labels against a 4.5:1 contrast threshold. This is
 not a complete WCAG compliance audit.
 
-Type checking reported 0 errors and 0 warnings, all **198 unit tests** across
-31 files passed, and the production build passed. Screenshots of chat, welcome,
+`runtime-history-ui.mjs` additionally uses frozen pre-task snapshots, 180 stored
+messages, 25 tool completions, live request estimates and provider usage. It
+checks A → B → A while running, already-opened older pages, task completion,
+background metric isolation and a real session ID arriving after navigation.
+`capabilities-ui.mjs` also checks category-scoped, collapsed diagnostics,
+original details, repeated-message deduplication, keyboard opening, narrow
+paths and compatibility with older hosts that only return flat warnings.
+
+Type checking reported 0 errors and 0 warnings, all **211 unit tests** across
+32 files passed, and the production build passed. Screenshots of chat, welcome,
 model settings, capability settings, plugin settings and floating surfaces were
 inspected at 1280×850, 780×560 and 380×700, including a light theme. See
 [the design review record](../../docs/desktop-design-review.md) for component

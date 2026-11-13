@@ -247,7 +247,9 @@ pub fn settings_value(
         crate::sessions::SessionCatalog::new(workdir)?.capability_overrides(session_id)?;
     session.expand_legacy(workdir)?;
     let effective = session.effective(defaults.clone());
-    let mut warnings = Vec::new();
+    let mut plugin_warnings = Vec::new();
+    let mut skill_warnings = Vec::new();
+    let mut mcp_warnings = Vec::new();
     let mut inventory: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     let mut tools = BTreeMap::<String, Value>::new();
     for name in crate::app::builtin_tool_names() {
@@ -264,7 +266,7 @@ pub fn settings_value(
     let mut plugin_defaults = BTreeMap::new();
     match crate::plugins::PluginCatalog::discover(workdir) {
         Ok(catalog) => {
-            warnings.extend(catalog.warnings.clone());
+            plugin_warnings.extend(catalog.warnings.clone());
             for definition in catalog.capability_tool_inventory() {
                 if let Some(name) = definition["function"]["name"].as_str() {
                     tools.entry(name.to_owned()).or_insert_with(|| json!({"id":name,"name":name,"description":definition["function"]["description"],"source":definition["source"]}));
@@ -282,10 +284,10 @@ pub fn settings_value(
                         }
                     }
                 }
-                Err(error) => warnings.push(format!("Plugin inventory: {error:#}")),
+                Err(error) => plugin_warnings.push(format!("Plugin inventory: {error:#}")),
             }
         }
-        Err(error) => warnings.push(format!("Plugin inventory: {error:#}")),
+        Err(error) => plugin_warnings.push(format!("Plugin inventory: {error:#}")),
     }
     match crate::skills::SkillCatalog::discover(workdir) {
         Ok(catalog) => {
@@ -297,7 +299,7 @@ pub fn settings_value(
             }
             inventory.insert("skills".into(), skills.into_iter().map(|skill| json!({"id":skill.name,"name":skill.name,"description":skill.description,"source":skill.path})).collect());
         }
-        Err(error) => warnings.push(format!("Skill inventory: {error:#}")),
+        Err(error) => skill_warnings.push(format!("Skill inventory: {error:#}")),
     }
     match crate::mcp::configured_server_summaries(workdir) {
         Ok(servers) => {
@@ -310,7 +312,7 @@ pub fn settings_value(
             }
             inventory.insert("mcp".into(), servers.into_iter().map(|server| json!({"id":server.name,"name":server.name,"description":server.transport,"source":server.source})).collect());
         }
-        Err(error) => warnings.push(format!("MCP inventory: {error:#}")),
+        Err(error) => mcp_warnings.push(format!("MCP inventory: {error:#}")),
     }
     inventory.insert("tools".into(), tools.into_values().collect());
     for (key, group) in [
@@ -348,9 +350,20 @@ pub fn settings_value(
         }
         entries.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
     }
-    Ok(
-        json!({"items":inventory,"defaults":defaults,"session":session,"effective":effective,"warnings":warnings}),
-    )
+    // Keep the flat list for older hosts, but let settings pages show only
+    // their own diagnostics instead of treating plugin warnings as MCP errors.
+    let warnings = plugin_warnings.iter()
+        .chain(skill_warnings.iter())
+        .chain(mcp_warnings.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "items":inventory,"defaults":defaults,"session":session,"effective":effective,
+        "warnings":warnings,
+        "warning_groups":{
+            "tools":[],"plugins":plugin_warnings,"skills":skill_warnings,"mcp":mcp_warnings,
+        },
+    }))
 }
 
 pub fn effective_for(workdir: &Path, session: &str) -> Result<Capabilities> {

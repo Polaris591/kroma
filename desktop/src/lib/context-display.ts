@@ -5,7 +5,8 @@ export function contextDisplay(report: ContextReport | null, total: number | nul
   const segments = (report?.segments ?? []).filter(segment => segment.tokens > 0);
   // A configured window or input allowance says nothing about the amount of
   // conversation in it. Missing measurements must not appear as zero usage.
-  const used = report ? segments.reduce((sum, segment) => sum + segment.tokens, 0) : null;
+  const used = report
+    ? report.estimated_input ?? segments.reduce((sum, segment) => sum + segment.tokens, 0) : null;
   const reserve = report ? Math.max(0, report.output_reserve) : null;
   const inputLimit = report
     ? Math.max(0, Math.min(report.available_input, capacity - (reserve ?? 0)))

@@ -11,7 +11,7 @@
   import { modal } from './lib/modal';
   import { createLatestNavigation, sessionLabel, sidebarIsVisible } from './lib/chat-ui';
   import {
-    applySnapshot, applySessionSwitch, createOperationGuard, sessionPreview,
+    applySnapshot, applySessionSwitch, applyTaskSessionId, createOperationGuard, sessionPreview,
   } from './lib/snapshot';
   import { steerNotice, type SteerOutcome } from './lib/steering';
   import {
@@ -30,6 +30,7 @@
   import type { SessionDestination, SessionTarget, Tab, TaskResultStatus } from './lib/ui-types';
   import type { LiveActivity } from './lib/transcript';
   import { foldLiveEvents } from './lib/live-events';
+  import { createTaskMetrics, foldTaskMetrics, projectTaskMetrics, type TaskMetrics } from './lib/task-metrics';
   import {
     applyPluginUiEvent, applyPresentation, applySnapshotPluginUi, desktopSurfaces, layoutStyle,
     livePluginPanel, loadPresentation, pluginColors, pluginLayout, pluginShortcuts, pluginThemeStyle,
@@ -118,6 +119,7 @@
     ask: AskQuestion | null;
     cancellationRequested: boolean;
     snapshotReceived: boolean;
+    metrics?: TaskMetrics;
     // The queue belongs to this conversation. A background completion advances
     // only its own queue and never the visible conversation's composer.
     followups: FollowupTask[];
@@ -175,13 +177,14 @@
   // user is looking at now.
   const bootstrapGuard = createOperationGuard();
 
-  $: snapshot = switchingTo ? previewSnapshot : (data?.snapshot ?? null);
+  $: durableSnapshot = switchingTo ? previewSnapshot : (data?.snapshot ?? null);
+  $: snapshot = projectTaskMetrics(durableSnapshot, viewTask?.metrics, !!viewTask?.running && !viewTask.snapshotReceived);
   // The conversation the window projects. A task key is project + session, so
   // the same id in two workspaces never shares live state.
   function taskKey(project: string, session: string | null | undefined): string {
     return `${project || ''}::${session || 'unknown'}`;
   }
-  $: viewKey = data ? taskKey(data.project, snapshot?.session_id) : '';
+  $: viewKey = data ? taskKey(switchingTo ? navigationProject : data.project, durableSnapshot?.session_id) : '';
   $: viewTask = viewKey ? sessionTasks[viewKey] : undefined;
   $: running = !!viewTask?.running;
   $: cancellationRequested = !!viewTask?.cancellationRequested;
@@ -298,7 +301,7 @@
   function toast(message: string) { notice = message; }
   function sessionProject(): string { return data?.project || ''; }
   function sessionId(): string | undefined { return data?.snapshot?.session_id; }
-  function saveDraft() { composer?.saveDraft(sessionProject(), sessionId()); }
+  function saveDraft() { chat?.rememberHistory(); composer?.saveDraft(sessionProject(), sessionId()); }
   function restoreDraft() { composer?.restoreDraft(sessionProject(), sessionId()); }
   /** Keep a background task's rejected input in its OWN conversation draft.
    * An existing draft is never overwritten, and the visible composer is not
@@ -492,7 +495,7 @@
     switchingTo = '';
     navigationProject = '';
     previewSnapshot = null;
-    chat?.syncHistory();
+    const restoredHistory = chat?.syncHistory(true);
     restoreDraft();
     restoreFollowups();
     // A cross-session search hit is located only after the real snapshot is
@@ -506,7 +509,7 @@
     // visible now, so load the turns that belong to it.
     void chat?.refreshCheckpoints();
     if (data?.ready) tab = 'chat';
-    void chat?.scrollDown();
+    if (!restoredHistory) void chat?.scrollDown();
     if (tab === 'chat') composer?.focus();
     void chat?.refreshReview();
   }
@@ -618,6 +621,7 @@
       activities: folded.state.activities,
       sequence: folded.state.sequence,
       modelStartIndex: folded.state.modelStartIndex,
+      metrics: task.metrics ? foldTaskMetrics(task.metrics, events) : undefined,
     }};
     for (const warning of folded.warnings) toast(warning);
     // Dropped live events leave a gap that only the durable history can fill.
@@ -655,7 +659,7 @@
   function onStream(event: StreamEnvelope, key: string, runId: number) {
     const task = sessionTasks[key];
     if (!task || task.runId !== runId) return;
-    const isView = key === viewKey;
+    const isView = isViewing(task.project, task.session);
     if (event.kind === 'batch') applyEvents(key, event.events);
     if (event.kind === 'ask' && (!event.session || event.session === task.session)) {
       receiveAsk(key, event.ask);
@@ -710,6 +714,8 @@
       draftPrompt: text || ('已添加 ' + paths.length + ' 个文件'),
       startedAt: now, result: '', ask: null, cancellationRequested: false,
       snapshotReceived: false,
+      metrics: createTaskMetrics(taskIsVisible() ? data?.snapshot
+        : previewCache.get(previewKey(taskProject, taskSession))),
       followups: previous?.followups ?? [],
       followupPaused: previous?.followupPaused ?? true,
       followupExpanded: previous?.followupExpanded ?? false,
@@ -733,10 +739,8 @@
           // task, and the visible address, without creating a second task.
           const previousSession = sessionTasks[key]?.session;
           key = renameTask(key, event.project, event.session);
-          if (data?.snapshot && isViewing(event.project, sessionId() || 'unknown')) {
-            data = {...data, snapshot: {...data.snapshot, session_id: event.session}};
-            migrateTaskQueue(key, previousSession, event.session);
-          }
+          if (data) data = applyTaskSessionId(data, event.project, previousSession, event.session);
+          migrateTaskQueue(key, previousSession, event.session);
           return;
         }
         if (event.kind === 'snapshot') {

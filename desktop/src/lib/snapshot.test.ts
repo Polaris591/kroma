@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applySnapshot, applySessionSwitch, sessionPreview, carryOlderHistory, createOperationGuard, historyPageBelongsTo, isActiveTask } from './snapshot';
+import { applySnapshot, applySessionSwitch, applyTaskSessionId, sessionPreview, carryOlderHistory, createOperationGuard, historyPageBelongsTo, isActiveTask } from './snapshot';
 import type { Bootstrap, SessionSnapshot } from './api';
 
 const snapshot = (id: string, input = 1): SessionSnapshot => ({
@@ -133,6 +133,45 @@ describe('fast conversation switching', () => {
     expect(preview.history_truncated).toBe(true);
     expect(full.messages).toHaveLength(180);
     expect(sessionPreview({...snapshot('small'),messages:[],total_messages:0}).history_truncated).toBe(false);
+  });
+});
+
+describe('task session ID allocation', () => {
+  it('does not relabel B when A receives its real ID in the background', () => {
+    const before = bootstrapFor('/project', 'B');
+    const next = applyTaskSessionId(before, '/project', 'unknown', 'A');
+    expect(next.snapshot).toBe(before.snapshot);
+    expect(next.snapshot?.session_id).toBe('B');
+    expect(next.sessions.map(session => session.id)).toEqual(['A', 'B']);
+  });
+
+  it('updates the visible owner without replacing its transcript', () => {
+    const before = bootstrapFor('/project', 'unknown');
+    const next = applyTaskSessionId(before, '/project', 'unknown', 'A');
+    expect(next.snapshot?.session_id).toBe('A');
+    expect(next.snapshot?.messages).toBe(before.snapshot?.messages);
+    expect(before.snapshot?.session_id).toBe('unknown');
+  });
+
+  it('keeps same IDs in different workspaces isolated', () => {
+    const before = bootstrapFor('/other', 'unknown');
+    before.session_groups = [{project: '/other', is_default: false, sessions: before.sessions}];
+    const next = applyTaskSessionId(before, '/project', 'unknown', 'A');
+    expect(next.snapshot).toBe(before.snapshot);
+    expect(next.sessions).toBe(before.sessions);
+    expect(next.session_groups?.[0]).toBe(before.session_groups[0]);
+    expect(next.session_groups?.[1].project).toBe('/project');
+    expect(before.session_groups).toHaveLength(1);
+  });
+
+  it('preserves existing names and does not add duplicate rows', () => {
+    const before = bootstrapFor('/project', 'B');
+    before.sessions.push({id: 'A', name: 'Named by the user', recent: false});
+    before.session_groups = [{project: '/project', is_default: false, sessions: before.sessions}];
+    const next = applyTaskSessionId(before, '/project', 'unknown', 'A');
+    expect(next.sessions).toHaveLength(2);
+    expect(next.session_groups?.[0].sessions).toHaveLength(2);
+    expect(next.sessions.find(session => session.id === 'A')?.name).toBe('Named by the user');
   });
 });
 

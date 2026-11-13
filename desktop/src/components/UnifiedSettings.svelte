@@ -37,7 +37,7 @@
     <SettingsView data={data.profiles} connected={data.ready ? data.connected_profile ?? '' : ''}
       {onSave} {onConnect} {onSetDefault} {onAdd} {onOpenStorage}/>
   {:else if section === 'plugins'}
-    <PluginsView plugins={data.plugins} {disabled} onAction={onPluginAction}
+    <PluginsView plugins={data.plugins} warnings={data.plugin_warnings ?? []} {disabled} onAction={onPluginAction}
       onInstall={onInstallPlugin} {onOpenDesktopPanel}/>
   {:else}
     {#key `${data.project}:${data.snapshot?.session_id ?? ''}:${section}`}

@@ -88,14 +88,14 @@ export async function installDesktopFixture(page, options = {}) {
         ...(options.sessionGroups ?? []),
       ],
       snapshot: {
-        session_id: 'design', messages: options.empty ? [] : messages,
+        session_id: options.initialSession ?? 'design', messages: options.empty ? [] : messages,
         usage: { coding: usage(), title: usage(), apec: usage(), context_input: 8100, context_estimated: true },
         context_window: 200000, available_input: 183900,
         context: { window: 200000, available_input: 183900, output_reserve: 8000,
           segments: [{ key: 'system', tokens: 1100 }, { key: 'tools', tokens: 2600 }, { key: 'messages', tokens: 4400 }] },
         tool_names: ['read_file', 'write_file', 'shell'], skills: [],
       },
-      plugins: options.plugins ?? [], plugin_warnings: [],
+      plugins: options.plugins ?? [], plugin_warnings: options.capabilityWarnings?.plugins ?? [],
     };
     for (const [id, entry] of Object.entries(options.histories ?? {})) {
       histories.set(id, {
@@ -107,7 +107,7 @@ export async function installDesktopFixture(page, options = {}) {
     // two workspaces may hold the same id and must stay separate.
     const sessionKey = (forProject, forSession) => `${forProject}::${forSession}`;
     const sessionMessages = new Map();
-    sessionMessages.set(sessionKey(project, 'design'), state.snapshot.messages);
+    sessionMessages.set(sessionKey(project, state.snapshot.session_id), state.snapshot.messages);
     function messagesFor(forProject, forSession) {
       const entry = histories.get(forSession);
       if (entry) return entry.full;
@@ -116,6 +116,8 @@ export async function installDesktopFixture(page, options = {}) {
       return sessionMessages.get(key);
     }
     function applySession(forProject, forSession) {
+      const busy = actives.get(sessionKey(forProject, forSession));
+      if (busy?.snapshot) { state.snapshot = structuredClone(busy.snapshot); return; }
       const entry = histories.get(forSession);
       const full = messagesFor(forProject, forSession);
       const total = full.length;
@@ -153,7 +155,8 @@ export async function installDesktopFixture(page, options = {}) {
       const effective = Object.fromEntries(Object.entries(items).map(([group, entries]) => [group, !entries.length || entries.some(entry => entry.effective_enabled)]));
       state.snapshot.capabilities = effective;
       state.snapshot.tool_names = items.tools.filter(item => item.effective_enabled).map(item => item.id);
-      return {items, effective, warnings: []};
+      const warning_groups = {tools: [], mcp: [], skills: [], plugins: [], ...options.capabilityWarnings};
+      return {items, effective, warnings: Object.values(warning_groups).flat(), warning_groups};
     };
     let sequence = 0;
     let pasted = 0;
@@ -241,6 +244,25 @@ export async function installDesktopFixture(page, options = {}) {
       streamTo(forProject, forSession, message) {
         const entry = actives.get(sessionKey(forProject, forSession));
         if (entry) callbacks.get(entry.channel.id)?.({ index: entry.index++, message });
+      },
+      migrateSession(forProject, previous, session) {
+        const oldKey = sessionKey(forProject, previous);
+        const entry = actives.get(oldKey);
+        if (!entry) throw new Error('No running task to migrate');
+        const full = messagesFor(forProject, previous);
+        sessionMessages.set(sessionKey(forProject, session), full);
+        sessionMessages.delete(oldKey);
+        actives.delete(oldKey);
+        entry.session = session;
+        if (entry.snapshot) entry.snapshot.session_id = session;
+        actives.set(sessionKey(forProject, session), entry);
+        if (state.project === forProject && state.snapshot.session_id === previous) state.snapshot.session_id = session;
+        const row = {id: session, name: null, recent: true};
+        if (state.project === forProject && !state.sessions.some(item => item.id === session)) state.sessions.unshift(row);
+        for (const group of state.session_groups) {
+          if (group.project === forProject && !group.sessions.some(item => item.id === session)) group.sessions.unshift(row);
+        }
+        callbacks.get(entry.channel.id)?.({index: entry.index++, message: {kind: 'session', project: forProject, session}});
       },
       finishSession(forProject, forSession, status = 'completed', error = null) {
         const key = sessionKey(forProject, forSession);
@@ -494,6 +516,11 @@ export async function installDesktopFixture(page, options = {}) {
           const forProject = args.project || state.project;
           const forSession = args.session || state.snapshot.session_id;
           const full = messagesFor(forProject, forSession);
+          const snapshot = options.nativeRuntimeSnapshots ? {
+            ...structuredClone(state.snapshot), session_id: forSession,
+            messages: structuredClone(full.slice(-1000)), total_messages: full.length,
+            history_truncated: full.length > 1000, next_before: full.length > 1000 ? full.length - 1000 : null,
+          } : undefined;
           full.push({ role: 'user', content: args.text });
           if (state.project === forProject && state.snapshot.session_id === forSession) {
             state.snapshot.messages = full;
@@ -501,7 +528,7 @@ export async function installDesktopFixture(page, options = {}) {
           }
           const key = sessionKey(forProject, forSession);
           return new Promise(resolve => {
-            const entry = { resolve, channel: args.channel, index: 0, project: forProject, session: forSession };
+            const entry = { resolve, channel: args.channel, index: 0, project: forProject, session: forSession, snapshot };
             actives.set(key, entry);
             active = entry;
           });

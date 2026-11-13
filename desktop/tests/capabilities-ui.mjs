@@ -5,7 +5,11 @@ export async function verifyDesktopCapabilities(page, baseURL = 'http://127.0.0.
   const errors = [];
   const check = (value, message) => { if (!value) throw new Error(message); };
   page.on('pageerror', error => errors.push(error.message));
+  const duplicate = String.raw`duplicate plugin id 'sample': \\?\C:\Users\Example\.kroma\plugins\sample`;
+  const mcpWarning = 'MCP inventory: 合成服务清单无法读取';
+  const skillWarning = 'Skill inventory: 合成技能清单无法读取';
   await installDesktopFixture(page, {
+    capabilityWarnings: {plugins: [duplicate, duplicate], mcp: [mcpWarning], skills: [skillWarning]},
     plugins: [
       {id: 'sample', name: '插件甲', description: '默认开启', enabled: true, settings: {}},
       {id: 'other', name: '插件乙', description: '默认关闭', enabled: false, settings: {}},
@@ -212,6 +216,47 @@ export async function verifyDesktopCapabilities(page, baseURL = 'http://127.0.0.
   await page.getByRole('button', {name: '返回对话', exact: true}).click();
   await page.getByRole('button', {name: '停止', exact: true}).click();
   passed.push('item changes never interrupt a running task');
+
+  await page.getByRole('button', {name: '设置', exact: true}).click();
+  await navigation.getByRole('button', {name: '工具', exact: true}).click();
+  await read.waitFor();
+  check(await page.locator('.settings-diagnostics').count() === 0, 'Plugin diagnostics leaked into tool settings');
+  for (const [category, item, warning] of [['MCP', 'sample-server', mcpWarning], ['Skills', 'sample-skill', skillWarning]]) {
+    await navigation.getByRole('button', {name: category, exact: true}).click();
+    await page.getByRole('checkbox', {name: item, exact: true}).waitFor();
+    const diagnostics = page.locator('.settings-diagnostics');
+    check(await diagnostics.count() === 1 && await diagnostics.getAttribute('open') === null, `${category}: diagnostics are not collapsed`);
+    check(await page.getByRole('alert').count() === 0, `${category}: inventory warnings are presented as failures`);
+    await diagnostics.locator('summary').focus();
+    await page.keyboard.press('Enter');
+    check(await diagnostics.locator('code').innerText() === warning, `${category}: another inventory's warnings leaked in`);
+  }
+  await navigation.getByRole('button', {name: '插件', exact: true}).click();
+  await page.locator('.plugin-list').waitFor();
+  const diagnostics = page.locator('.settings-diagnostics');
+  check((await diagnostics.locator('summary').innerText()).includes('（1）'), 'Repeated warnings were not deduplicated');
+  await diagnostics.locator('summary').click();
+  check(await diagnostics.locator('strong').innerText() === '插件 sample 存在同名来源', 'Duplicate diagnostic has no readable explanation');
+  check(await diagnostics.locator('code').innerText() === duplicate, 'Original diagnostic details were lost');
+  await page.setViewportSize({width: 380, height: 700});
+  check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Long diagnostic path overflows a narrow window');
+  await page.setViewportSize({width: 1280, height: 850});
+  await page.evaluate(() => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    window.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      const result = await invoke(command, args);
+      if (command === 'capability_settings') {
+        delete result.warning_groups;
+        result.warnings = ['旧版宿主能力检查提示'];
+      }
+      return result;
+    };
+  });
+  await navigation.getByRole('button', {name: '工具', exact: true}).click();
+  await read.waitFor();
+  await page.locator('.settings-diagnostics summary').click();
+  check(await page.locator('.settings-diagnostics code').innerText() === '旧版宿主能力检查提示', 'Legacy host diagnostics were silently discarded');
+  passed.push('inventory diagnostics are scoped, collapsed, deduplicated, keyboard-accessible and compatible with older hosts');
   check(errors.length === 0, `Browser runtime errors: ${errors.join('; ')}`);
   return {passed, runtimeErrors: errors};
 }

@@ -4,7 +4,7 @@
   import { api, type Bootstrap, type CheckpointTurn, type Message, type SessionSnapshot, type TurnDiffSummary, type WorkspaceReview } from '../lib/api';
   import { canActOnTurn, turnDiffFor, turnNumberByUserIndex } from '../lib/checkpoints';
   import { scrollTopAfterPrepend, workspaceDisplayName } from '../lib/chat-ui';
-  import { carryOlderHistory } from '../lib/snapshot';
+  import { carryOlderHistory, sessionPreview } from '../lib/snapshot';
   import { createRequestTokens } from '../lib/latest';
   import { historyPageBelongsTo } from '../lib/snapshot';
   import { groupTranscript, visibleTranscriptStart, type LiveActivity } from '../lib/transcript';
@@ -47,6 +47,12 @@
   let historyCount = 72;
   let scroller: HTMLDivElement;
   let atBottom = true;
+  // Bounded, in-memory reading windows. Leaving a running conversation must
+  // not discard pages the person already opened or collapse it back to 72.
+  const historyViews = new Map<string, {
+    snapshot: SessionSnapshot; older: Message[]; count: number; top: number; bottom: boolean;
+  }>();
+  const historyKey = (project: string, session: string) => JSON.stringify([project, session]);
   let checkpointTurns: CheckpointTurn[] = [];
   let turnDiffs = new Map<number, TurnDiffSummary>();
   let conversationKey = '';
@@ -131,12 +137,47 @@
     turnFilesRequests.begin();
     revealRequest += 1;
     highlightAbsolute = null;
+    historyViews.clear();
   });
 
-  export function syncHistory() {
-    olderMessages = [];
-    historyHasMore = getData()?.snapshot?.history_truncated ?? false;
-    historyCount = 72;
+  export function rememberHistory() {
+    const current = getData();
+    const full = current?.snapshot;
+    if (!current || !full?.messages || !full.session_id || full.session_id === 'unknown') return;
+    const key = historyKey(current.project, full.session_id);
+    const recent = sessionPreview(full, 120);
+    const older = carryOlderHistory(olderMessages, full, recent);
+    historyViews.delete(key);
+    historyViews.set(key, {snapshot: recent, older,
+      count: Math.min(historyCount, recent.messages.length + older.length),
+      top: scroller?.scrollTop ?? 0, bottom: atBottom});
+    if (historyViews.size > 5) historyViews.delete(historyViews.keys().next().value!);
+  }
+
+  export function syncHistory(restore = false): boolean {
+    const current = getData();
+    const next = current?.snapshot;
+    const key = current && next ? historyKey(current.project, next.session_id) : '';
+    const cached = restore ? historyViews.get(key) : undefined;
+    olderMessages = cached && next ? carryOlderHistory(cached.older, cached.snapshot, next) : [];
+    const start = next ? Math.max(0, (next.total_messages ?? next.messages.length) - next.messages.length) : 0;
+    historyHasMore = start > olderMessages.length || (!next?.total_messages && !!next?.history_truncated);
+    const advanced = cached && next ? Math.max(0,
+      (next.total_messages ?? next.messages.length) - (cached.snapshot.total_messages ?? cached.snapshot.messages.length)) : 0;
+    historyCount = cached ? Math.max(72, cached.count + advanced) : 72;
+    if (!restore) historyViews.delete(key);
+    if (cached) {
+      const generation = getTaskGeneration();
+      atBottom = cached.bottom;
+      void tick().then(() => {
+        const shown = getData();
+        if (scroller && shown?.snapshot && generation === getTaskGeneration()
+          && historyKey(shown.project, shown.snapshot.session_id) === key) {
+          scroller.scrollTop = cached.bottom ? scroller.scrollHeight : cached.top;
+        }
+      });
+    }
+    return !!cached;
   }
 
   /** Navigation starts from a fresh window before the preview is shown. */
@@ -149,6 +190,11 @@
   export function carrySnapshot(previous: SessionSnapshot | null, next: SessionSnapshot) {
     if (!previous || previous.session_id !== next.session_id) return;
     olderMessages = carryOlderHistory(olderMessages, previous, next);
+    if (historyCount > 72) {
+      const advanced = Math.max(0, (next.total_messages ?? next.messages.length)
+        - (previous.total_messages ?? previous.messages.length));
+      historyCount = Math.min(historyCount + advanced, olderMessages.length + next.messages.length);
+    }
     const nextStart = Math.max(0, (next.total_messages ?? next.messages.length) - next.messages.length);
     historyHasMore = nextStart > olderMessages.length;
   }

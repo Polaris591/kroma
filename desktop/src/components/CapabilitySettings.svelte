@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { Search } from '@lucide/svelte';
   import { api, type CapabilityItem, type CapabilityKey, type CapabilitySettings } from '../lib/api';
+  import SettingsDiagnostics from './SettingsDiagnostics.svelte';
 
   export let scope: 'defaults' | 'session' = 'defaults';
   export let category: CapabilityKey | 'all' = 'all';
@@ -21,6 +22,8 @@
   let message = '';
   let search = '';
   $: selectedCategory = entries.find(entry => entry.key === category);
+  $: warnings = data?.warning_groups && category !== 'all'
+    ? data.warning_groups[category] ?? [] : data?.warnings ?? [];
   $: query = search.trim().toLowerCase();
   $: groups = entries.filter(entry => category === 'all' || entry.key === category).map(entry => {
     const all = data?.items[entry.key] ?? [];
@@ -72,7 +75,7 @@
     : '修改后自动保存。会话内的单独设置优先。'}</p>
   {#if disabled}<p class="settings-hint">任务执行期间不能切换能力，请先停止任务或等它完成。</p>{/if}
   {#if data}
-    {#if data.warnings?.length}<div class="settings-error" role="alert">{#each data.warnings as warning}<p>{warning}</p>{/each}</div>{/if}
+    <SettingsDiagnostics messages={warnings} title={category === 'all' ? '能力检查提示' : `${selectedCategory?.name ?? '能力'}检查提示`}/>
     <div class="capability-search-wrap"><Search size={15}/><input class="capability-search" type="search" aria-label="搜索能力" placeholder="搜索名称、工具名或说明" bind:value={search}/></div>
     {#each groups as group (group.key)}
       {#if !query || group.visible.length}

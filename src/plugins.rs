@@ -712,12 +712,19 @@ impl PluginCatalog {
         let mut plugins = Vec::new();
         let mut seen = BTreeSet::new();
         let project_plugins = workdir.join(".kroma").join("plugins");
-        let mut sources = vec![directory.clone()];
+        let mut sources = vec![(directory.clone(), false)];
         if let Some(bundle) = bundled.as_ref() {
-            sources.push(bundle.clone());
+            sources.push((bundle.clone(), false));
         }
-        sources.push(project_plugins.clone());
-        for source in &sources {
+        sources.push((project_plugins, true));
+        let mut scanned_sources = BTreeSet::new();
+        for (source, project) in &sources {
+            // The home workspace shares its plugin directory with the user
+            // inventory. Canonicalize aliases (including Windows \\?\ paths)
+            // before scanning, keeping the first source and its settings scope.
+            if !scanned_sources.insert(source.canonicalize().unwrap_or_else(|_| source.clone())) {
+                continue;
+            }
             let mut entries = match fs::read_dir(source) {
                 Ok(entries) => entries
                     .collect::<std::io::Result<Vec<_>>>()
@@ -744,7 +751,7 @@ impl PluginCatalog {
                             ));
                             continue;
                         }
-                        let project_key = if source == &project_plugins {
+                        let project_key = if *project {
                             Some(format!(
                                 "{}::{}",
                                 source.canonicalize()?.display(),
@@ -832,7 +839,7 @@ impl PluginCatalog {
                     Err(error) => {
                         let label = format!("{}: {error:#}", dir.display());
                         let id = entry.file_name().to_string_lossy().to_string();
-                        let project_key = if source == &project_plugins {
+                        let project_key = if *project {
                             Some(format!("{}::{id}", source.canonicalize()?.display()))
                         } else {
                             None
@@ -4295,6 +4302,112 @@ first=true
         let old_state: PluginState =
             toml::from_str("[project_fingerprints]\n'old-project'='prior-approval'\n")?;
         assert!(!toml::to_string(&old_state)?.contains("project_fingerprints"));
+        Ok(())
+    }
+
+    #[test]
+    fn plugin_sources_home_inventory_is_deduplicated_and_keeps_user_settings() -> Result<()> {
+        let home = test_root("home-inventory");
+        let directory = home.join(".kroma/plugins");
+        let state_path = home.join(".kroma/plugins.toml");
+        fs::create_dir_all(directory.join("sample"))?;
+        fs::write(
+            directory.join("sample/plugin.toml"),
+            "id='sample'\nname='Sample'\nprompt='Hello'\n[settings]\nlimit=1\n",
+        )?;
+        PluginState {
+            enabled: BTreeSet::from(["sample".into()]),
+            settings: BTreeMap::from([(
+                "sample".into(),
+                BTreeMap::from([("limit".into(), toml::Value::Integer(3))]),
+            )]),
+            ..Default::default()
+        }
+        .save(&state_path)?;
+        // On Windows canonicalization also adds the \\?\ path prefix used by
+        // the Desktop home workspace. Neither spelling is a second install.
+        for workdir in [home.clone(), home.canonicalize()?] {
+            let catalog = PluginCatalog::discover_at_with_bundled(
+                directory.clone(),
+                state_path.clone(),
+                &workdir,
+                None,
+                Some(directory.join(".")),
+            )?;
+            assert!(catalog.warnings.is_empty(), "{:?}", catalog.warnings);
+            assert_eq!(catalog.plugins.len(), 1);
+            assert!(catalog.plugins[0].project_key.is_none());
+            assert!(catalog.plugins[0].enabled);
+            assert_eq!(catalog.summaries()?[0]["settings"]["limit"], json!(3));
+        }
+        fs::remove_dir_all(home)?;
+        Ok(())
+    }
+
+    #[test]
+    fn plugin_sources_distinct_directories_still_report_id_conflicts() -> Result<()> {
+        let root = test_root("distinct-plugin-sources");
+        let user = root.join("user");
+        let bundle = root.join("bundle");
+        let workdir = root.join("project");
+        let project_plugins = workdir.join(".kroma/plugins");
+        for (source, name) in [
+            (&user, "User"),
+            (&bundle, "Bundle"),
+            (&project_plugins, "Project"),
+        ] {
+            fs::create_dir_all(source.join("sample"))?;
+            fs::write(
+                source.join("sample/plugin.toml"),
+                format!("id='sample'\nname='{name}'\nprompt='Hello'\n"),
+            )?;
+        }
+        fs::create_dir_all(project_plugins.join("local"))?;
+        fs::write(
+            project_plugins.join("local/plugin.toml"),
+            "id='local'\nname='Local'\nprompt='Project only'\n",
+        )?;
+        let catalog = PluginCatalog::discover_at_with_bundled(
+            user,
+            root.join("plugins.toml"),
+            &workdir,
+            None,
+            Some(bundle),
+        )?;
+        assert_eq!(catalog.plugins.len(), 2);
+        assert_eq!(catalog.plugins[0].manifest.name, "User");
+        assert!(catalog.plugins[0].project_key.is_none());
+        assert!(catalog.plugins[1].project_key.is_some());
+        assert_eq!(catalog.warnings.len(), 2);
+        assert!(catalog
+            .warnings
+            .iter()
+            .all(|warning| warning.contains("duplicate plugin id 'sample'")));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn plugin_sources_overlapping_invalid_manifest_still_blocks_critical_backend() -> Result<()> {
+        let home = test_root("invalid-home-plugin");
+        let directory = home.join(".kroma/plugins");
+        let state_path = home.join(".kroma/plugins.toml");
+        fs::create_dir_all(directory.join("broken"))?;
+        fs::write(
+            directory.join("broken/plugin.toml"),
+            "id='broken'\ncommand=7\n",
+        )?;
+        PluginState {
+            enabled: BTreeSet::from(["broken".into()]),
+            critical_plugins: BTreeSet::from(["broken".into()]),
+            ..Default::default()
+        }
+        .save(&state_path)?;
+        let catalog = PluginCatalog::discover_at_with_bundled(directory, state_path, &home, None, None)?;
+        assert_eq!(catalog.warnings.len(), 1);
+        assert_eq!(catalog.invalid_enabled.len(), 1);
+        assert!(catalog.ensure_loadable().is_err());
+        fs::remove_dir_all(home)?;
         Ok(())
     }
 
