@@ -11,8 +11,28 @@ export function workspaceDisplayName(project: string, userHome?: string | null):
   return project.split(/[\\/]/).filter(Boolean).pop() || project;
 }
 
-/** Display task names, not internal journal IDs, in the navigation. */
-export function sessionLabel(session: SessionEntry): string {
+/** Two workspaces can share a last path segment; then the parent disambiguates. */
+export function workspaceLabels(projects: string[], userHome?: string | null): Record<string, string> {
+  const labels: Record<string, string> = {};
+  const counts = new Map<string, number>();
+  for (const project of projects) {
+    const base = workspaceDisplayName(project, userHome);
+    counts.set(base, (counts.get(base) ?? 0) + 1);
+  }
+  for (const project of projects) {
+    const base = workspaceDisplayName(project, userHome);
+    if ((counts.get(base) ?? 0) < 2) {
+      labels[project] = base;
+      continue;
+    }
+    const parts = project.split(/[\\/]/).filter(Boolean);
+    const parent = parts[parts.length - 2];
+    labels[project] = parent ? `${parent}/${base}` : base;
+  }
+  return labels;
+}
+
+/** Display task names, not internal journal IDs, in the navigation. */export function sessionLabel(session: SessionEntry): string {
   const name = session.name?.trim();
   if (name) return name;
   if (session.id === 'default') return '默认会话';
@@ -89,6 +109,14 @@ export function isWorkspaceExpanded(
     || project === defaultProject
     || search.trim().length > 0
   );
+}
+
+export function sidebarIsVisible(
+  narrow: boolean,
+  choice: boolean | null,
+  declaredDefault: 'visible' | 'hidden' | null,
+): boolean {
+  return choice ?? (declaredDefault ? declaredDefault === 'visible' : !narrow);
 }
 
 /** Serialize navigation through the single active Agent. While an IPC call

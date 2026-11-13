@@ -322,6 +322,10 @@ pub struct PluginUiBus {
     live_panel: Mutex<Option<PluginLivePanel>>,
     /// Attached interactive terminal host for `ui.custom`.
     custom_tui: Mutex<Option<Arc<dyn CustomTuiHost>>>,
+    /// The interactive surface that owns questions raised while this catalog's
+    /// plugins run. Desktop binds its per-conversation asker here so a plugin
+    /// question can never be delivered to another conversation.
+    asker: Mutex<Option<Arc<dyn crate::tools::Asker>>>,
     tx: broadcast::Sender<PluginUiEvent>,
 }
 
@@ -340,8 +344,20 @@ impl PluginUiBus {
             widgets: Mutex::new(BTreeMap::new()),
             live_panel: Mutex::new(None),
             custom_tui: Mutex::new(None),
+            asker: Mutex::new(None),
             tx,
         }
+    }
+
+    /// Bind the interactive surface that owns this catalog's plugin questions.
+    pub fn bind_asker(&self, asker: Arc<dyn crate::tools::Asker>) {
+        if let Ok(mut slot) = self.asker.lock() {
+            *slot = Some(asker);
+        }
+    }
+
+    pub fn asker(&self) -> Option<Arc<dyn crate::tools::Asker>> {
+        self.asker.lock().ok().and_then(|slot| slot.clone())
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<PluginUiEvent> {
@@ -414,6 +430,12 @@ impl PluginUiBus {
             widgets.retain(|_, widget| widget.scope == UiScope::Global);
             widgets_changed = widgets.len() != before;
         }
+        let closed_panel = self
+            .live_panel
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
+            .map(|panel| panel.plugin_id);
         if status_changed {
             let _ = self.tx.send(PluginUiEvent::StatusChanged {
                 statuses: self.statuses(),
@@ -423,6 +445,9 @@ impl PluginUiBus {
             let _ = self.tx.send(PluginUiEvent::WidgetsChanged {
                 widgets: self.widget_values(),
             });
+        }
+        if let Some(plugin_id) = closed_panel {
+            let _ = self.tx.send(PluginUiEvent::PanelClosed { plugin_id });
         }
     }
 
@@ -559,17 +584,24 @@ impl PluginUiBus {
     }
 
     pub fn close_panel(&self, plugin_id: &str) {
-        if let Ok(mut guard) = self.live_panel.lock() {
+        let closed = if let Ok(mut guard) = self.live_panel.lock() {
             if guard
                 .as_ref()
                 .is_some_and(|panel| panel.plugin_id == plugin_id)
             {
                 *guard = None;
+                true
+            } else {
+                false
             }
+        } else {
+            false
+        };
+        if closed {
+            let _ = self.tx.send(PluginUiEvent::PanelClosed {
+                plugin_id: plugin_id.to_owned(),
+            });
         }
-        let _ = self.tx.send(PluginUiEvent::PanelClosed {
-            plugin_id: plugin_id.to_owned(),
-        });
     }
 
     pub fn live_panel(&self) -> Option<PluginLivePanel> {
@@ -731,6 +763,25 @@ fn read_contained_file(
     Ok(std::fs::read_to_string(&candidate)?)
 }
 
+fn escape_end_tag(body: &str, closing: &str) -> String {
+    let lower = body.to_ascii_lowercase();
+    let needle = closing.to_ascii_lowercase();
+    if !lower.contains(&needle) {
+        return body.to_owned();
+    }
+    let mut out = String::with_capacity(body.len() + 8);
+    let mut cursor = 0;
+    while let Some(rel) = lower[cursor..].find(&needle) {
+        let start = cursor + rel;
+        out.push_str(&body[cursor..start]);
+        out.push_str("<\\/");
+        out.push_str(&body[start + 2..start + needle.len()]);
+        cursor = start + needle.len();
+    }
+    out.push_str(&body[cursor..]);
+    out
+}
+
 fn inline_local_assets(
     plugin_root: &std::path::Path,
     entry_dir: &std::path::Path,
@@ -749,7 +800,7 @@ fn inline_local_assets(
                 if let Some(close) = after_tag.to_ascii_lowercase().find("</script>") {
                     if let Some(src) = extract_attr(tag, "src") {
                         if let Ok(code) = read_contained_file(plugin_root, entry_dir, &src) {
-                            let safe = code.replace("</script", "<\\/script");
+                            let safe = escape_end_tag(&code, "</script");
                             out.push_str("<script>");
                             out.push_str(&safe);
                             out.push_str("</script>");
@@ -766,7 +817,7 @@ fn inline_local_assets(
                 if rel.eq_ignore_ascii_case("stylesheet") {
                     if let Some(href) = extract_attr(tag, "href") {
                         if let Ok(css) = read_contained_file(plugin_root, entry_dir, &href) {
-                            let safe = css.replace("</style", "<\\/style");
+                            let safe = escape_end_tag(&css, "</style");
                             out.push_str("<style>");
                             out.push_str(&safe);
                             out.push_str("</style>");
@@ -787,12 +838,20 @@ fn inline_local_assets(
 fn extract_attr(tag: &str, name: &str) -> Option<String> {
     let lower = tag.to_ascii_lowercase();
     let needle = format!("{name}=");
-    let pos = lower.find(&needle)?;
-    let after = tag[pos + needle.len()..].trim_start();
-    let quote = after.chars().next().filter(|c| *c == '"' || *c == '\'')?;
-    let rest = &after[quote.len_utf8()..];
-    let end = rest.find(quote)?;
-    Some(rest[..end].to_owned())
+    let mut offset = 0;
+    while let Some(rel) = lower[offset..].find(&needle) {
+        let pos = offset + rel;
+        let boundary = pos > 0 && tag.as_bytes()[pos - 1].is_ascii_whitespace();
+        if boundary {
+            let after = tag[pos + needle.len()..].trim_start();
+            let quote = after.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+            let rest = &after[quote.len_utf8()..];
+            let end = rest.find(quote)?;
+            return Some(rest[..end].to_owned());
+        }
+        offset = pos + 1;
+    }
+    None
 }
 
 fn bridge_script(plugin_id: &str) -> String {

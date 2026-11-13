@@ -32,6 +32,9 @@ pub struct Config {
     /// Endpoint capability opt-in: send the Responses server-side
     /// `web_search` tool. Off unless the saved profile enables it.
     pub native_web_search: bool,
+    /// Validated prompt-cache controls from the saved profile. Defaults keep the
+    /// historical behavior: automatic breakpoints, no forced cache key.
+    pub cache_policy: crate::provider::CachePolicy,
     /// Saved profile name, not credentials, for session-scoped TUI restoration.
     pub selected_profile: Option<String>,
 }
@@ -281,6 +284,10 @@ impl Config {
             catalog_model_source,
             // A capability switch, not a guess from the model name or host.
             native_web_search: profile.is_some_and(|p| p.native_web_search()),
+            cache_policy: profile
+                .map(|p| p.cache_policy())
+                .transpose()?
+                .unwrap_or_default(),
             selected_profile,
         })
     }

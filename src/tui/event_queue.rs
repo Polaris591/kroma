@@ -216,6 +216,7 @@ impl State {
                 output,
                 cached,
                 reasoning,
+                cache_write,
             } => {
                 let (_, meter) = self
                     .usage
@@ -227,6 +228,8 @@ impl State {
                     reasoning,
                     total: None,
                     web_searches: None,
+                    cache_write,
+                    cache_write_1h: None,
                 }));
             }
             UiEvent::ApecUsage {
@@ -234,6 +237,7 @@ impl State {
                 input,
                 output,
                 cached,
+                cache_write,
             } => {
                 let (_, meter) = self
                     .apec
@@ -247,6 +251,8 @@ impl State {
                         reasoning: None,
                         total: None,
                         web_searches: None,
+                        cache_write,
+                        cache_write_1h: None,
                     }),
                 );
             }

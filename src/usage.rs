@@ -1,5 +1,6 @@
 //! Foreground model usage observed from provider responses. Missing provider
-//! measurements remain unknown; cached tokens are a subset of input tokens.
+//! measurements remain unknown; cached tokens and cache-write tokens are
+//! subsets of input tokens, never additional terms.
 use crate::model::Usage;
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +14,14 @@ pub struct UsageMeter {
     pub reasoning: u64,
     /// Endpoint-reported server-side search requests, when it reports them.
     pub web_searches: u64,
+    /// Input tokens the endpoint reported as written into its prompt cache.
+    /// A subset of `input`; its billing rate differs from ordinary input.
+    pub cache_write: u64,
+    /// Subset of `cache_write` attributed to the one-hour TTL.
+    pub cache_write_1h: u64,
     unknown_web_searches: usize,
+    unknown_cache_write: usize,
+    unknown_cache_write_1h: usize,
     /// Last completed foreground model request, separate from process totals.
     last: Option<Usage>,
     unknown_input: usize,
@@ -93,6 +101,18 @@ impl UsageMeter {
             self.web_searches = self.web_searches.saturating_add(value);
         } else {
             self.unknown_web_searches += requests;
+        }
+        // A cache write is part of input; add it only to its own counter so the
+        // request is never counted twice.
+        if let Some(value) = usage.and_then(|u| u.cache_write) {
+            self.cache_write = self.cache_write.saturating_add(value);
+        } else {
+            self.unknown_cache_write += requests;
+        }
+        if let Some(value) = usage.and_then(|u| u.cache_write_1h) {
+            self.cache_write_1h = self.cache_write_1h.saturating_add(value);
+        } else {
+            self.unknown_cache_write_1h += requests;
         }
     }
 
@@ -199,6 +219,20 @@ impl UsageMeter {
                 measured(self.web_searches, self.unknown_web_searches)
             ));
         }
+        // Cache writes are usually charged differently from uncached input, so
+        // they are shown separately. Unknown never renders as a measured zero.
+        if self.cache_write > 0 || self.unknown_cache_write > 0 {
+            line.push_str(&format!(
+                " | Cache write {}",
+                measured(self.cache_write, self.unknown_cache_write)
+            ));
+            if self.cache_write_1h > 0 {
+                line.push_str(&format!(
+                    " (1h {})",
+                    measured(self.cache_write_1h, self.unknown_cache_write_1h)
+                ));
+            }
+        }
         line
     }
 
@@ -217,6 +251,8 @@ impl UsageMeter {
         self.cached = self.cached.saturating_add(other.cached);
         self.reasoning = self.reasoning.saturating_add(other.reasoning);
         self.web_searches = self.web_searches.saturating_add(other.web_searches);
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.cache_write_1h = self.cache_write_1h.saturating_add(other.cache_write_1h);
         self.unknown_input = self.unknown_input.saturating_add(other.unknown_input);
         self.unknown_output = self.unknown_output.saturating_add(other.unknown_output);
         self.unknown_cached = self.unknown_cached.saturating_add(other.unknown_cached);
@@ -226,6 +262,12 @@ impl UsageMeter {
         self.unknown_web_searches = self
             .unknown_web_searches
             .saturating_add(other.unknown_web_searches);
+        self.unknown_cache_write = self
+            .unknown_cache_write
+            .saturating_add(other.unknown_cache_write);
+        self.unknown_cache_write_1h = self
+            .unknown_cache_write_1h
+            .saturating_add(other.unknown_cache_write_1h);
         self.paired_cache_input = self
             .paired_cache_input
             .saturating_add(other.paired_cache_input);
@@ -247,7 +289,8 @@ impl UsageMeter {
             total.summary_line("Combined"),
             "Last coding request: ".to_owned()
                 + &self.compact_status(120).unwrap_or_default(),
-            "Cache read tokens are part of input; reasoning tokens are part of output.".into(),
+            "Cache read and cache write tokens are part of input; reasoning tokens are part of output."
+                .into(),
             "— = unavailable; ≥ = some requests unreported; ~ = cache ratio based on measured requests only.".into(),
             "APEC counts finalized summaries; unfinished or failed attempts may have unreported costs.".into(),
         ]
@@ -298,11 +341,12 @@ impl UsageMeter {
                 )
             });
         format!(
-            "Foreground usage (this Kroma process, not historical or APEC):\nLast request: {latest}\nModel calls: {}\nInput: {} tokens\nOutput: {} tokens\nReasoning: {} tokens (included in output; when reported)\nCached input: {} tokens (included in input)\nCumulative cache hit rate: {}\nAPEC summary usage is reported separately in runtime logs.",
+            "Foreground usage (this Kroma process, not historical or APEC):\nLast request: {latest}\nModel calls: {}\nInput: {} tokens\nOutput: {} tokens\nReasoning: {} tokens (included in output; when reported)\nCached input: {} tokens (included in input)\nCache write: {} tokens (included in input; when reported)\nCumulative cache hit rate: {}\nAPEC summary usage is reported separately in runtime logs.",
             self.calls,value(self.input,self.unknown_input),
             value(self.output,self.unknown_output),
             value(self.reasoning,self.unknown_reasoning),
             value(self.cached,self.unknown_cached),
+            value(self.cache_write,self.unknown_cache_write),
             cache_rate,
         )
     }
@@ -321,6 +365,8 @@ mod tests {
             total: None,
             reasoning: Some(8),
             web_searches: None,
+            cache_write: None,
+            cache_write_1h: None,
         }));
         meter.record(None);
         assert_eq!(meter.calls, 2);

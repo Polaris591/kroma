@@ -343,6 +343,7 @@ fn semantic_context_thresholds_do_not_colour_cache_model_or_unknowns() {
         output: None,
         cached: Some(0),
         reasoning: None,
+        cache_write: None,
     });
     for (input, role) in [
         (0, "neutral"),

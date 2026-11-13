@@ -1,14 +1,18 @@
 import { open, save } from '@tauri-apps/plugin-dialog';
-import { api, type ProfileInput } from './api';
+import { api, type Bootstrap, type ProfileInput } from './api';
 import type { DesktopHost } from './desktop-host';
 import { exportFileStem } from './session-export';
+import {
+  backupFileStem, backupReportMessage, importReportMessage, type ImportedSummary,
+} from './session-backup';
+import { desktopCommandMessage } from './native-error';
 import { applyPresentation, clearSessionPluginUi, loadPresentation } from './plugin-ui';
 
 /** Bootstrap lifecycle and every command that installs a whole Bootstrap or
  * touches model/plugin configuration. All state stays in the shell. */
 export function createSessionCommands(host: DesktopHost) {
-  async function doConnect(name?: string) {
-    if (host.busy || host.running) return;
+  async function doConnect(name?: string): Promise<boolean> {
+    if (host.busy || host.running) return false;
     host.taskGeneration += 1;
     const generation = host.guard.begin();
     const previousId = host.snapshot?.session_id;
@@ -18,7 +22,7 @@ export function createSessionCommands(host: DesktopHost) {
     host.clearNotice();
     try {
       const next = await host.guard.settleBootstrap(generation, api.connect(name));
-      if (!next) return;
+      if (!next) return false;
       host.data = next;
       void loadPresentation();
       if (next.project !== previousProject || next.snapshot?.session_id !== previousId) {
@@ -32,34 +36,13 @@ export function createSessionCommands(host: DesktopHost) {
       host.tab = 'chat';
       await host.scrollIfBottom();
       if (!host.initialized) host.focusComposer();
-    } catch (failure) { host.showError(failure); }
-    finally { if (host.guard.isCurrent(generation)) host.busy = false; }
-  }
-
-  async function approveProjectMcp() {
-    if (host.busy || host.running) return;
-    host.taskGeneration += 1;
-    const generation = host.guard.begin();
-    host.busy = true;
-    host.clearError();
-    host.clearNotice();
-    try {
-      await api.trustProjectMcp();
-      if (!host.guard.isCurrent(generation)) return;
-      // Rebuild the runtime so the newly trusted tools are registered.
-      const next = await host.guard.settleBootstrap(
-        generation, api.connect(host.data?.profiles.active ?? undefined));
-      if (!next) return;
-      host.data = next;
-      host.syncHistory();
-      host.mcpDismissed = false;
-      host.toast('项目 MCP 配置已批准，工具已重新加载');
-    } catch (failure) { host.showError(failure); }
+      return next.ready;
+    } catch (failure) { host.showError(failure); return false; }
     finally { if (host.guard.isCurrent(generation)) host.busy = false; }
   }
 
   async function chooseProject(path?: string) {
-    if (host.busy || host.running) return;
+    if (host.busy) return;
     host.resetTaskResult();
     // Own the dialog and project switch under one operation token.
     host.busy = true;
@@ -96,7 +79,7 @@ export function createSessionCommands(host: DesktopHost) {
   }
 
   async function newSession() {
-    if (host.running || host.busy || host.compacting) return;
+    if (host.busy || host.compacting) return;
     host.resetTaskResult();
     host.saveDraft();
     host.taskGeneration += 1;
@@ -108,6 +91,8 @@ export function createSessionCommands(host: DesktopHost) {
       if (!next) return;
       host.data = next;
       clearSessionPluginUi();
+      applyPresentation(null);
+      void loadPresentation();
       host.syncHistory();
       host.clearLiveActivities();
       host.restoreDraft();
@@ -132,9 +117,70 @@ export function createSessionCommands(host: DesktopHost) {
       });
       if (!destination) return;
       await api.exportSession(id, destination);
-      host.toast('会话已导出；不包含系统提示词、工具日志和模型思考');
+      host.toast('会话已导出；附件仅列信息，不含原文件，也不包含系统提示词、工具日志和模型思考');
     } catch (failure) { host.showError(failure); }
     finally { host.busy = false; }
+  }
+
+  /** A complete local backup. It is deliberately a separate entry from the
+   * Markdown export: only this one can be restored. */
+  async function backupCurrentSession() {
+    const id = host.data?.snapshot?.session_id;
+    if (!host.data?.ready || !id || id === 'unknown' || host.busy || host.running) return;
+    host.busy = true;
+    host.clearError();
+    try {
+      const destination = await save({
+        title: '备份完整 Kroma 会话',
+        defaultPath: backupFileStem(host.sessionName),
+        filters: [{name: 'Kroma 会话备份', extensions: ['kroma-backup']}],
+      });
+      if (!destination) return;
+      const report = await api.exportSessionBackup(id, destination);
+      host.toast(backupReportMessage(report));
+    } catch (failure) {
+      host.showError(new Error(desktopCommandMessage('会话备份', failure)));
+    } finally { host.busy = false; }
+  }
+
+  /** Restore a backup into the current workspace as a new conversation. */
+  async function importSessionBackup() {
+    if (host.running || host.busy || host.compacting || !host.data) return;
+    host.clearError();
+    const generation = host.guard.begin();
+    host.busy = true;
+    try {
+      const source = await open({
+        multiple: false,
+        title: '选择 Kroma 会话备份',
+        filters: [{name: 'Kroma 会话备份', extensions: ['kroma-backup']}],
+      });
+      if (typeof source !== 'string' || !source) return;
+      const result = await api.importSessionBackup(source);
+      if (!host.guard.isCurrent(generation)) return;
+      const imported: ImportedSummary | undefined = result.imported;
+      const warning = result.open_warning ?? '';
+      const next: Bootstrap = result;
+      host.data = next;
+      host.taskGeneration += 1;
+      clearSessionPluginUi();
+      applyPresentation(null);
+      void loadPresentation();
+      host.syncHistory();
+      host.clearLiveActivities();
+      host.restoreDraft();
+      host.restoreFollowups();
+      host.tab = 'chat';
+      await host.scrollDown();
+      host.focusComposer();
+      host.toast(imported
+        ? importReportMessage(imported) + (warning ? `；${warning}` : '')
+        : (warning || '已导入会话备份'));
+    } catch (failure) {
+      host.showError(new Error(desktopCommandMessage('导入会话备份', failure)));
+    } finally {
+      if (host.guard.isCurrent(generation)) host.busy = false;
+    }
   }
 
   async function saveTitle(title: string) {
@@ -242,24 +288,26 @@ export function createSessionCommands(host: DesktopHost) {
   async function addAndConnectModel(profile: ProfileInput) {
     if (host.running || host.busy) throw new Error('请在当前任务结束后添加模型');
     await saveProfile(profile);
-    await doConnect(profile.name);
-    if (host.data?.connected_profile !== profile.name) {
+    const connected = await doConnect(profile.name);
+    if (!connected || host.data?.connected_profile !== profile.name) {
       throw new Error('配置已保存，但连接未成功。请检查接口地址、模型 ID 和密钥。');
     }
   }
 
-  async function setDefaultProfile(name: string) {
-    if (!host.data || host.running || host.busy) return;
+  async function setDefaultProfile(name: string): Promise<boolean> {
+    if (!host.data || host.running || host.busy) return false;
     host.busy = true;
     try {
       const profiles = await api.setDefaultProfile(name);
       host.data = {...host.data, profiles};
       host.toast('已设置 CLI / TUI / Desktop 的默认模型');
-    } catch (failure) { host.showError(failure); }
+      return true;
+    } catch (failure) { host.showError(failure); return false; }
     finally { host.busy = false; }
   }
 
   async function pluginAction(action: string, id?: string, path?: string, key?: string, value?: unknown) {
+    host.clearError();
     try {
       const result = await api.pluginAction(action, id, path, key, value);
       if (host.data) host.data = {...host.data, plugins: result.plugins};
@@ -267,18 +315,19 @@ export function createSessionCommands(host: DesktopHost) {
       // interface reloads that declaration with the same action.
       await loadPresentation();
       host.toast(result.restart_required ? (result.warning || '需要重新连接模型后生效') : result.message);
-    } catch (failure) { host.showError(failure); }
+    } catch (failure) { host.showError(failure); throw failure; }
   }
 
   async function installPlugin() {
     try {
       const dir = await open({directory: true, title: '选择包含 plugin.toml 的插件文件夹'});
       if (typeof dir === 'string') await pluginAction('install', undefined, dir);
-    } catch (failure) { host.showError(failure); }
+    } catch (failure) { host.showError(failure); throw failure; }
   }
 
   return {
-    doConnect, approveProjectMcp, chooseProject, newSession, exportCurrentSession,
+    doConnect, chooseProject, newSession, exportCurrentSession,
+    backupCurrentSession, importSessionBackup,
     saveTitle, undoDelete, refresh, initialize,
     changeModel, changeReasoning, addAndConnectModel, setDefaultProfile,
     saveProfile, pluginAction, installPlugin,

@@ -157,6 +157,8 @@ impl EventSink for DesktopEvents {
                 output_tokens,
                 cached_tokens,
                 reasoning_tokens,
+                cache_write_tokens,
+                cache_write_1h_tokens,
             } => {
                 self.pending
                     .lock()
@@ -169,11 +171,15 @@ impl EventSink for DesktopEvents {
                         reasoning: reasoning_tokens,
                         total: None,
                         web_searches: None,
+                        cache_write: cache_write_tokens,
+                        cache_write_1h: cache_write_1h_tokens,
                     });
                 self.push(
                     json!({"kind":"model_finished","request":request,"tools":tools,
                     "reasoning":reasoning,"input":input_tokens,"output":output_tokens,
-                    "cached":cached_tokens,"reasoning_tokens":reasoning_tokens}),
+                    "cached":cached_tokens,"reasoning_tokens":reasoning_tokens,
+                    "cache_write":cache_write_tokens,
+                    "cache_write_1h":cache_write_1h_tokens}),
                 );
             }
             RuntimeEvent::CompactionUsage {
@@ -181,6 +187,7 @@ impl EventSink for DesktopEvents {
                 input_tokens,
                 output_tokens,
                 cached_tokens,
+                cache_write_tokens,
             } => {
                 self.pending
                     .lock()
@@ -195,11 +202,14 @@ impl EventSink for DesktopEvents {
                             reasoning: None,
                             total: None,
                             web_searches: None,
+                            cache_write: cache_write_tokens,
+                            cache_write_1h: None,
                         },
                     ));
                 self.push(
                     json!({"kind":"compaction_usage","requests":requests,"input":input_tokens,
-                    "output":output_tokens,"cached":cached_tokens}),
+                    "output":output_tokens,"cached":cached_tokens,
+                    "cache_write":cache_write_tokens}),
                 );
             }
             RuntimeEvent::FailedRequestUsage {
@@ -207,6 +217,8 @@ impl EventSink for DesktopEvents {
                 output_tokens,
                 cached_tokens,
                 reasoning_tokens,
+                cache_write_tokens,
+                cache_write_1h_tokens,
             } => {
                 self.pending
                     .lock()
@@ -219,10 +231,13 @@ impl EventSink for DesktopEvents {
                         reasoning: reasoning_tokens,
                         total: None,
                         web_searches: None,
+                        cache_write: cache_write_tokens,
+                        cache_write_1h: cache_write_1h_tokens,
                     });
                 self.push(json!({"kind":"failed_request_usage","input":input_tokens,
                     "output":output_tokens,"cached":cached_tokens,
-                    "reasoning_tokens":reasoning_tokens}));
+                    "reasoning_tokens":reasoning_tokens,
+                    "cache_write":cache_write_tokens}));
             }
             RuntimeEvent::Warning { message } => {
                 self.push(json!({"kind":"warning","message":message}))
@@ -263,10 +278,6 @@ impl EventSink for DesktopEvents {
 /// never treat a partial streamed answer as durable history.
 const MAX_SNAPSHOT_MESSAGES: usize = 1_000;
 
-pub fn snapshot(agent: &Agent) -> Result<Value> {
-    snapshot_page_with_plugins(agent, None, MAX_SNAPSHOT_MESSAGES, None)
-}
-
 pub fn snapshot_with_plugins(
     agent: &Agent,
     plugins: Option<&crate::plugins::PluginCatalog>,
@@ -301,6 +312,7 @@ pub fn snapshot_page_with_plugins(
         p.ui_widgets().iter().map(|w| w.to_json()).collect()
     });
     Ok(json!({
+        "capabilities":agent.capabilities(),
         "session_id":agent.session_id(),
         // Live one-line statuses and widgets pushed by this catalog's plugins.
         "plugin_status": plugin_status,
@@ -315,11 +327,11 @@ pub fn snapshot_page_with_plugins(
         "available_input":agent.available_context_tokens(),
         "context":agent.context_report()?,
         "tool_names":agent.available_tool_names(),
-        "skills":crate::skills::SkillCatalog::discover(agent.workdir())
+        "skills":if agent.capabilities().skills { crate::skills::SkillCatalog::discover(agent.workdir())
             .map(|catalog| catalog.list().into_iter().map(|skill| serde_json::json!({
                 "name":skill.name, "description":skill.description
             })).collect::<Vec<_>>())
-            .unwrap_or_default(),
+            .unwrap_or_default() } else { Vec::new() },
     }))
 }
 
@@ -409,6 +421,8 @@ mod tests {
             output_tokens: Some(4),
             reasoning_tokens: None,
             cached_tokens: Some(0),
+            cache_write_tokens: None,
+            cache_write_1h_tokens: None,
         });
         let ledger = catalog.default_path().with_extension("usage.json");
         std::fs::write(&ledger, b"not json")?;

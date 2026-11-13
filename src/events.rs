@@ -25,6 +25,10 @@ pub enum RuntimeEvent<'a> {
         output_tokens: Option<u64>,
         reasoning_tokens: Option<u64>,
         cached_tokens: Option<u64>,
+        /// Subset of the reported input written into the provider cache.
+        cache_write_tokens: Option<u64>,
+        /// Subset of `cache_write_tokens` on the one-hour TTL, when reported.
+        cache_write_1h_tokens: Option<u64>,
     },
     /// The final answer is durable and this turn will not accept more steering.
     /// Emitted before optional post-answer context maintenance.
@@ -36,6 +40,8 @@ pub enum RuntimeEvent<'a> {
         output_tokens: Option<u64>,
         cached_tokens: Option<u64>,
         reasoning_tokens: Option<u64>,
+        cache_write_tokens: Option<u64>,
+        cache_write_1h_tokens: Option<u64>,
     },
     /// Emitted after the failed model turn's durable interruption attempt.
     /// A partially streamed response was not committed as assistant content.
@@ -48,6 +54,7 @@ pub enum RuntimeEvent<'a> {
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
         cached_tokens: Option<u64>,
+        cache_write_tokens: Option<u64>,
     },
     ToolStarted {
         name: &'a str,

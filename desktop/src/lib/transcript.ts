@@ -1,5 +1,11 @@
 import type { Message } from './api';
 
+export function isUserMessage(message: Message): boolean {
+  return message.role === 'user' && !message.provider_items?.some(item =>
+    ['kroma_context_reference', 'kroma_continuation', 'kroma_turn_gate', 'kroma_task_control'].includes(String(item.type))
+  );
+}
+
 export type LiveActivity = {
   kind: 'text' | 'reasoning' | 'tool';
   /** Unique UI key; never the provider call id (see liveActivityKey). */
@@ -26,8 +32,8 @@ export function latestStreamingText(activities: LiveActivity[]): string {
 }
 
 export type TranscriptActivity =
-  | {kind: 'assistant'; id: number; text: string; reasoning: string}
-  | {kind: 'tool'; id: number; name: string; args: string; output: string | null; failed: boolean};
+  | {kind: 'assistant'; id: number; text: string; reasoning: string; fragment?: boolean}
+  | {kind: 'tool'; id: number | string; name: string; args: string; output: string | null; failed: boolean};
 
 export type TranscriptTurn = {
   id: number;
@@ -52,7 +58,8 @@ export function groupTranscript(messages: Message[], offset = 0): TranscriptTurn
   };
   messages.forEach((message, localIndex) => {
     const id = offset + localIndex;
-    if (message.role === 'system') return;
+    if (message.role === 'system' || message.provider_items?.some(item =>
+      item.type === 'kroma_context_reference' || item.type === 'kroma_continuation')) return;
     if (message.role === 'user') {
       active = {id, user: message, activities: []};
       turns.push(active);
@@ -65,14 +72,16 @@ export function groupTranscript(messages: Message[], offset = 0): TranscriptTurn
       const failed = !!message.provider_items?.some(
         item => item.type === 'kroma_tool_status' && item.is_error === true
       );
+      const preview = message.provider_items?.find(item => item.type === 'kroma_tool_projection')?.preview;
+      const output = typeof preview === 'string' ? preview : (message.content ?? '');
       if (matching) {
-        matching.output = message.content ?? '';
+        matching.output = output;
         matching.failed = failed;
         pending.delete(message.tool_call_id!);
       } else {
         turn.activities.push({
           kind:'tool', id, name:'工具结果', args:'',
-          output:message.content ?? '', failed
+          output, failed
         });
       }
       return;
@@ -80,11 +89,12 @@ export function groupTranscript(messages: Message[], offset = 0): TranscriptTurn
     const text = (message.content ?? '').replace(/[\uE000-\uF8FF]/g, '');
     const reasoning = message.reasoning_content ?? '';
     if (text.trim() || reasoning.trim()) {
-      turn.activities.push({kind:'assistant', id, text, reasoning});
+      turn.activities.push({kind:'assistant', id, text, reasoning,
+        ...(message.provider_items?.some(item => item.type === 'kroma_output_fragment') ? {fragment:true} : {})});
     }
     for (const [index, call] of (message.tool_calls ?? []).entries()) {
       const item: Extract<TranscriptActivity, {kind:'tool'}> = {
-        kind:'tool', id:id * 100 + index, name:call.function?.name || '调用工具',
+        kind:'tool', id:`${id}:${index}`, name:call.function?.name || '调用工具',
         args:call.function?.arguments || '', output:null, failed:false
       };
       turn.activities.push(item);
@@ -104,8 +114,19 @@ export function summarizeTurn(turn: TranscriptTurn): {
   failures: number;
 } {
   const last = turn.activities[turn.activities.length - 1];
-  const answer = last?.kind === 'assistant' && last.text.trim() ? last : null;
-  const process = answer ? turn.activities.slice(0, -1) : turn.activities;
+  let answer = last?.kind === 'assistant' && last.text.trim() ? last : null;
+  let answerStart = turn.activities.length - 1;
+  if (answer) {
+    let prefix = '';
+    while (answerStart > 0) {
+      const previous = turn.activities[answerStart - 1];
+      if (previous.kind !== 'assistant' || !previous.fragment) break;
+      prefix = previous.text + prefix;
+      answerStart--;
+    }
+    if (prefix) answer = {...answer, text:prefix + answer.text};
+  }
+  const process = answer ? turn.activities.slice(0, answerStart) : turn.activities;
   const tools = process.filter((step): step is Extract<TranscriptActivity, {kind: 'tool'}> => step.kind === 'tool');
   return {answer, process, toolCount: tools.length, failures: tools.filter(step => step.failed).length};
 }
@@ -124,7 +145,7 @@ export function visibleTranscriptStart(messages: Message[], limit: number): numb
   const backtrack = Math.min(160, Math.max(48, requested));
   const earliest = Math.max(0, first - backtrack);
   for (let index = first; index >= earliest; index--) {
-    if (messages[index].role === 'user') return index;
+    if (isUserMessage(messages[index])) return index;
   }
   return first;
 }

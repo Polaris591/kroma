@@ -68,6 +68,8 @@ fn overload_keeps_exact_accounting_latest_context_and_final_idle() {
             reasoning: (i % 3 == 0).then_some(4),
             total: None,
             web_searches: None,
+            cache_write: None,
+            cache_write_1h: None,
         };
         expected.record(Some(&usage));
         tx.send(UiEvent::Usage {
@@ -75,6 +77,7 @@ fn overload_keeps_exact_accounting_latest_context_and_final_idle() {
             output: usage.output,
             cached: usage.cached,
             reasoning: usage.reasoning,
+            cache_write: None,
         })
         .unwrap();
         tx.send(UiEvent::Context {
@@ -94,6 +97,7 @@ fn overload_keeps_exact_accounting_latest_context_and_final_idle() {
                 input: summary.input,
                 output: summary.output,
                 cached: summary.cached,
+                cache_write: None,
             })
             .unwrap();
         }

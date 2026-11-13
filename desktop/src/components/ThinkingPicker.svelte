@@ -1,30 +1,35 @@
 <script lang="ts">
-  import { BrainCircuit, ChevronDown, Check } from '@lucide/svelte';
   export let value = 'auto';
   export let levels: string[] = [];
   export let disabled = false;
   export let onSelect: (level: string) => Promise<void>;
-  let expanded = false;
-  // Everyday wording: the trigger must read as a description of effort,
-  // not as an unexplained number or an ambiguous "最大".
-  const labels: Record<string,string> = {auto:'自动',off:'关闭',minimal:'最省',low:'低',medium:'中',high:'高',xhigh:'很高',max:'极高'};
-  function close(){ expanded=false; }
-  async function choose(level:string){close(); if (level!==value && !disabled) await onSelect(level);}
+
+  // Order follows the configured levels; the current value is always offered,
+  // even if the profile's level list no longer contains it.
+  const labels: Record<string, string> = {auto:'自动',off:'关闭',minimal:'最省',low:'低',medium:'中',high:'高',xhigh:'很高',max:'极高'};
+  $: options = Array.from(new Set([...levels, value]));
+
+  async function choose(level: string) {
+    if (level !== value && !disabled) await onSelect(level);
+  }
 </script>
-<svelte:window onkeydown={e => {if(e.key === 'Escape')close();}}/>
-<div class="thinking-control">
-  {#if expanded}<button class="picker-scrim" aria-label="关闭思考等级菜单" onclick={close}></button>{/if}
-  <button class="thinking-control-trigger" aria-expanded={expanded} disabled={disabled} onclick={() => expanded=!expanded}
-    title="思考等级：越高越慢，但更细致。只影响当前任务，不修改已保存的模型配置。"><BrainCircuit size={15}/><span class="thinking-level">{labels[value] || value.toUpperCase()}</span><ChevronDown size={13}/></button>
-  {#if expanded}
-    <div class="thinking-menu" role="group" aria-label="思考等级">
-      <div class="model-menu-heading"><strong>思考等级</strong></div>
-      {#each levels as level (level)}
-        <button class="thinking-menu-row" class:selected={level===value} onclick={() => void choose(level)}>
-          <span>{labels[level] || level.toUpperCase()}</span>{#if level===value}<Check size={15}/>{/if}
-        </button>
-      {/each}
-      <p class="thinking-hint">越高越慢，越细致</p>
-    </div>
-  {/if}
+
+<div class="thinking-control" role="group" aria-label="当前临时思考强度" data-tauri-drag-region="false">
+  <div class="model-menu-heading"><strong>思考强度</strong><span>仅当前任务</span></div>
+  <div class="thinking-options">
+    {#each options as level (level)}
+      <button class="thinking-menu-row" class:selected={level === value}
+        aria-pressed={level === value} {disabled} onclick={() => void choose(level)}>
+        <span>{labels[level] || level.toUpperCase()}</span>
+      </button>
+    {/each}
+  </div>
+  <p class="thinking-hint">越高越慢，越细致；不修改模型默认配置。</p>
 </div>
+
+<style>
+  .thinking-control { margin-top: 6px; border-top: 1px solid var(--hairline); }
+  .thinking-options { display: flex; flex-wrap: wrap; gap: 3px; }
+  .thinking-menu-row { flex: 1 1 52px; justify-content: center; min-width: 0; padding-inline: 6px; }
+  .thinking-menu-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>

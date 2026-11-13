@@ -23,9 +23,9 @@
 </script>
 
 <section class="live-timeline" aria-label="实时任务进度">
-  <div class="live-summary" role="status">
+  <div class="live-summary">
     <LoaderCircle size={15} class="spin"/>
-    <span class="live-stage">{stage}</span>
+    <span class="live-stage" role="status">{stage}</span>
     <span class="live-duration">{duration}</span>
   </div>
 

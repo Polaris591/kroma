@@ -218,6 +218,42 @@ impl ToolRegistry {
         Ok(())
     }
 
+    pub(crate) fn disable_unchanged(&mut self, base: &Self, names: &[String]) {
+        self.tools.retain(|tool| {
+            !names.iter().any(|name| name == tool.name())
+                || !base
+                    .tools
+                    .iter()
+                    .any(|original| Arc::ptr_eq(original, tool))
+        });
+    }
+
+    pub(crate) fn apply_capabilities(
+        &mut self,
+        base: &Self,
+        settings: &crate::capabilities::Capabilities,
+    ) {
+        if !settings.tools {
+            let disabled = crate::app::builtin_tool_names()
+                .into_iter()
+                .filter(|name| settings.items.tools.get(name) != Some(&true))
+                .collect::<Vec<_>>();
+            self.disable_unchanged(base, &disabled);
+        }
+        self.retain_enabled(settings);
+    }
+
+    pub fn retain_enabled(&mut self, settings: &crate::capabilities::Capabilities) {
+        self.tools.retain(|tool| {
+            settings
+                .items
+                .tools
+                .get(tool.name())
+                .copied()
+                .unwrap_or(true)
+        });
+    }
+
     pub fn register_interceptor(&mut self, interceptor: Arc<dyn ToolInterceptor>) {
         self.interceptors.push(interceptor);
     }
@@ -283,7 +319,12 @@ impl ToolRegistry {
         call: &ToolCall,
         ctx: ToolContext<'_>,
     ) -> ToolExecution {
-        if call.kind != "function" {
+        if call.kind != "function"
+            || !self
+                .tools
+                .iter()
+                .any(|tool| tool.name() == call.function.name)
+        {
             return ToolExecution {
                 result: ToolResult::error(
                     json!({"error": format!("unsupported tool: {}", call.function.name)})
@@ -331,12 +372,12 @@ impl ToolRegistry {
                 };
             }
         }
-        // The Agent checks a model-declared edit_file path for nested
+        // The Agent checks a model-declared edit_file/read_file path for nested
         // AGENTS.md before executing a batch. A before hook may rewrite
         // other arguments, but changing the path afterward would bypass that
         // check. Reject only this explicit path change, not general Shell
         // command rewrites, which cannot be safely parsed as file paths.
-        if effective.function.name == "edit_file" {
+        if matches!(effective.function.name.as_str(), "edit_file" | "read_file") {
             let path_of = |arguments: &str| {
                 serde_json::from_str::<Value>(arguments)
                     .ok()
@@ -345,7 +386,7 @@ impl ToolRegistry {
             if path_of(&call.function.arguments) != path_of(&effective.function.arguments) {
                 return ToolExecution {
                     result: ToolResult::error(
-                        "before_tool_call changed edit_file path after project instruction preflight; ask the model to replan with the new file path",
+                        "before_tool_call changed file path after project instruction preflight; ask the model to replan with the new file path",
                     ),
                     warnings: Vec::new(),
                     };
@@ -1207,6 +1248,29 @@ mod tests {
             "before_tool_call failed: rejected by test hook"
         );
         assert!(warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn disabled_item_rejects_dispatch_before_interceptors() {
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(TestTool {
+                name: "disabled",
+                result: ToolResult::ok("must not run"),
+                executions: executions.clone(),
+            }))
+            .unwrap();
+        registry.register_interceptor(Arc::new(RejectBefore));
+        let mut settings = crate::capabilities::Capabilities::default();
+        settings.items.tools.insert("disabled".into(), false);
+        registry.retain_enabled(&settings);
+        assert!(registry.definitions().is_empty());
+        let result = registry
+            .execute(&test_call("disabled", "{}"), test_context())
+            .await;
+        assert!(result.is_error && result.content.contains("unsupported tool"));
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

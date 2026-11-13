@@ -19,8 +19,10 @@ export function createTurnActions(host: DesktopHost) {
       host.restoreFollowups();
       await host.scrollDown();
       success(payload as {saved?: string});
+      return true;
     } catch (failure) {
       host.showError(failure);
+      return false;
     } finally {
       host.rewinding = false;
       host.busy = false;
@@ -35,14 +37,14 @@ export function createTurnActions(host: DesktopHost) {
   async function confirmRewind(restoreFiles: boolean) {
     const target = host.rewindTarget;
     if (!target || host.rewinding) return;
-    host.rewindTarget = null;
-    await applyTurnChange(
+    const succeeded = await applyTurnChange(
       () => api.rewindTurn(target.messageIndex, target.snapshotTurn, restoreFiles),
       payload => {
         const saved = payload.saved;
         host.toast(saved ? `已回退 · 之后的对话保存在分支 ${saved.slice(0, 12)}…` : '已回退');
       },
     );
+    if (succeeded) host.rewindTarget = null;
   }
 
   async function compactNow() {

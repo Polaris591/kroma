@@ -4,7 +4,12 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::HashMap, future::Future, path::Path, pin::Pin, sync::Mutex, time::Duration,
+    collections::HashMap,
+    future::Future,
+    path::Path,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    time::Duration,
 };
 
 /// Temporary image encodings owned by one Agent run. Never persisted, and
@@ -56,6 +61,16 @@ pub struct Usage {
     /// Server-side tool requests the endpoint billed separately, when it
     /// reports them (Responses tool_usage.web_search.num_requests).
     pub web_searches: Option<u64>,
+    /// Subset of `input` the provider reports as *written into* its prompt
+    /// cache for this request (Anthropic `cache_creation_input_tokens`,
+    /// Responses `input_tokens_details.cache_write_tokens`). Cache writes are
+    /// already part of input, so this is never added to it again. `None` means
+    /// the endpoint did not report the field, not a measured zero.
+    pub cache_write: Option<u64>,
+    /// Subset of `cache_write` the endpoint attributes to the one-hour TTL.
+    /// Only Anthropic reports this breakdown today; other protocols stay
+    /// unknown rather than assuming a TTL.
+    pub cache_write_1h: Option<u64>,
 }
 
 pub struct Completion {
@@ -63,6 +78,41 @@ pub struct Completion {
     pub usage: Option<Usage>,
     pub elapsed: Duration,
     pub first_token: Option<Duration>,
+}
+
+/// The provider-facing projection one request actually used. A decorator that
+/// rewrites or extends the caller's messages publishes it so the Agent can
+/// calibrate with the request that was really sent instead of the pre-hook
+/// view. Fully projected by the wrapped backend before publication, so a later
+/// `admitted_projection` describes the same bytes. Held in memory only; never
+/// persisted.
+#[derive(Debug, Clone)]
+pub struct FinalProjection {
+    pub messages: Vec<Message>,
+    pub tools: Vec<Value>,
+    /// True when a request hook replaced messages or tools, so the final bytes
+    /// cannot be proven to be the caller's input plus host additions.
+    pub rewritten: bool,
+    /// Bytes of host-authored reference blocks added after the caller's view.
+    pub reference_bytes: usize,
+    /// Exact host references appended to this request. The Agent journals them
+    /// before the reply, so replay does not depend on process-local caches.
+    pub appended_references: Vec<Message>,
+}
+
+/// Content-free identity of the payload the HTTP layer serialized. Native
+/// protocol transformations (function-to-tool conversion, server-side tool
+/// injection, duplicate local tool removal) happen below the Agent, so they are
+/// reported as counters and hashes instead of staying invisible.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WireObservation {
+    /// Non-cryptographic digest of the serialized request payload.
+    pub payload_fingerprint: String,
+    pub payload_bytes: usize,
+    pub tool_definitions: usize,
+    /// Native tool `type` values the endpoint runs itself.
+    pub native_tools: Vec<String>,
+    pub provider_request_id: Option<String>,
 }
 
 /// Non-secret active connection information. Tool hosts can pass it to a
@@ -234,6 +284,36 @@ pub trait ModelBackend: Send + Sync {
     /// different (pre-hook) view. Cost accounting still records the usage.
     fn usage_matches_projection(&self) -> bool {
         true
+    }
+
+    /// The final projection the last `complete`/`complete_with_activity` call
+    /// sent, when this backend knows it and it differs from the caller's input.
+    /// The Agent uses it for post-response calibration and cache diagnostics.
+    fn final_projection(&self) -> Option<Arc<FinalProjection>> {
+        None
+    }
+
+    /// The projection this backend would send for `messages` using only host
+    /// additions it has already committed to. Admission planning calibrates
+    /// with it. `None` means the next request may still change shape, so the
+    /// caller must keep the conservative byte estimate.
+    fn admitted_projection(&self, _messages: &[Message]) -> Option<Vec<Message>> {
+        None
+    }
+
+    /// Tokens this backend will add to a checkpoint request beyond the supplied
+    /// source, when it can prove the addition. Context planning adds them to the
+    /// checkpoint estimate, so a checkpoint source that fits admits a request
+    /// that still fits after the host's own blocks are inserted. Zero for a
+    /// backend without host additions.
+    fn checkpoint_projection_tokens(&self, _source: &[Message]) -> usize {
+        0
+    }
+
+    /// Content-free identity of the last wire payload, when the provider layer
+    /// built one. Diagnostics only.
+    fn wire_observation(&self) -> Option<WireObservation> {
+        None
     }
 
     /// A tool may mutate external context data used by a request-only model

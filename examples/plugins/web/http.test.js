@@ -3,7 +3,7 @@ const {test, afterEach} = require("node:test");
 const assert = require("node:assert/strict");
 const {createServer} = require("node:http");
 const zlib = require("node:zlib");
-const {download} = require("./http");
+const {download, isPrivateAddress, isPublicDestination} = require("./http");
 const {fetchPage} = require("./web");
 const originalFetch = global.fetch;
 afterEach(() => { global.fetch = originalFetch; });
@@ -57,4 +57,15 @@ test("a real gzip response is decoded by the transport", async t => {
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const response = await download(`http://127.0.0.1:${server.address().port}`);
   assert.equal(response.text, body);
+});
+
+test("isPrivateAddress and isPublicDestination classify local vs public hosts", async () => {
+  assert.equal(isPrivateAddress("127.0.0.1"), true);
+  assert.equal(isPrivateAddress("10.0.0.1"), true);
+  assert.equal(isPrivateAddress("169.254.169.254"), true);
+  assert.equal(isPrivateAddress("::ffff:127.0.0.1"), true);
+  assert.equal(isPrivateAddress("8.8.8.8"), false);
+  assert.equal(await isPublicDestination("http://localhost:3000/x"), false);
+  assert.equal(await isPublicDestination("http://service.internal/x"), false);
+  assert.equal(await isPublicDestination("https://example.org/docs"), true);
 });

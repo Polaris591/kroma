@@ -10,6 +10,10 @@ const apiMock = vi.hoisted(() => ({
   connect: vi.fn(),
   openProject: vi.fn(),
   exportSession: vi.fn(),
+  saveProfile: vi.fn(),
+  setDefaultProfile: vi.fn(),
+  pluginPresentation: vi.fn(),
+  pluginAction: vi.fn(),
 }));
 vi.mock('./api', () => ({ api: apiMock }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(), save: vi.fn() }));
@@ -24,8 +28,7 @@ function bootstrap(sessionId: string, ready = true): Bootstrap {
       context_window: 1000, available_input: 900, tool_names: [],
     },
     sessions: [], profiles: {active: null, profiles: []}, plugins: [], plugin_warnings: [],
-    mcp_project: {configured: false, trusted: false},
-  };
+    };
 }
 
 interface Trace { calls: string[] }
@@ -54,8 +57,6 @@ function fakeHost(state: Record<string, unknown>, trace: Trace): DesktopHost {
     get sessionName() { return '会话'; },
     get taskGeneration() { return state.taskGeneration as number; },
     set taskGeneration(value) { state.taskGeneration = value; },
-    get mcpDismissed() { return false; },
-    set mcpDismissed(value) { state.mcpDismissed = value; },
     guard: createOperationGuard(),
     clearError() { trace.calls.push('clearError'); },
     clearNotice() {},
@@ -92,6 +93,66 @@ beforeEach(() => {
 });
 
 describe('createSessionCommands', () => {
+  it('reports connection failure without replacing the current conversation', async () => {
+    const trace: Trace = { calls: [] };
+    const { host } = freshHost(trace);
+    const previous = host.data;
+    apiMock.connect.mockRejectedValue(new Error('offline'));
+    expect(await createSessionCommands(host).doConnect('model')).toBe(false);
+    expect(host.data).toBe(previous);
+    expect(host.busy).toBe(false);
+    expect(trace.calls).toContain('error:Error: offline');
+  });
+
+  it('reports a ready connection and refuses a busy connection', async () => {
+    const trace: Trace = { calls: [] };
+    const { host, state } = freshHost(trace);
+    const commands = createSessionCommands(host);
+    apiMock.connect.mockResolvedValue(bootstrap('s1'));
+    expect(await commands.doConnect('model')).toBe(true);
+    state.busy = true;
+    expect(await commands.doConnect('another')).toBe(false);
+    expect(apiMock.connect).toHaveBeenCalledOnce();
+  });
+
+  it('does not report an unready bootstrap as connected', async () => {
+    const { host } = freshHost({ calls: [] });
+    apiMock.connect.mockResolvedValue(bootstrap('s1', false));
+    expect(await createSessionCommands(host).doConnect()).toBe(false);
+  });
+
+  it('reports default-profile failure without showing a success message', async () => {
+    const trace: Trace = { calls: [] };
+    const { host } = freshHost(trace);
+    apiMock.setDefaultProfile.mockRejectedValue(new Error('read-only'));
+    expect(await createSessionCommands(host).setDefaultProfile('model')).toBe(false);
+    expect(trace.calls).toContain('error:Error: read-only');
+    expect(trace.calls.some(call => call.startsWith('toast:'))).toBe(false);
+    expect(host.busy).toBe(false);
+  });
+
+  it('updates the saved default only after success', async () => {
+    const { host, state } = freshHost({ calls: [] });
+    const commands = createSessionCommands(host);
+    const profiles = { active: 'model', profiles: [] };
+    apiMock.setDefaultProfile.mockResolvedValue(profiles);
+    expect(await commands.setDefaultProfile('model')).toBe(true);
+    expect(host.data?.profiles).toEqual(profiles);
+    state.busy = true;
+    expect(await commands.setDefaultProfile('another')).toBe(false);
+    expect(apiMock.setDefaultProfile).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a failed reconnect even if that profile was already connected', async () => {
+    const { host } = freshHost({ calls: [] });
+    host.data!.connected_profile = 'model';
+    apiMock.saveProfile.mockResolvedValue(host.data!.profiles);
+    apiMock.connect.mockRejectedValue(new Error('offline'));
+    await expect(createSessionCommands(host).addAndConnectModel({
+      name: 'model', model: 'model', base_url: 'https://example.invalid/v1', protocol: 'chat', reasoning: 'auto',
+    })).rejects.toThrow('配置已保存，但连接未成功');
+  });
+
   it('refuses to start a new session while the host is busy', async () => {
     const trace: Trace = {calls: []};
     const { state, host } = freshHost(trace);
@@ -126,6 +187,32 @@ describe('createSessionCommands', () => {
     resolve(bootstrap('stale'));
     await pending;
     expect(host.data?.snapshot?.session_id).toBe('s1');
+  });
+
+  it('propagates plugin failures so a dialog cannot report false success', async () => {
+    const trace: Trace = {calls: []};
+    const {host} = freshHost(trace);
+    const previous = host.data;
+    apiMock.pluginAction.mockRejectedValue(new Error('插件仍被占用'));
+    await expect(createSessionCommands(host).pluginAction('uninstall', 'demo')).rejects.toThrow('插件仍被占用');
+    expect(host.data).toBe(previous);
+    expect(trace.calls).toContain('error:Error: 插件仍被占用');
+    expect(trace.calls.some(call => call.startsWith('toast:'))).toBe(false);
+  });
+
+  it('starts a plugin retry with fresh feedback instead of leaving the old error visible', async () => {
+    const trace: Trace = {calls: []};
+    const {host} = freshHost(trace);
+    const commands = createSessionCommands(host);
+    apiMock.pluginAction.mockRejectedValueOnce(new Error('retry me')).mockResolvedValueOnce({
+      plugins: [], restart_required: false, message: 'saved',
+    });
+    await expect(commands.pluginAction('set', 'demo', undefined, 'key', 'value')).rejects.toThrow('retry me');
+    trace.calls.length = 0;
+    await commands.pluginAction('set', 'demo', undefined, 'key', 'value');
+    expect(trace.calls[0]).toBe('clearError');
+    expect(trace.calls).toContain('toast:saved');
+    expect(trace.calls.some(call => call.startsWith('error:'))).toBe(false);
   });
 
   it('trims a renamed title and ignores a placeholder session', async () => {

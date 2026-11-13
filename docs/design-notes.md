@@ -473,24 +473,13 @@ These entries are examples; the named server, npm installation and remote
 endpoint are not bundled with Kroma. A server uses **either** `command`
 (`args`, `env`, optional `cwd`) **or** `url` (optional `headers`).
 Use `${ENV_NAME}` placeholders to resolve credentials from the environment.
-Host secret variables (`*_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, cloud and
-provider credentials, database passwords, cookies, and `KROMA_*`) are stripped
-from local stdio children. Project configs are disabled until approved with
-`kroma trust-project`; approval is bound to the project path, the exact config
-bytes, expanded `command`/`args`/`env` values, a project-contained working
-directory, the bytes of the local entry files and (within a bounded 256-file /
-32 MiB scope) the JS/TS modules they reach through explicit relative imports.
-Every referenced module is read and scanned in full, so a relative import
-written after a large prefix is covered too.
-Editing any of those files requires approval again;
-unreferenced `node_modules` trees are not walked. This format changed in v0.4,
-so re-run `kroma trust-project` after upgrading. Approval and revoke operations
-share a cross-process lock, so concurrent writers cannot lose an update or
-revive a revoked project. Config reads stop one byte past the 1 MiB limit, so
-an oversized untrusted project file cannot allocate its full size before it is
-rejected. Project configs may only expand non-secret `MCP_*` and basic path
-environment variables; credential-shaped names are rejected. Set
-`KROMA_TRUST_PROJECT_MCP=1` to approve for one run.
+User and project MCP configs load directly, with project entries overriding
+user entries of the same name. No trust store, approval command or environment
+approval flag is required. Config reads stop one byte past the 1 MiB limit;
+oversized project files are skipped with a warning, and malformed JSON or
+invalid field types are reported as configuration errors. Local stdio children
+inherit the host environment and configured `env` values expand at launch.
+The legacy `kroma trust-project [--revoke]` command is a compatibility no-op.
 
 The default MCP protocol version is `2025-11-25` and uses the standard
 initialize/initialized handshake. To use the newer stateless MCP API, set
@@ -723,7 +712,7 @@ before advertising production-level support.
 - Streaming `reasoning_content` deltas are reassembled into a **separate** assistant-message field, persisted in snapshots and WAL, and replayed with the corresponding tool calls and results. The classic line-oriented CLI outputs only `content`; the TUI may show the persisted reasoning when the user presses Ctrl+R. Saved sessions without the new optional field continue to load.
 - With the `tools` parameter present, DeepSeek thinking mode requires the reasoning field on previous assistant messages. Kroma leaves it intact in un-compacted history, including across restart and `/resume`. Compaction replaces entire old **completed** turns with one checkpoint summary; it never splits a tool call from its results. The raw transcript, including reasoning content, remains on disk. Summaries do not reproduce reasoning verbatim.
 - OpenAI-compatible tool requests now omit the redundant `tool_choice: auto` parameter (DeepSeek V4 thinking can reject it). Older assistant tool-call messages with `content: null` are projected as `content: ""` for provider requests without altering saved raw records.
-- **Opt-in DeepSeek V4 thinking:** set `KROMA_DEEPSEEK_THINKING=enabled` to send `thinking: {"type":"enabled"}`, or set `high`/`max` to additionally send `reasoning_effort`. Leave it unset for providers or gateways that do not accept these fields. This does not auto-detect models or force thinking on; some reverse proxies implement different semantics.
+- **Opt-in DeepSeek V4 thinking:** set `KROMA_DEEPSEEK_THINKING=enabled` to send `thinking: {"type":"enabled"}` plus the saved `reasoning_effort` (an `auto` effort leaves the level to the provider; `off` sends `thinking: {"type":"disabled"}`), or set `high`/`max` to send that explicit effort. Leave it unset for providers or gateways that do not accept these fields. This does not auto-detect models or force thinking on; some reverse proxies implement different semantics.
 
 ## Local diagnostics and lifecycle
 
@@ -809,6 +798,24 @@ head/tail preview. Commands have no output size limit: the entire original
 output remains readable by Shell in smaller slices. The context planner also
 uses an emergency *request-only* preview of unconsumed tool results when an
 old inline output or several results would overflow the hard context limit.
+
+MCP and plugin adapters return complete results. After all result hooks, the
+Agent archives results above 64 KiB / 2 000 lines to
+`<session-id>.tool-output-…txt` and attaches a bounded model preview as metadata.
+The complete post-hook content remains in the WAL: history_search/history_read
+can retrieve it, while model requests and presentation use the preview.
+Neither `content` nor `structuredContent` is discarded by guessing equivalence.
+
+- Archive files are synced before their references are committed. Failure keeps
+  the complete result, records a warning and never re-runs an external operation.
+- Fork/rewind give evidence files independent links/copies with remapped paths.
+- Prune locks confirmed session snapshots before deleting their owned files;
+  it preserves shared catalog maps, lock files and artifacts without a live
+  snapshot (including recoverable trash).
+- `after_tool_result` receives the complete result, before archive/projection.
+  A hook is not a sandbox or a retroactive purge of earlier saved messages.
+- The fixed threshold is conservative, not a measured cost optimum. Reading a
+  preview's omitted portion may cost another tool round; no saving is promised.
 It preserves original saved messages and does not mark unread results as
 consumed. Temporary output captures
 from cancelled/failed commands are removed. New captures belong to their

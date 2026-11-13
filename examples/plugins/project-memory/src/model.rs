@@ -5,9 +5,9 @@ pub const MAX_TEXT_CHARS: usize = 4000;
 pub const KINDS: &[&str] = &["decision", "pitfall", "preference", "reference", "review"];
 /// Kinds the model may write with `memory_remember`.
 pub const TOOL_KINDS: &[&str] = &["preference", "decision", "review"];
-/// A quoted rule is the user's own words: one character is enough because the
-/// quote is stored verbatim instead of being summarized by the model.
-pub const MIN_QUOTE_CHARS: usize = 1;
+/// A quoted rule must anchor at least three meaningful characters from the
+/// user's own message so single characters or punctuation cannot spoof provenance.
+pub const MIN_QUOTE_CHARS: usize = 3;
 pub const MAX_QUOTE_CHARS: usize = MAX_TEXT_CHARS;
 pub const MAX_EVIDENCE_CHARS: usize = 512;
 
@@ -178,18 +178,211 @@ pub fn validate_text(text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Quotes are verbatim user words: bounded and single-purpose.
+/// Quotes are verbatim user words: bounded, meaningful, and secret-free.
 pub fn validate_quote(quote: &str) -> Result<()> {
     let quote = quote.trim();
     let chars = quote.chars().count();
     if !(MIN_QUOTE_CHARS..=MAX_QUOTE_CHARS).contains(&chars) {
         bail!("Quote must contain {MIN_QUOTE_CHARS}..={MAX_QUOTE_CHARS} characters");
     }
+    if quote.chars().filter(|c| c.is_alphanumeric()).count() < MIN_QUOTE_CHARS {
+        bail!("Quote must contain at least {MIN_QUOTE_CHARS} alphanumeric characters");
+    }
     if quote
         .chars()
         .any(|c| c.is_control() && c != '\n' && c != '\t')
     {
         bail!("Quote contains unsupported control characters");
+    }
+    reject_secret_text(quote)?;
+    Ok(())
+}
+
+fn is_token_body(s: &str, allow_dot_slash: bool) -> bool {
+    !s.is_empty()
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || b == b'_'
+                || b == b'-'
+                || (allow_dot_slash && matches!(b, b'.' | b'+' | b'/' | b'=' | b'~'))
+        })
+}
+
+fn is_placeholder_secret(val: &str) -> bool {
+    let lower = val.to_ascii_lowercase();
+    val.starts_with('$')
+        || val.starts_with('<')
+        || [
+            "your",
+            "example",
+            "placeholder",
+            "dummy",
+            "changeme",
+            "test_",
+        ]
+        .iter()
+        .any(|p| lower.starts_with(p))
+        || {
+            let mut chars = val.chars();
+            chars.next().is_some_and(|first| chars.all(|c| c == first))
+        }
+}
+
+fn has_embedded_url_password(text: &str) -> bool {
+    const SCHEMES: &[&str] = &[
+        "http://",
+        "https://",
+        "postgres://",
+        "postgresql://",
+        "mysql://",
+        "redis://",
+        "mongodb://",
+        "amqp://",
+    ];
+    let lower = text.to_ascii_lowercase();
+    let mut offset = 0;
+    while let Some(pos) = lower[offset..].find("://") {
+        let abs = offset + pos;
+        let prefix = &lower[..abs];
+        let matched = SCHEMES
+            .iter()
+            .any(|scheme| prefix.ends_with(&scheme[..scheme.len() - 3]));
+        let after = abs + 3;
+        if matched && after < text.len() {
+            let rest = &text[after..];
+            let authority_end = rest
+                .find(['/', '?', '#', ' ', '\t', '\r', '\n'])
+                .unwrap_or(rest.len());
+            let authority = &rest[..authority_end];
+            if let Some(at) = authority.rfind('@') {
+                let userinfo = &authority[..at];
+                if let Some(colon) = userinfo.find(':') {
+                    let pass = &userinfo[colon + 1..];
+                    if pass.len() >= 6 && !is_placeholder_secret(pass) {
+                        return true;
+                    }
+                }
+            }
+        }
+        offset = after;
+    }
+    false
+}
+
+/// Best-effort rejection of credential/secret literals before persistence.
+/// Error messages start with `refusing to store text:` so CLI paths preserve diagnostics.
+pub fn reject_secret_text(text: &str) -> Result<()> {
+    let upper = text.to_ascii_uppercase();
+    if upper.contains("-----BEGIN ") && upper.contains("PRIVATE KEY-----") {
+        bail!("refusing to store text: private key material detected");
+    }
+    if has_embedded_url_password(text) {
+        bail!("refusing to store text: URL contains embedded credentials");
+    }
+
+    let words: Vec<&str> = text
+        .split(|c: char| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '\'' | '"' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
+                )
+        })
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    for (idx, raw) in words.iter().enumerate() {
+        let tok = raw.trim_end_matches(['.', ':', '!', '?']);
+        if idx > 0
+            && words[idx - 1].eq_ignore_ascii_case("bearer")
+            && tok.len() >= 20
+            && is_token_body(tok, true)
+            && tok.bytes().any(|b| b.is_ascii_digit())
+            && tok.bytes().any(|b| b.is_ascii_alphabetic())
+        {
+            bail!("refusing to store text: bearer token detected");
+        }
+        let prefixed = ["sk-proj-", "sk-ant-", "sk_live_", "rk_live_", "github_pat_"]
+            .iter()
+            .find_map(|p| tok.strip_prefix(p).map(|rest| (*p, rest)));
+        if let Some((_, rest)) = prefixed {
+            if tok.len() >= 20 && is_token_body(rest, false) {
+                bail!("refusing to store text: secret token detected");
+            }
+        }
+        for prefix in ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"] {
+            if let Some(rest) = tok.strip_prefix(prefix) {
+                if rest.len() >= 16 && rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                {
+                    bail!("refusing to store text: GitHub token detected");
+                }
+            }
+        }
+        if let Some(rest) = tok.strip_prefix("sk-") {
+            if rest.len() >= 20 && is_token_body(rest, false) {
+                bail!("refusing to store text: secret API key detected");
+            }
+        }
+        if let Some(rest) = tok.strip_prefix("AIza") {
+            if rest.len() >= 20 && is_token_body(rest, false) {
+                bail!("refusing to store text: API key detected");
+            }
+        }
+        for prefix in ["xoxb-", "xoxp-", "xoxa-", "xoxr-"] {
+            if let Some(rest) = tok.strip_prefix(prefix) {
+                if rest.len() >= 10 && rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                {
+                    bail!("refusing to store text: Slack token detected");
+                }
+            }
+        }
+        if (tok.starts_with("AKIA") || tok.starts_with("ASIA"))
+            && tok.len() == 20
+            && tok[4..]
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        {
+            bail!("refusing to store text: AWS access key ID detected");
+        }
+        if tok.starts_with("eyJ") {
+            let parts: Vec<&str> = tok.split('.').collect();
+            if parts.len() == 3
+                && parts[0].len() >= 10
+                && parts[1].len() >= 10
+                && parts[2].len() >= 8
+                && parts.iter().all(|p| is_token_body(p, true))
+            {
+                bail!("refusing to store text: JWT credential detected");
+            }
+        }
+        if let Some((raw_key, raw_val)) = tok.split_once('=') {
+            let key = raw_key.to_ascii_lowercase();
+            let val = raw_val.trim_matches(|c| matches!(c, '\'' | '"'));
+            let sensitive_key = [
+                "api_key",
+                "apikey",
+                "api-key",
+                "secret_key",
+                "secret-key",
+                "access_token",
+                "access-token",
+                "auth_token",
+                "auth-token",
+                "client_secret",
+                "private_key",
+                "password",
+                "passwd",
+            ]
+            .iter()
+            .any(|k| key == *k || key.ends_with(&format!("_{k}")));
+            if sensitive_key
+                && val.len() >= 12
+                && is_token_body(val, true)
+                && !is_placeholder_secret(val)
+            {
+                bail!("refusing to store text: credential assignment detected");
+            }
+        }
     }
     Ok(())
 }
@@ -231,6 +424,7 @@ pub fn validate_input(input: &NewMemory) -> Result<()> {
         bail!("Unknown memory kind");
     }
     validate_text(&input.text)?;
+    reject_secret_text(&input.text)?;
     validate_paths(&input.paths)?;
     if input.evidence_refs.len() > 8 {
         bail!("At most 8 unverified evidence references are allowed");
@@ -302,11 +496,28 @@ mod tests {
     fn quotes_and_evidence_are_bounded() {
         assert!(validate_quote("").is_err());
         assert!(validate_quote("        ").is_err());
-        assert!(validate_quote("a").is_ok());
+        assert!(validate_quote("a").is_err());
+        assert!(validate_quote("...").is_err());
+        assert!(validate_quote("用中文").is_ok());
+        assert!(validate_quote("用 bun").is_ok());
         assert!(validate_quote("use tabs for indentation").is_ok());
         assert!(validate_quote(&"a".repeat(MAX_QUOTE_CHARS)).is_ok());
         assert!(validate_quote(&"a".repeat(MAX_QUOTE_CHARS + 1)).is_err());
         assert!(validate_evidence_refs(&[String::new()]).is_err());
         assert!(validate_evidence_refs(&["src/lib.rs:12".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn rejects_obvious_secret_literals_without_false_positives_on_prose() {
+        assert!(reject_secret_text("Never hardcode API keys or password=your-placeholder").is_ok());
+        assert!(
+            reject_secret_text("Use OPENAI_API_KEY env var instead of storing secrets").is_ok()
+        );
+        assert!(reject_secret_text("use sk-abcdefghijklmnopqrstuvwxyz1234").is_err());
+        assert!(reject_secret_text("token ghp_1234567890abcdef1234").is_err());
+        assert!(reject_secret_text("aws AKIAIOSFODNN7EXAMPLE").is_err());
+        assert!(reject_secret_text("-----BEGIN OPENSSH PRIVATE KEY-----").is_err());
+        assert!(reject_secret_text("https://alice:s3cr3tPass@db.internal/app").is_err());
+        assert!(reject_secret_text("api_key=live_9876543210abcdef").is_err());
     }
 }

@@ -23,6 +23,10 @@ fn default_plugin_api_version() -> u32 {
     PLUGIN_API_VERSION_V1
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct PluginManifest {
     #[serde(default = "default_plugin_api_version")]
@@ -108,10 +112,19 @@ pub struct PluginDesktopUiSpec {
 }
 
 /// Minimal host-owned layout knobs; plugins never receive raw terminal control.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 pub struct PluginLayoutSpec {
     #[serde(default)]
     pub composer_max_rows: Option<u16>,
+    /// Desktop reading column, in pixels. None keeps the built-in width.
+    #[serde(default)]
+    pub desktop_content_width: Option<u16>,
+    /// "visible" or "hidden": whether the workspace sidebar starts open.
+    #[serde(default)]
+    pub desktop_sidebar: Option<String>,
+    /// "regular" or "compact": spacing and type scale.
+    #[serde(default)]
+    pub desktop_density: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -176,6 +189,10 @@ pub struct PluginToolSpec {
     pub requires_user_context: bool,
     #[serde(default)]
     pub requires_user_attachments: bool,
+    /// Conservative recovery default: unknown plugin tools may mutate the project
+    /// worktree unless the manifest explicitly marks them read-only.
+    #[serde(default = "default_true")]
+    pub may_mutate_worktree: bool,
     /// Optional whole-call deadline for this tool, enforced by the host for
     /// streaming and non-streaming calls alike. A global
     /// `KROMA_PLUGIN_TOOL_TIMEOUT_SECS` value caps it when smaller.
@@ -558,6 +575,7 @@ impl PluginManifest {
                     || tool.invalidates_context
                     || tool.requires_user_context
                     || tool.requires_user_attachments
+                    || !tool.may_mutate_worktree
                     || tool.replace
                     || tool.timeout_secs.is_some()
                     || tool.parameters != empty_parameters()
@@ -682,6 +700,35 @@ impl PluginManifest {
                 {
                     bail!("plugin '{}' has invalid UI layout dimensions", self.id);
                 }
+                if layout
+                    .desktop_content_width
+                    .is_some_and(|width| !(360..=1400).contains(&width))
+                {
+                    bail!(
+                        "plugin '{}' desktop content width must be between 360 and 1400 pixels",
+                        self.id
+                    );
+                }
+                if layout
+                    .desktop_sidebar
+                    .as_deref()
+                    .is_some_and(|value| !matches!(value, "visible" | "hidden"))
+                {
+                    bail!(
+                        "plugin '{}' desktop sidebar must be 'visible' or 'hidden'",
+                        self.id
+                    );
+                }
+                if layout
+                    .desktop_density
+                    .as_deref()
+                    .is_some_and(|value| !matches!(value, "regular" | "compact"))
+                {
+                    bail!(
+                        "plugin '{}' desktop density must be 'regular' or 'compact'",
+                        self.id
+                    );
+                }
             }
             if !ui.activity_frames.is_empty()
                 && (ui.activity_frames.len() < 2
@@ -733,10 +780,10 @@ impl PluginManifest {
                 }
                 if !matches!(
                     desktop.slot.as_str(),
-                    "sidebar" | "tab" | "above_composer" | "panel"
+                    "sidebar" | "tab" | "above_composer" | "panel" | "workspace"
                 ) {
                     bail!(
-                        "plugin '{}' desktop UI slot '{}' must be sidebar, tab, above_composer, or panel",
+                        "plugin '{}' desktop UI slot '{}' must be sidebar, tab, above_composer, panel, or workspace",
                         self.id,
                         desktop.slot
                     );
@@ -841,7 +888,7 @@ const reply = (request, content, extra = {}) => {
   );
 };
 
-const interface_ = readline.createInterface({ input: process.stdin });
+const interface_ = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 interface_.on("line", (line) => {
   let request;
   try {

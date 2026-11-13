@@ -377,10 +377,105 @@ async fn skills_expose_metadata_and_load_on_demand() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn configured_inventory_loads_directly_without_secrets() -> Result<()> {
+    const CHILD: &str = "KROMA_TEST_MCP_INVENTORY";
+    if let Ok(mode) = std::env::var(CHILD) {
+        let workdir = std::env::current_dir()?;
+        let summaries = serde_json::to_value(kroma::mcp::configured_server_summaries(&workdir)?)?;
+        let expected = if mode == "merged" {
+            json!([
+                {"name":"local","transport":"stdio","source":"user"},
+                {"name":"remote","transport":"http","source":"project"}
+            ])
+        } else {
+            json!([{"name":"override","transport":"stdio","source":"user"}])
+        };
+        assert_eq!(summaries, expected);
+        return Ok(());
+    }
+
+    let dir = test_directory("mcp-inventory")?;
+    let home = dir.join("home");
+    fs::create_dir_all(home.join(".kroma"))?;
+    fs::write(home.join(".kroma/trusted-mcp.json"), "invalid old store")?;
+    fs::write(
+        home.join(".kroma/mcp.json"),
+        serde_json::to_vec(&json!({"mcpServers":{
+            "local":{"command":"missing-command","env":{"SECRET":"env-secret"}},
+            "remote":{"command":"replaced-by-project"}
+        }}))?,
+    )?;
+    fs::write(
+        dir.join(".kroma/mcp.json"),
+        serde_json::to_vec(&json!({"mcpServers":{"remote":{
+            "url":"https://user:url-secret@example.com/mcp?token=url-secret",
+            "headers":{"Authorization":"Bearer header-secret"},
+            "env":{"SECRET":"${UNSET_SECRET}"}
+        }}}))?,
+    )?;
+    let alternate = dir.join("alternate.json");
+    fs::write(
+        &alternate,
+        br#"{"mcpServers":{"override":{"command":"missing-command"}}}"#,
+    )?;
+    // Isolate environment changes in child processes so parallel tests do not
+    // inherit a fake HOME, an override path or the removed approval variable.
+    for mode in ["merged", "override"] {
+        let mut child = std::process::Command::new(std::env::current_exe()?);
+        child
+            .args([
+                "--exact",
+                "configured_inventory_loads_directly_without_secrets",
+                "--nocapture",
+            ])
+            .current_dir(&dir)
+            .env(CHILD, mode)
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("KROMA_TRUST_PROJECT_MCP", "0")
+            .env_remove("KROMA_MCP_CONFIG");
+        if mode == "override" {
+            child.env("KROMA_MCP_CONFIG", &alternate);
+        }
+        let output = child.output()?;
+        assert!(output.status.success(), "{mode}: {output:?}");
+    }
+    assert_eq!(
+        fs::read_to_string(home.join(".kroma/trusted-mcp.json"))?,
+        "invalid old store"
+    );
+    assert!(!home.join(".kroma/trusted-mcp.json.lock").exists());
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn legacy_trust_cli_is_an_explicit_noop() -> Result<()> {
+    let dir = test_directory("mcp-trust-cli")?;
+    let home = dir.join("home");
+    fs::create_dir_all(&home)?;
+    for args in [vec!["trust-project"], vec!["trust-project", "--revoke"]] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_kroma"))
+            .args(args)
+            .current_dir(&dir)
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .output()?;
+        assert!(output.status.success(), "{output:?}");
+        let text = String::from_utf8(output.stdout)?;
+        assert!(text.contains("obsolete and has no effect"), "{text}");
+        assert!(text.contains("approval is not required"), "{text}");
+    }
+    assert!(!home.join(".kroma/trusted-mcp.json").exists());
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test]
-async fn project_mcp_config_is_inert_until_explicitly_trusted() -> Result<()> {
-    let dir = test_directory("mcp-project-trust")?;
+async fn project_mcp_config_runs_without_approval() -> Result<()> {
+    let dir = test_directory("mcp-project-direct")?;
     let marker = dir.join("executed-by-project-mcp");
     fs::write(
         dir.join(".kroma/mcp.json"),
@@ -393,22 +488,10 @@ async fn project_mcp_config_is_inert_until_explicitly_trusted() -> Result<()> {
     let mut tools = ToolRegistry::builtin();
     let report = kroma::mcp::register_configured_project_only_report(&mut tools, &dir).await?;
     assert_eq!(report.tools, 0);
-    assert!(!marker.exists(), "untrusted project MCP must not execute");
-    assert!(
-        report
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("trust-project")),
-        "missing trust warning: {:?}",
-        report.warnings
-    );
-
-    // The explicit integration seam still runs the same config.
-    let _ = register_configured_allow_project(&mut tools, &dir).await?;
-    assert!(
-        marker.exists(),
-        "explicitly trusted project MCP did not run"
-    );
+    assert!(marker.exists(), "project MCP config did not run directly");
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    // This fixture exits without speaking MCP; startup was attempted, not gated.
+    assert_eq!(report.unavailable.len(), 1);
     drop(tools);
     fs::remove_dir_all(dir)?;
     Ok(())
@@ -416,8 +499,8 @@ async fn project_mcp_config_is_inert_until_explicitly_trusted() -> Result<()> {
 
 #[cfg(windows)]
 #[tokio::test]
-async fn project_mcp_config_is_inert_until_explicitly_trusted_windows() -> Result<()> {
-    let dir = test_directory("mcp-project-trust-windows")?;
+async fn project_mcp_config_runs_without_approval_windows() -> Result<()> {
+    let dir = test_directory("mcp-project-direct-windows")?;
     let marker = dir.join("executed-by-project-mcp");
     fs::write(
         dir.join(".kroma/mcp.json"),
@@ -430,20 +513,9 @@ async fn project_mcp_config_is_inert_until_explicitly_trusted_windows() -> Resul
     let mut tools = ToolRegistry::builtin();
     let report = kroma::mcp::register_configured_project_only_report(&mut tools, &dir).await?;
     assert_eq!(report.tools, 0);
-    assert!(!marker.exists(), "untrusted project MCP must not execute");
-    assert!(
-        report
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("trust-project")),
-        "missing trust warning: {:?}",
-        report.warnings
-    );
-    let _ = register_configured_allow_project(&mut tools, &dir).await?;
-    assert!(
-        marker.exists(),
-        "explicitly trusted project MCP did not run"
-    );
+    assert!(marker.exists(), "project MCP config did not run directly");
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(report.unavailable.len(), 1);
     drop(tools);
     // Termination is requested on drop; Windows can retain the child's cwd
     // briefly. Wait for actual handle release, not a fixed scheduling delay.

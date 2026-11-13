@@ -3,14 +3,28 @@
  * These are independent user turns sent through the existing Agent after the
  * current turn finishes. Never auto-replay them on application startup:
  * interrupted work must be resumed deliberately to avoid duplicate edits.
+ *
+ * Attachments are copied into the private store when the task is queued, so
+ * editing or deleting the source file afterwards cannot change a queued task.
+ * Only the stored paths are persisted; names are derived for display.
  */
 export interface FollowupTask {
   id: string;
   text: string;
+  paths: string[];
+}
+
+/** A copied attachment as reported by the native queue-snapshot command. */
+export interface PreparedFollowupAttachment {
+  path: string;
+  name?: string | null;
+  kind?: string | null;
+  bytes?: number | null;
 }
 
 export const MAX_FOLLOWUPS = 12;
 export const MAX_FOLLOWUP_LENGTH = 12000;
+const MAX_PATH_LENGTH = 4096;
 const PREFIX = 'kroma.desktop.followups.v1:';
 
 export interface QueueStorage {
@@ -32,6 +46,20 @@ export function followupKey(project: string, sessionId: string): string {
     ':' + encodeURIComponent(sessionId || 'unknown');
 }
 
+function cleanPaths(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const paths: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string' || !entry || entry.length > MAX_PATH_LENGTH) continue;
+    if (seen.has(entry)) continue;
+    seen.add(entry);
+    paths.push(entry);
+    if (paths.length >= 8) break;
+  }
+  return paths;
+}
+
 export function parseFollowups(raw: string | null | undefined): FollowupTask[] {
   if (!raw || raw.length > 200000) return [];
   try {
@@ -40,11 +68,14 @@ export function parseFollowups(raw: string | null | undefined): FollowupTask[] {
     return value.slice(0, MAX_FOLLOWUPS).flatMap((item: unknown) => {
       if (!item || typeof item !== 'object') return [];
       const record = item as Record<string, unknown>;
-      if (typeof record.id !== 'string' || typeof record.text !== 'string' ||
-          !record.id || !record.text.trim()) return [];
+      const paths = cleanPaths(record.paths);
+      if (typeof record.id !== 'string' || typeof record.text !== 'string' || !record.id) return [];
+      if (!record.text.trim() && !paths.length) return [];
       return [{
         id: record.id.slice(0, 80),
         text: record.text.slice(0, MAX_FOLLOWUP_LENGTH),
+        // Older tasks simply have no attachments.
+        paths,
       }];
     });
   } catch {
@@ -61,20 +92,27 @@ export function loadFollowups(store: QueueStorage | null, key: string): Followup
 export function saveFollowups(store: QueueStorage | null, key: string, tasks: FollowupTask[]) {
   if (!store) return;
   try {
-    if (tasks.length) store.setItem(key, JSON.stringify(tasks));
-    else store.removeItem(key);
+    if (tasks.length) {
+      // Persist only durable fields, never display or validation state.
+      store.setItem(key, JSON.stringify(tasks.map(task => ({
+        id: task.id, text: task.text, paths: task.paths,
+      }))));
+    } else store.removeItem(key);
   } catch {
     // An inaccessible or full WebView local storage must not break the UI.
   }
 }
 
 export function enqueueFollowup(
-  tasks: readonly FollowupTask[], text: string, id: string,
+  tasks: readonly FollowupTask[],
+  text: string,
+  id: string,
+  paths: readonly string[] = [],
 ): FollowupTask[] | null {
-  if (tasks.length >= MAX_FOLLOWUPS || !text.trim() || text.length > MAX_FOLLOWUP_LENGTH) {
-    return null;
-  }
-  return [...tasks, {id, text: text.trim()}];
+  const attachments = cleanPaths([...paths]);
+  if (tasks.length >= MAX_FOLLOWUPS || (!text.trim() && !attachments.length)) return null;
+  if (text.length > MAX_FOLLOWUP_LENGTH) return null;
+  return [...tasks, {id, text: text.trim(), paths: attachments}];
 }
 
 export function shouldStartNextFollowup(
@@ -94,4 +132,9 @@ export function moveFollowup(
   const result = [...tasks];
   [result[index], result[target]] = [result[target], result[index]];
   return result;
+}
+
+/** A queued task's label when it only carries attachments. */
+export function followupLabel(task: FollowupTask): string {
+  return task.text || '（仅附件）';
 }

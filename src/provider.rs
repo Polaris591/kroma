@@ -8,10 +8,11 @@ use reqwest::{header::RETRY_AFTER, redirect, Client, StatusCode};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashSet},
     fmt,
     sync::atomic::{AtomicBool, Ordering},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
 };
 
@@ -286,7 +287,10 @@ fn with_reported_usage(error: anyhow::Error, usage: Option<Usage>) -> anyhow::Er
 }
 
 fn image_capability_rejection(error: &anyhow::Error) -> bool {
-    let Some(http) = error.downcast_ref::<ModelHttpError>() else {
+    let Some(http) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ModelHttpError>())
+    else {
         return false;
     };
     if http.status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
@@ -540,12 +544,22 @@ impl Usage {
                 .or_else(|| value.get("reasoning_tokens"))
                 .and_then(Value::as_u64),
             web_searches: None,
+            // Newer OpenAI and compatible endpoints report cache writes in the
+            // input details. The value is part of the already-reported input
+            // tokens; keeping it separate would double count the request.
+            cache_write: value
+                .pointer("/prompt_tokens_details/cache_write_tokens")
+                .or_else(|| value.pointer("/input_tokens_details/cache_write_tokens"))
+                .and_then(Value::as_u64),
+            // OpenAI protocols report no TTL split; unknown stays unknown.
+            cache_write_1h: None,
         };
         if usage.reasoning.is_some()
             || usage.input.is_some()
             || usage.output.is_some()
             || usage.total.is_some()
             || usage.cached.is_some()
+            || usage.cache_write.is_some()
         {
             Some(usage)
         } else {
@@ -665,11 +679,7 @@ impl StreamResult {
         }
         let message = Message {
             role: "assistant".to_string(),
-            content: if self.content.is_empty() && calls.is_empty() {
-                None
-            } else {
-                Some(self.content)
-            },
+            content: Some(self.content),
             reasoning_content: self.reasoning_content,
             tool_calls: if calls.is_empty() { None } else { Some(calls) },
             tool_call_id: None,
@@ -795,6 +805,30 @@ pub struct ModelClient {
     /// Sticky within this client: a gateway that refused the field once keeps
     /// receiving a request without it.
     native_web_search_rejected: Arc<AtomicBool>,
+    /// Explicit provider cache policy. Empty means today's defaults; nothing
+    /// here is inferred from a model name, host or gateway vendor.
+    cache_policy: CachePolicy,
+    /// Sticky within this client: a checkpoint that was refused for carrying
+    /// server-side tool definitions plus `tool_choice: none` falls back to the
+    /// tool-free payload instead of failing compaction on every later turn.
+    checkpoint_native_tools_rejected: Arc<AtomicBool>,
+    /// Content-free identity of the last serialized foreground payload.
+    wire: Arc<Mutex<Option<crate::model::WireObservation>>>,
+}
+
+/// Explicit prompt-cache controls supplied by a saved profile. Each field is
+/// validated when the profile loads; an unsupported combination is rejected
+/// there instead of being sent and silently ignored by a gateway.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CachePolicy {
+    /// Anthropic automatic-breakpoint TTL: `5m` (default) or `1h`.
+    pub anthropic_ttl: Option<String>,
+    /// Keep one explicit breakpoint on the stable system prefix so a changing
+    /// conversation tail cannot move the whole cached prefix.
+    pub anthropic_stable_breakpoint: bool,
+    /// Explicit Responses `prompt_cache_key`. Never generated automatically:
+    /// a key does not guarantee a hit and some models ignore it.
+    pub responses_prompt_cache_key: Option<String>,
 }
 
 enum CompletionStream {
@@ -929,6 +963,8 @@ fn combine_apec_usage(first: Option<Usage>, second: Option<Usage>) -> Option<Usa
         cached: add(first.cached, second.cached),
         reasoning: add(first.reasoning, second.reasoning),
         web_searches: None,
+        cache_write: add(first.cache_write, second.cache_write),
+        cache_write_1h: add(first.cache_write_1h, second.cache_write_1h),
     })
 }
 
@@ -1110,6 +1146,9 @@ impl ModelClient {
             stream_idle_timeout: Duration::from_secs(300),
             native_web_search: false,
             native_web_search_rejected: Arc::new(AtomicBool::new(false)),
+            cache_policy: CachePolicy::default(),
+            checkpoint_native_tools_rejected: Arc::new(AtomicBool::new(false)),
+            wire: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -1142,6 +1181,12 @@ impl ModelClient {
 
     pub fn with_output_tokens(mut self, requested: Option<usize>) -> Self {
         self.requested_output = requested;
+        self
+    }
+
+    /// Apply validated provider cache controls from a saved profile.
+    pub fn with_cache_policy(mut self, policy: CachePolicy) -> Self {
+        self.cache_policy = policy;
         self
     }
 
@@ -1323,20 +1368,10 @@ impl ModelClient {
         // Suppress a duplicate local search definition only while the
         // server-side tool really is active. If a proxy rejects native
         // search, the same task's retry can expose the generic web plugin.
-        let filtered_tools;
-        let tools = if self.native_web_search() {
-            filtered_tools = tools
-                .iter()
-                .filter(|tool| tool["function"]["name"] != "web_search")
-                .cloned()
-                .collect::<Vec<_>>();
-            filtered_tools.as_slice()
-        } else {
-            tools
-        };
-        match self.protocol {
+        let tools = self.projected_tools(tools);
+        let request = match self.protocol {
             ApiProtocol::Chat => {
-                let mut value = self.chat_payload_with_tools(messages, tools);
+                let mut value = self.chat_payload_with_tools(messages, &tools);
                 if let Some(items) = value.get_mut("messages").and_then(Value::as_array_mut) {
                     for (item, message) in items.iter_mut().zip(messages.iter()) {
                         if message.role == "user" {
@@ -1369,13 +1404,13 @@ impl ModelClient {
                         &self.reasoning_effort
                     });
                 }
-                Ok(value)
+                value
             }
             ApiProtocol::Responses => {
                 let mut request = responses::payload_with_cache(
                     &self.model,
                     messages,
-                    tools,
+                    &tools,
                     Some(output.unwrap_or(4096)),
                     self.reasoning_override
                         .read()
@@ -1396,13 +1431,18 @@ impl ModelClient {
                         }
                     }
                 }
-                Ok(request)
+                // Explicit user configuration only: never generated, because a
+                // key does not guarantee a cache hit on any endpoint.
+                if let Some(key) = &self.cache_policy.responses_prompt_cache_key {
+                    request["prompt_cache_key"] = json!(key);
+                }
+                request
             }
             ApiProtocol::Anthropic => {
                 let mut request = anthropic::payload_with_cache(
                     &self.model,
                     messages,
-                    tools,
+                    &tools,
                     output.unwrap_or(4096),
                     self.reasoning_override
                         .read()
@@ -1412,6 +1452,7 @@ impl ModelClient {
                     &self.model_info,
                     &self.opaque_reasoning_origin(),
                     images,
+                    &self.cache_settings(),
                 )?;
                 if self.anthropic_cache_rejected.load(Ordering::Relaxed) {
                     request.as_object_mut().unwrap().remove("cache_control");
@@ -1425,8 +1466,68 @@ impl ModelClient {
                         .or_insert_with(|| json!([]));
                     definitions.as_array_mut().unwrap().extend(native);
                 }
-                Ok(request)
+                request
             }
+        };
+        self.remember_wire(&request);
+        Ok(request)
+    }
+
+    /// Local tool definitions the wire request may carry. Suppressing a
+    /// duplicate local `web_search` is a wire transformation, so the coding
+    /// request and its checkpoint must make the same decision for the cached
+    /// tool prefix to match.
+    fn projected_tools<'a>(&self, tools: &'a [Value]) -> Cow<'a, [Value]> {
+        if self.native_web_search() {
+            Cow::Owned(
+                tools
+                    .iter()
+                    .filter(|tool| tool["function"]["name"] != "web_search")
+                    .cloned()
+                    .collect(),
+            )
+        } else {
+            Cow::Borrowed(tools)
+        }
+    }
+
+    fn cache_settings(&self) -> anthropic::CacheSettings {
+        anthropic::CacheSettings {
+            ttl: self.cache_policy.anthropic_ttl.clone(),
+            stable_breakpoint: self.cache_policy.anthropic_stable_breakpoint,
+        }
+    }
+
+    /// Record a content-free identity of the payload the provider layer built.
+    /// Diagnostics only: the payload itself is not retained, and nothing is
+    /// computed (the request is not serialized twice) unless the opt-in cache
+    /// trace is enabled.
+    fn remember_wire(&self, payload: &Value) {
+        if !crate::cache_trace::CacheTrace::enabled() {
+            return;
+        }
+        let Ok(bytes) = serde_json::to_vec(payload) else {
+            return;
+        };
+        let native_tools = payload["tools"]
+            .as_array()
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter(|tool| tool["type"] != "function")
+                    .filter_map(|tool| tool["type"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let observation = crate::model::WireObservation {
+            payload_fingerprint: format!("{:016x}", crate::cache_trace::fingerprint(&bytes)),
+            payload_bytes: bytes.len(),
+            tool_definitions: payload["tools"].as_array().map_or(0, Vec::len),
+            native_tools,
+            provider_request_id: None,
+        };
+        if let Ok(mut wire) = self.wire.lock() {
+            *wire = Some(observation);
         }
     }
 
@@ -1558,7 +1659,7 @@ impl ModelClient {
         let active_turn = active_turn.unwrap_or_else(|| {
             messages
                 .iter()
-                .rposition(|message| message.role == "user")
+                .rposition(crate::protocol::is_actual_user_message)
                 .map_or(0, |index| index + 1)
         });
         let replay_reasoning = !tools.is_empty()
@@ -1567,6 +1668,10 @@ impl ModelClient {
         let expected_origin = self.chat_reasoning_origin();
         if let Some(items) = payload.get_mut("messages").and_then(Value::as_array_mut) {
             for (index, message) in items.iter_mut().enumerate() {
+                if messages[index].role == "tool" {
+                    message["content"] =
+                        json!(crate::tool_archive::model_content(&messages[index]));
+                }
                 let origin = messages[index]
                     .provider_items
                     .as_deref()
@@ -1638,8 +1743,21 @@ impl ModelClient {
             None => {
                 if let Some(mode) = &self.deepseek_thinking {
                     payload["thinking"] = json!({"type":"enabled"});
-                    if mode != "enabled" {
-                        payload["reasoning_effort"] = json!(mode);
+                    match mode.as_str() {
+                        // "high" and "max" are explicit efforts and keep their
+                        // existing precedence over the saved reasoning level.
+                        "high" | "max" => payload["reasoning_effort"] = json!(mode),
+                        // "enabled" is only a mode: the saved level supplies the
+                        // effort. This makes a profile saved as
+                        // `deepseek_thinking=enabled` + `reasoning_effort=max`
+                        // send the same "max" that `reasoning_level()` shows.
+                        "enabled" if self.reasoning_effort == "off" => {
+                            payload["thinking"] = json!({"type":"disabled"});
+                        }
+                        "enabled" if self.reasoning_effort != "auto" => {
+                            payload["reasoning_effort"] = json!(self.reasoning_effort.as_str());
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1741,6 +1859,7 @@ impl ModelClient {
                 Err(error)
                     if !received_protocol_data
                         && !usage_fallback
+                        && !self.usage_stream_rejected.load(Ordering::Relaxed)
                         && self.protocol == ApiProtocol::Chat
                         && rejected_request_field(&error, &["stream_options"]) =>
                 {
@@ -2064,11 +2183,59 @@ impl ModelClient {
         output_tokens: usize,
         max_completion_tokens: usize,
     ) -> Result<SummaryResult> {
+        let first = self
+            .checkpoint_completion_attempt(
+                messages,
+                tools,
+                instruction,
+                output_tokens,
+                max_completion_tokens,
+            )
+            .await;
+        match first {
+            Err(error)
+                if !self
+                    .checkpoint_native_tools_rejected
+                    .load(Ordering::Relaxed)
+                    && !self.checkpoint_native_tools().is_empty()
+                    && rejected_request_field(&error, &["tool_choice"]) =>
+            {
+                // The endpoint refused `tool_choice: none`, so this protocol
+                // cannot both keep the native tool prefix and forbid invoking
+                // it. Fall back to the tool-free checkpoint (a documented cold
+                // cache for this pattern) instead of failing compaction or
+                // risking another paid search.
+                self.checkpoint_native_tools_rejected
+                    .store(true, Ordering::Relaxed);
+                crate::runtime_log!(
+                    "[compact] gateway rejected tool_choice: none; checkpoints stop repeating native search tools"
+                );
+                self.checkpoint_completion_attempt(
+                    messages,
+                    tools,
+                    instruction,
+                    output_tokens,
+                    max_completion_tokens,
+                )
+                .await
+            }
+            other => other,
+        }
+    }
+
+    async fn checkpoint_completion_attempt(
+        &self,
+        messages: &[Message],
+        tools: &[Value],
+        instruction: &str,
+        output_tokens: usize,
+        max_completion_tokens: usize,
+    ) -> Result<SummaryResult> {
         let mut conversation = messages.to_vec();
         conversation.push(Message::new("user", instruction));
         let active_turn = messages
             .iter()
-            .rposition(|message| message.role == "user")
+            .rposition(crate::protocol::is_actual_user_message)
             .map_or(0, |index| index + 1);
         let cache_max_tokens = match self.protocol {
             // Chat omits max_tokens unless the profile explicitly requested
@@ -2108,10 +2275,17 @@ impl ModelClient {
         max_tokens: Option<usize>,
         active_turn: usize,
     ) -> Result<Value> {
+        // The checkpoint reuses the coding request's cached prefix, so it must
+        // make the same local-tool decision: a duplicate local `web_search`
+        // stays out while the endpoint's own search tool is active.
+        let tools = self.projected_tools(tools);
+        // Server-side tool definitions are part of the cached prefix. Keep them
+        // only when the protocol can also forbid invoking them in this turn.
+        let native = self.checkpoint_native_tools();
         match self.protocol {
             ApiProtocol::Chat => {
                 let mut payload =
-                    self.chat_payload_with_tools_active(conversation, tools, Some(active_turn));
+                    self.chat_payload_with_tools_active(conversation, &tools, Some(active_turn));
                 if let Some(items) = payload.get_mut("messages").and_then(Value::as_array_mut) {
                     for (item, message) in items.iter_mut().zip(conversation.iter()) {
                         if message.role == "user" {
@@ -2145,16 +2319,21 @@ impl ModelClient {
                 let mut payload = responses::payload_with_cache_at(
                     &self.model,
                     conversation,
-                    tools,
+                    &tools,
                     Some(max_tokens.unwrap_or(4096)),
                     &effort,
                     &self.opaque_reasoning_origin(),
                     None,
                     Some(active_turn),
-                    // Checkpoints never repeat a paid server-side search.
-                    &[],
+                    &native,
                 )?;
                 payload["stream"] = json!(false);
+                if !native.is_empty() {
+                    payload["tool_choice"] = json!("none");
+                }
+                if let Some(key) = &self.cache_policy.responses_prompt_cache_key {
+                    payload["prompt_cache_key"] = json!(key);
+                }
                 if self.reasoning_summary_rejected.load(Ordering::Relaxed) {
                     if let Some(reasoning) =
                         payload.get_mut("reasoning").and_then(Value::as_object_mut)
@@ -2172,21 +2351,46 @@ impl ModelClient {
                 let mut payload = anthropic::payload_with_cache_at(
                     &self.model,
                     conversation,
-                    tools,
+                    &tools,
                     max_tokens.unwrap_or(4096),
                     &effort,
                     &self.model_info,
                     &self.opaque_reasoning_origin(),
                     None,
                     Some(active_turn),
+                    &self.cache_settings(),
                 )?;
                 payload["stream"] = json!(false);
                 if self.anthropic_cache_rejected.load(Ordering::Relaxed) {
                     payload.as_object_mut().unwrap().remove("cache_control");
                 }
+                if !native.is_empty() {
+                    let definitions = payload
+                        .as_object_mut()
+                        .unwrap()
+                        .entry("tools")
+                        .or_insert_with(|| json!([]));
+                    definitions.as_array_mut().unwrap().extend(native);
+                    payload["tool_choice"] = json!({"type":"none"});
+                }
                 Ok(payload)
             }
         }
+    }
+
+    /// Server-side tool definitions a checkpoint may keep for cache parity.
+    /// Empty when native search is off, when the gateway already refused the
+    /// field, or when a previous checkpoint proved it cannot also forbid
+    /// invoking the tool. A definition without that guarantee would let a
+    /// summary request run (and pay for) another server-side search.
+    fn checkpoint_native_tools(&self) -> Vec<Value> {
+        if self
+            .checkpoint_native_tools_rejected
+            .load(Ordering::Relaxed)
+        {
+            return Vec::new();
+        }
+        self.server_side_tools()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2209,6 +2413,11 @@ impl ModelClient {
             .context("model response headers idle timeout")?
             .context("model request failed")?;
         let status = response.status();
+        if let Ok(mut observation) = self.wire.lock() {
+            if let Some(observation) = observation.as_mut() {
+                observation.provider_request_id = provider_request_id(&response);
+            }
+        }
         if !status.is_success() {
             let retry_after_raw = response.headers().contains_key(RETRY_AFTER);
             let retry_after = parse_retry_after(&response);
@@ -2340,6 +2549,17 @@ impl ModelClient {
     }
 }
 
+/// Provider request identifier used for log and support correlation, when the
+/// endpoint sends one. Never a secret, and never written into the transcript.
+fn provider_request_id(response: &reqwest::Response) -> Option<String> {
+    ["x-request-id", "request-id", "openai-request-id"]
+        .iter()
+        .find_map(|name| response.headers().get(*name))
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.chars().take(128).collect::<String>())
+        .filter(|value| !value.trim().is_empty())
+}
+
 /// Report completion of the server-side calls already shown to the user.
 fn drain_native_activity(
     result: &mut CompletionStream,
@@ -2391,10 +2611,13 @@ impl ModelBackend for ModelClient {
             provider_profile: None,
         })
     }
+    fn wire_observation(&self) -> Option<crate::model::WireObservation> {
+        self.wire.lock().ok().and_then(|wire| wire.clone())
+    }
     fn project_for_budget(&self, messages: &mut [Message]) {
         let active_turn = messages
             .iter()
-            .rposition(|msg| msg.role == "user")
+            .rposition(crate::protocol::is_actual_user_message)
             .unwrap_or(0);
         let expected_chat = self.chat_reasoning_origin();
         let expected_opaque = self.opaque_reasoning_origin();
@@ -2402,6 +2625,7 @@ impl ModelBackend for ModelClient {
             self.uses_deepseek_tool_reasoning() && self.reasoning_level().as_deref() != Some("off");
         for (index, message) in messages.iter_mut().enumerate() {
             if message.role == "tool" {
+                crate::tool_archive::project_message(message);
                 // The tool's error bit is used by some adapters but its
                 // metadata envelope is not transmitted to any provider.
                 message.provider_items = None;
@@ -2659,6 +2883,38 @@ fn is_timeout(error: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foundation_native_continuation_keeps_prior_text_and_signed_blocks() {
+        let client = ModelClient::new("http://127.0.0.1:9/v1", None, "claude".into())
+            .unwrap()
+            .with_protocol("anthropic")
+            .unwrap();
+        let mut continuation = Message::new("user", "continue");
+        continuation.provider_items = Some(vec![json!({"type":"kroma_continuation"})]);
+        let native = vec![
+            json!({"type":"thinking","thinking":"reason","signature":"opaque"}),
+            json!({"type":"text","text":"B"}),
+        ];
+        let mut final_reply = Message::new("assistant", "B");
+        final_reply.provider_items = Some(vec![
+            json!({"type":"kroma_anthropic_content_blocks","blocks":native}),
+        ]);
+        let history = vec![
+            Message::new("system", "system"),
+            Message::new("user", "write"),
+            Message::new("assistant", "A"),
+            continuation,
+            final_reply,
+        ];
+        let payload = client.payload(&history, &[], None).unwrap();
+        assert_eq!(payload["messages"][1]["content"][0]["text"], "A");
+        assert_eq!(
+            payload["messages"][3]["content"],
+            json!(native),
+            "native response is never rewritten to merge display text"
+        );
+    }
 
     #[test]
     fn checkpoint_attempts_allow_long_attempts_and_one_retry() {
@@ -2920,6 +3176,178 @@ mod tests {
         assert_eq!(
             prefix[2]["reasoning_content"],
             "keep this tool-turn thought"
+        );
+    }
+
+    #[test]
+    fn checkpoint_keeps_the_native_search_tool_prefix_and_forbids_invoking_it() {
+        // Both native-search protocols put the tool definitions in the cached
+        // prefix. The checkpoint keeps them and adds the one field that stops
+        // the summary from running (and paying for) another search.
+        let conversation = vec![
+            Message::new("system", "coding agent"),
+            Message::new("user", "find the upstream issue"),
+        ];
+        for protocol in ["responses", "anthropic"] {
+            let client = ModelClient::new("http://127.0.0.1:9/v1", None, "native".into())
+                .unwrap()
+                .with_protocol(protocol)
+                .unwrap()
+                .with_native_web_search(true);
+            // The generic search plugin is shadowed by the endpoint's own tool
+            // in the coding request, so the checkpoint must drop it too.
+            let tools = vec![
+                json!({"type":"function","function":{
+                    "name":"web_search","description":"local search",
+                    "parameters":{"type":"object"}
+                }}),
+                json!({"type":"function","function":{
+                    "name":"shell","description":"run a command",
+                    "parameters":{"type":"object"}
+                }}),
+            ];
+            let mut instruction = conversation.clone();
+            instruction.push(Message::new("user", "CHECKPOINT INSTRUCTION"));
+            let active_turn = 2;
+            let main = client
+                .payload_with_images(&conversation, &tools, None, None)
+                .unwrap();
+            let payload = client
+                .checkpoint_payload(&instruction, &tools, Some(4096), active_turn)
+                .unwrap();
+            let main_tools = main["tools"].as_array().unwrap();
+            assert_eq!(
+                payload["tools"].as_array().unwrap(),
+                main_tools,
+                "{protocol}: the checkpoint must send the same tool definitions"
+            );
+            // A local function definition named `web_search` would shadow the
+            // endpoint's own tool; the converted shape differs per protocol.
+            let is_local_search_definition = |tool: &Value| {
+                (tool["type"] == "function" && tool["name"] == "web_search")
+                    || (tool["type"].is_null() && tool["name"] == "web_search")
+                    || tool["function"]["name"] == "web_search"
+            };
+            assert!(
+                !main_tools.iter().any(is_local_search_definition),
+                "{protocol}: the duplicate local web_search definition stays out"
+            );
+            assert!(
+                main_tools.iter().any(|tool| {
+                    tool["type"] == "web_search" || tool["type"] == "web_search_20250305"
+                }),
+                "{protocol}: the endpoint's own search tool is part of the prefix"
+            );
+            assert!(
+                main_tools
+                    .iter()
+                    .any(|tool| tool["function"]["name"] == "shell" || tool["name"] == "shell"),
+                "{protocol}: ordinary local tools are untouched"
+            );
+            let expected_choice = if protocol == "responses" {
+                json!("none")
+            } else {
+                json!({"type":"none"})
+            };
+            assert_eq!(payload["tool_choice"], expected_choice);
+            assert!(
+                main.get("tool_choice").is_none(),
+                "{protocol}: the coding request keeps its normal tool choice"
+            );
+        }
+    }
+
+    #[test]
+    fn a_checkpoint_without_native_search_never_invents_a_tool_choice() {
+        // A protocol that cannot both keep and forbid the native tool must not
+        // receive a speculative `tool_choice` field.
+        let client = ModelClient::new("http://127.0.0.1:9/v1", None, "native".into())
+            .unwrap()
+            .with_protocol("anthropic")
+            .unwrap();
+        let conversation = vec![
+            Message::new("system", "coding agent"),
+            Message::new("user", "ask"),
+        ];
+        let payload = client
+            .checkpoint_payload(&conversation, &[], Some(4096), 2)
+            .unwrap();
+        assert!(payload.get("tool_choice").is_none());
+        // Chat has no server-side tool support at all.
+        let chat = ModelClient::new("http://127.0.0.1:9/v1", None, "chat".into()).unwrap();
+        let payload = chat
+            .checkpoint_payload(&conversation, &[], Some(4096), 2)
+            .unwrap();
+        assert!(payload.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn explicit_cache_policy_reaches_the_wire_and_its_checkpoint() {
+        let policy = CachePolicy {
+            anthropic_ttl: Some("1h".into()),
+            anthropic_stable_breakpoint: true,
+            responses_prompt_cache_key: Some("workspace-key".into()),
+        };
+        let conversation = vec![
+            Message::new("system", "stable instructions"),
+            Message::new("user", "ask"),
+        ];
+        let anthropic = ModelClient::new("http://127.0.0.1:9/v1", None, "claude".into())
+            .unwrap()
+            .with_protocol("anthropic")
+            .unwrap()
+            .with_cache_policy(policy.clone());
+        let main = anthropic
+            .payload_with_images(&conversation, &[], None, None)
+            .unwrap();
+        assert_eq!(main["cache_control"]["ttl"], "1h");
+        assert_eq!(
+            main["system"][0]["cache_control"]["ttl"], "1h",
+            "the stable breakpoint carries the same TTL"
+        );
+        let checkpoint = anthropic
+            .checkpoint_payload(&conversation, &[], Some(4096), 2)
+            .unwrap();
+        assert_eq!(checkpoint["cache_control"], main["cache_control"]);
+        assert_eq!(checkpoint["system"], main["system"]);
+
+        let responses = ModelClient::new("http://127.0.0.1:9/v1", None, "gpt".into())
+            .unwrap()
+            .with_protocol("responses")
+            .unwrap()
+            .with_cache_policy(policy);
+        let main = responses
+            .payload_with_images(&conversation, &[], None, None)
+            .unwrap();
+        assert_eq!(main["prompt_cache_key"], "workspace-key");
+        let checkpoint = responses
+            .checkpoint_payload(&conversation, &[], Some(4096), 2)
+            .unwrap();
+        assert_eq!(checkpoint["prompt_cache_key"], "workspace-key");
+    }
+
+    #[test]
+    fn default_cache_policy_sends_no_new_cache_fields() {
+        let conversation = vec![Message::new("user", "ask")];
+        let anthropic = ModelClient::new("http://127.0.0.1:9/v1", None, "claude".into())
+            .unwrap()
+            .with_protocol("anthropic")
+            .unwrap();
+        let main = anthropic
+            .payload_with_images(&conversation, &[], None, None)
+            .unwrap();
+        assert_eq!(main["cache_control"], json!({"type":"ephemeral"}));
+        assert!(main["system"].is_string(), "system stays a plain string");
+        let responses = ModelClient::new("http://127.0.0.1:9/v1", None, "gpt".into())
+            .unwrap()
+            .with_protocol("responses")
+            .unwrap();
+        let main = responses
+            .payload_with_images(&conversation, &[], None, None)
+            .unwrap();
+        assert!(
+            main.get("prompt_cache_key").is_none(),
+            "a cache key is never generated automatically"
         );
     }
 
@@ -3229,6 +3657,50 @@ mod tests {
             response.payload(&data, &[], None).unwrap()["reasoning"]["effort"],
             "xhigh"
         );
+    }
+
+    #[test]
+    fn saved_deepseek_enabled_uses_the_saved_effort_in_chat_and_checkpoint() {
+        let client = ModelClient::new("http://localhost/v1", None, "deepseek".into())
+            .unwrap()
+            .with_reasoning("max".into(), Some("enabled".into()));
+        let messages = vec![
+            Message::new("system", "coding agent"),
+            Message::new("user", "inspect"),
+        ];
+        let foreground = client.payload(&messages, &[], None).unwrap();
+        assert_eq!(foreground["thinking"]["type"], "enabled");
+        assert_eq!(foreground["reasoning_effort"], "max");
+        assert_eq!(client.reasoning_level().as_deref(), Some("max"));
+
+        let mut checkpoint_messages = messages.clone();
+        checkpoint_messages.push(Message::new("user", "make checkpoint"));
+        let checkpoint = client
+            .checkpoint_payload(&checkpoint_messages, &[], Some(4096), 2)
+            .unwrap();
+        assert_eq!(checkpoint["thinking"], foreground["thinking"]);
+        assert_eq!(
+            checkpoint["reasoning_effort"],
+            foreground["reasoning_effort"]
+        );
+
+        // "off" is an explicit level, not "auto": the label and the request
+        // must both say disabled rather than leaving thinking enabled.
+        let off = ModelClient::new("http://localhost/v1", None, "deepseek".into())
+            .unwrap()
+            .with_reasoning("off".into(), Some("enabled".into()));
+        let payload = off.payload(&messages, &[], None).unwrap();
+        assert_eq!(payload["thinking"]["type"], "disabled");
+        assert!(payload.get("reasoning_effort").is_none());
+        assert_eq!(off.reasoning_level().as_deref(), Some("off"));
+
+        let auto = ModelClient::new("http://localhost/v1", None, "deepseek".into())
+            .unwrap()
+            .with_reasoning("auto".into(), Some("enabled".into()));
+        let payload = auto.payload(&messages, &[], None).unwrap();
+        assert_eq!(payload["thinking"]["type"], "enabled");
+        assert!(payload.get("reasoning_effort").is_none());
+        assert_eq!(auto.reasoning_level().as_deref(), Some("auto"));
     }
 
     #[test]
@@ -4856,6 +5328,63 @@ mod tests {
             .unwrap()
             .with_output_tokens(Some(128_000));
         assert_eq!(uncapped.effective_output_tokens(), Some(32_768));
+    }
+
+    #[test]
+    fn context_reference_tail_does_not_start_a_new_reasoning_turn() {
+        for protocol in ["chat", "responses", "anthropic"] {
+            let client = ModelClient::new("http://localhost/v1", None, "deepseek".into())
+                .unwrap()
+                .with_protocol(protocol)
+                .unwrap()
+                .with_reasoning("high".into(), Some("high".into()));
+            let mut assistant = Message::new("assistant", "checking");
+            assistant.tool_calls = Some(vec![ToolCall {
+                id: "context-call".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: "shell".into(),
+                    arguments: "{}".into(),
+                },
+            }]);
+            if protocol == "chat" {
+                assistant.reasoning_content = Some("current reasoning evidence".into());
+            } else {
+                assistant.provider_items = Some(vec![if protocol == "responses" {
+                    json!({"type":"reasoning","id":"rs_context","encrypted_content":"current reasoning evidence"})
+                } else {
+                    json!({"type":"thinking","thinking":"analysis","signature":"current reasoning evidence"})
+                }]);
+            }
+            let mut reference = Message::new("user", "optional reference");
+            reference.provider_items = Some(vec![json!({"type":"kroma_context_reference"})]);
+            let history = vec![
+                Message::new("system", "system"),
+                Message::new("user", "inspect"),
+                assistant,
+                Message::tool("context-call".into(), "result".into()),
+                reference,
+            ];
+            let request = client
+                .payload(&history, &crate::tools::definitions(), None)
+                .unwrap();
+            assert!(
+                request.to_string().contains("current reasoning evidence"),
+                "{protocol}"
+            );
+            assert!(
+                !request.to_string().contains("kroma_context_reference"),
+                "host metadata must not leak on {protocol}"
+            );
+            let mut budget = history.clone();
+            client.project_for_budget(&mut budget);
+            assert!(
+                serde_json::to_string(&budget[2])
+                    .unwrap()
+                    .contains("current reasoning evidence"),
+                "budget and wire must agree on {protocol}"
+            );
+        }
     }
 
     #[test]

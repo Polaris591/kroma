@@ -43,7 +43,7 @@ pub fn open_http_url(raw: &str) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn open_with_system(value: &std::ffi::OsStr) -> Result<()> {
+pub(crate) fn open_with_system(value: &std::ffi::OsStr) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
 
@@ -68,7 +68,7 @@ fn open_with_system(value: &std::ffi::OsStr) -> Result<()> {
 }
 
 #[cfg(not(windows))]
-fn open_with_system(value: &std::ffi::OsStr) -> Result<()> {
+pub(crate) fn open_with_system(value: &std::ffi::OsStr) -> Result<()> {
     let program = if cfg!(target_os = "macos") {
         "open"
     } else {

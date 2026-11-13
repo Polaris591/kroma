@@ -160,6 +160,86 @@ mod tests {
     }
 
     #[test]
+    fn multilingual_and_dense_payload_boundaries_stay_conservative() {
+        // Recorded boundaries for payload classes the estimator must not
+        // undercount. These are classification regressions, not tokenizer
+        // claims: the provider count is still the only real measurement.
+        struct Case {
+            name: &'static str,
+            text: String,
+            class: Class,
+        }
+        #[derive(PartialEq, Eq, Debug)]
+        enum Class {
+            Ascii,
+            Cjk,
+            Other,
+        }
+        let cases = vec![
+            Case {
+                name: "dense rust source",
+                text: "fn main(){let x=vec![1,2,3];for i in &x{if *i>1{panic!(\"{i}\");}}}"
+                    .repeat(50),
+                class: Class::Ascii,
+            },
+            Case {
+                name: "cjk prose",
+                text: "这是中文上下文估算边界样本。".repeat(60),
+                class: Class::Cjk,
+            },
+            Case {
+                name: "japanese kana and kanji",
+                text: "この文章は日本語の境界サンプルです。".repeat(60),
+                class: Class::Cjk,
+            },
+            Case {
+                name: "emoji",
+                text: "🐍🚀🧪🔥".repeat(80),
+                class: Class::Other,
+            },
+            Case {
+                name: "mixed multilingual",
+                text: "deploy 部署 🚀 ok 確認\n".repeat(80),
+                class: Class::Ascii,
+            },
+            Case {
+                name: "dense json",
+                text: "{\"a\":1,\"b\":[2,3],\"c\":{\"d\":\"e\"}}".repeat(60),
+                class: Class::Ascii,
+            },
+        ];
+        for case in cases {
+            let bytes = case.text.as_bytes();
+            let characters = case.text.chars().count();
+            let estimate = content_tokens(bytes);
+            assert!(estimate > 0, "{}: estimate must be positive", case.name);
+            match case.class {
+                Class::Ascii => assert!(
+                    estimate < characters,
+                    "{}: ASCII runs at about two tokens per seven bytes",
+                    case.name
+                ),
+                // CJK and other non-ASCII characters cost about one token each,
+                // which is far above the three-bytes-per-token floor.
+                Class::Cjk | Class::Other => assert!(
+                    estimate >= characters,
+                    "{}: non-ASCII text must never be undercounted (estimate {estimate}, chars {characters})",
+                    case.name
+                ),
+            }
+            assert!(
+                estimate >= bytes_to_tokens(bytes.len() / 2),
+                "{}: the class-aware rate must stay above half the length floor",
+                case.name
+            );
+            // Growth is monotone: appending more text never lowers the estimate.
+            let mut longer = case.text.clone();
+            longer.push_str(&case.text);
+            assert!(content_tokens(longer.as_bytes()) > estimate);
+        }
+    }
+
+    #[test]
     fn measured_margin_rounds_the_tenth_up() {
         assert_eq!(with_measured_margin(0), 0);
         assert_eq!(with_measured_margin(1), 2);

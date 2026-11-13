@@ -34,6 +34,11 @@ function harness() {
       waiting.push(resolve);
       child.stdin.write(`${JSON.stringify(message)}\n`);
     });
+  const sendRaw = (line) =>
+    new Promise((resolve) => {
+      waiting.push(resolve);
+      child.stdin.write(`${line}\n`);
+    });
   /** Answer any host call in the reply stream, then return the final frame. */
   const call = async (message) => {
     const request = { protocol_version: 2, request_id: ++id, data_dir: dataDir, session_id: "s1", ...message };
@@ -51,7 +56,7 @@ function harness() {
     child.kill();
     fs.rmSync(dataDir, { recursive: true, force: true });
   };
-  return { call, close };
+  return { call, send, sendRaw, close, dataDir };
 }
 
 test("a new goal becomes one real task and refuses to finish until done", async () => {
@@ -144,6 +149,76 @@ test("an invalid claim is refused without changing the goal", async () => {
     assert.match(bad.content, /claim 只能是/);
     const status = await goal.call({ type: "command", name: "/goal", arguments: "status" });
     assert.match(status.content, /running/);
+  } finally {
+    goal.close();
+  }
+});
+
+test("session_rewound cancels active goal and malformed JSONL does not crash", async () => {
+  const goal = harness();
+  try {
+    await goal.call({ type: "command", name: "/goal", arguments: "first goal" });
+    const replaced = await goal.call({ type: "command", name: "/goal", arguments: "second goal" });
+    assert.match(replaced.content, /已替换原目标：first goal/);
+
+    await goal.call({ type: "event", name: "session_rewound", arguments: { id: "s1", checkpoint: 0 } });
+    const gate = await goal.call({
+      type: "hook",
+      name: "before_turn_end",
+      arguments: { final_text: "ok", tools: [] },
+    });
+    assert.equal(JSON.parse(gate.content).decision, "finish");
+
+    const bad = await goal.sendRaw("{not-json");
+    assert.equal(bad.is_error, true);
+    const pong = await goal.call({ type: "ping" });
+    assert.equal(pong.content, "ok");
+  } finally {
+    goal.close();
+  }
+});
+
+test("overlapping host_call_results stay correlated by request_id", async () => {
+  const goal = harness();
+  try {
+    const f1 = await goal.send({
+      protocol_version: 2,
+      request_id: 101,
+      data_dir: goal.dataDir,
+      session_id: "s1",
+      type: "command",
+      name: "/goal",
+      arguments: "alpha",
+    });
+    const f2 = await goal.send({
+      protocol_version: 2,
+      request_id: 102,
+      data_dir: goal.dataDir,
+      session_id: "s2",
+      type: "command",
+      name: "/goal",
+      arguments: "beta",
+    });
+    assert.equal(f1.type, "host_call");
+    assert.equal(f2.type, "host_call");
+    const r2 = await goal.send({ type: "host_call_result", request_id: f2.request_id, result: { ok: true } });
+    const r1 = await goal.send({ type: "host_call_result", request_id: f1.request_id, is_error: true, content: "busy" });
+    assert.equal(r2.request_id, 102);
+    assert.match(r2.content, /beta/);
+    assert.equal(r1.request_id, 101);
+    assert.match(r1.content, /alpha/);
+    // Because r1's ui.status failed, the next s1 call still pushes ui.status.
+    const retry = await goal.send({
+      protocol_version: 2,
+      request_id: 103,
+      data_dir: goal.dataDir,
+      session_id: "s1",
+      type: "command",
+      name: "/goal",
+      arguments: "status",
+    });
+    assert.equal(retry.type, "host_call");
+    await goal.send({ type: "host_call_result", request_id: retry.request_id, result: { ok: true } });
   } finally {
     goal.close();
   }

@@ -1,18 +1,22 @@
 <script lang="ts">
-  import { tick } from 'svelte';
-  import { ArrowDown, ChevronRight, LoaderCircle, Settings2 } from '@lucide/svelte';
+  import { onDestroy, tick } from 'svelte';
+  import { ArrowDown, ChevronDown, ChevronRight, ChevronUp, FolderClosed, GitPullRequest, LoaderCircle, ScanSearch, Search, Settings2, Wrench, X } from '@lucide/svelte';
   import { api, type Bootstrap, type CheckpointTurn, type Message, type SessionSnapshot, type TurnDiffSummary, type WorkspaceReview } from '../lib/api';
   import { canActOnTurn, turnDiffFor, turnNumberByUserIndex } from '../lib/checkpoints';
-  import { scrollTopAfterPrepend } from '../lib/chat-ui';
+  import { scrollTopAfterPrepend, workspaceDisplayName } from '../lib/chat-ui';
   import { carryOlderHistory } from '../lib/snapshot';
   import { createRequestTokens } from '../lib/latest';
   import { historyPageBelongsTo } from '../lib/snapshot';
   import { groupTranscript, visibleTranscriptStart, type LiveActivity } from '../lib/transcript';
+  import {
+    findCountLabel, findInMessages, findScopeNote, stepHit, type FindHit,
+  } from '../lib/search';
   import type { Tab } from '../lib/ui-types';
   import LiveTimeline from './LiveTimeline.svelte';
   import TranscriptTurn from './TranscriptTurn.svelte';
   import TurnChanges from './TurnChanges.svelte';
   import WorkspaceChanges from './WorkspaceChanges.svelte';
+  import PluginWidgets from './PluginWidgets.svelte';
 
   export let data: Bootstrap | null = null;
   export let snapshot: SessionSnapshot | null = null;
@@ -34,6 +38,8 @@
   export let onUsePrompt: (text: string) => void;
   export let onSetTab: (tab: Tab) => void;
   export let showError: (failure: unknown) => void;
+  export let widgetActionBusy = false;
+  export let onWidgetAction: (pluginId: string, widgetId: string, actionId: string) => void;
 
   let olderMessages: Message[] = [];
   let historyHasMore = false;
@@ -43,27 +49,74 @@
   let atBottom = true;
   let checkpointTurns: CheckpointTurn[] = [];
   let turnDiffs = new Map<number, TurnDiffSummary>();
-  let checkpointKey = '';
-  // A slow checkpoint response must never paint another conversation's turns.
+  let conversationKey = '';
+  // A slow checkpoint response or file list must never paint another
+  // conversation's turns or file changes.
   const checkpointRequests = createRequestTokens();
+  const turnFilesRequests = createRequestTokens();
   let turnChangesView: {turn: number; summary: TurnDiffSummary; files: Array<{path:string;status:string;added:number;removed:number}>} | null = null;
   let reviewOpen = false;
   let reviewBusy = false;
   let reviewError = '';
   let workspaceReview: WorkspaceReview | null = null;
   let reviewRequest = 0;
+  // In-conversation search. It reads the messages already in memory only: no
+  // disk scan per keypress and no model or tool call.
+  let findOpen = false;
+  let findQuery = '';
+  let findHits: FindHit[] = [];
+  let findCurrent = -1;
+  let findNote = '';
+  let findInput: HTMLInputElement;
+  // The selection is kept in absolute conversation coordinates; the rendered
+  // transcript and its turns use local indexes into the loaded window.
+  let highlightAbsolute: number | null = null;
+  let absoluteBase = 0;
+  let findSignature = '';
+  let revealRequest = 0;
 
   $: history = [...olderMessages, ...(snapshot?.messages ?? [])];
+  // The loaded messages are one contiguous suffix of the conversation, so a
+  // native absolute message index is localIndex + absoluteBase.
+  $: absoluteBase = Math.max(0, (snapshot?.total_messages ?? history.length) - history.length);
+  $: highlightIndex = highlightAbsolute === null ? null : highlightAbsolute - absoluteBase;
   $: historyStart = visibleTranscriptStart(history, historyCount);
   $: visibleTurns = groupTranscript(history.slice(historyStart), historyStart);
   $: turnNumbers = turnNumberByUserIndex(checkpointTurns, history);
   $: hasWorkspaceChanges = !!workspaceReview?.is_repo && workspaceReview.entries.length > 0;
+  // Recompute only when the scope, query or loaded window actually changes.
+  // The selected hit is preserved by absolute message index across a reload.
   $: {
-    const key = `${snapshot?.session_id ?? ''}|${snapshot?.messages.length ?? 0}`;
-    if (key !== checkpointKey) {
-      checkpointKey = key;
+    const signature = `${data?.project ?? ''}|${snapshot?.session_id ?? ''}`
+      + `|${findOpen}|${findQuery}|${history.length}|${olderMessages.length}|${historyHasMore}`;
+    if (signature !== findSignature) {
+      findSignature = signature;
+      refreshFind();
+    }
+  }
+  $: {
+    // The project belongs to the scope: two projects can hold a session with
+    // the same id and message count. Opening a session is its own scope as
+    // well, so a preview and the snapshot it is replaced by never share the
+    // answers of the conversation that was shown before.
+    const key = `${data?.project ?? ''}|${snapshot?.session_id ?? ''}|${snapshot?.messages.length ?? 0}|${switchingTo ? 'opening' : 'shown'}`;
+    if (key !== conversationKey) {
+      conversationKey = key;
+      // A reveal or find answer that describes the previous project/session
+      // must not paint or scroll the new one. Same ID in two projects is a
+      // different conversation.
+      revealRequest += 1;
+      highlightAbsolute = null;
+      findHits = [];
+      findCurrent = -1;
+      findNote = '';
       checkpointTurns = [];
       turnDiffs = new Map();
+      turnChangesView = null;
+      // Answers still on their way describe the previous scope; success and
+      // failure alike must be dropped instead of reviving on this one.
+      checkpointRequests.begin();
+      turnFilesRequests.begin();
       // While a preview is shown the Agent still owns the previous session, so
       // a lookup here would attach another conversation's turns to the preview.
       if (!switchingTo && snapshot?.session_id && snapshot.session_id !== 'unknown') {
@@ -71,6 +124,14 @@
       }
     }
   }
+
+  onDestroy(() => {
+    // A component that is gone can neither show an answer nor report its error.
+    checkpointRequests.begin();
+    turnFilesRequests.begin();
+    revealRequest += 1;
+    highlightAbsolute = null;
+  });
 
   export function syncHistory() {
     olderMessages = [];
@@ -94,13 +155,14 @@
 
   export async function refreshCheckpoints() {
     const token = checkpointRequests.begin();
+    const session = snapshot?.session_id ?? '';
     try {
       const result = await api.checkpointTurns();
-      if (!checkpointRequests.isCurrent(token)) return;
+      if (!checkpointRequests.isCurrent(token) || (snapshot?.session_id ?? '') !== session) return;
       checkpointTurns = result.turns ?? [];
       turnDiffs = new Map((result.diffs ?? []).map(diff => [diff.turn, diff]));
     } catch {
-      if (!checkpointRequests.isCurrent(token)) return;
+      if (!checkpointRequests.isCurrent(token) || (snapshot?.session_id ?? '') !== session) return;
       checkpointTurns = [];
       turnDiffs = new Map();
     }
@@ -162,13 +224,26 @@
   }
 
   async function openTurnChanges(turn: number) {
+    // During a preview or another pending navigation the Agent still answers
+    // for the previous conversation; ask it nothing about this transcript.
+    if (switchingTo || busy) return;
+    const token = turnFilesRequests.begin();
+    const session = snapshot?.session_id ?? '';
+    const generation = getTaskGeneration();
+    // A->B->A must not let the first A answer reopen a panel on the second A.
+    const current = () => turnFilesRequests.isCurrent(token)
+      && getTaskGeneration() === generation
+      && (snapshot?.session_id ?? '') === session;
     try {
       const files = await api.turnFiles(turn);
-      if (!files.length) return;
+      // A turn without files is a real answer, not a panel to open.
+      if (!current() || !files.length) return;
       const summary = turnDiffs.get(turn)
         ?? {turn, added: 0, removed: 0, files: files.length, truncated: false};
       turnChangesView = {turn, summary, files};
-    } catch (failure) { showError(failure); }
+    } catch (failure) {
+      if (current()) showError(failure);
+    }
   }
 
   async function loadOlderHistory() {
@@ -198,31 +273,186 @@
     finally { historyBusy = false; }
   }
 
+  /** Search the messages the transcript already holds. */
+  function refreshFind() {
+    if (!findOpen || !findQuery.trim()) {
+      findHits = [];
+      findCurrent = -1;
+      findNote = '';
+      if (findOpen) highlightAbsolute = null;
+      return;
+    }
+    const previous = findHits[findCurrent]?.messageIndex ?? -1;
+    // Hits carry absolute indexes; the DOM and turns keep local indexes.
+    findHits = findInMessages(history, findQuery, absoluteBase);
+    const restored = findHits.findIndex(hit => hit.messageIndex === previous);
+    findCurrent = restored >= 0 ? restored : (findHits.length ? 0 : -1);
+    findNote = findScopeNote(history.length, historyHasMore, running);
+    if (findCurrent >= 0) {
+      highlightAbsolute = findHits[findCurrent].messageIndex;
+      unfoldSelection();
+      void scrollToHighlight();
+    } else {
+      highlightAbsolute = null;
+    }
+  }
+
+  /** A hit in already loaded older messages may still be folded away. */
+  function unfoldSelection() {
+    if (highlightAbsolute === null) return;
+    const local = highlightAbsolute - absoluteBase;
+    if (local >= 0 && local < historyStart) {
+      historyCount = Math.max(historyCount, history.length - local);
+    }
+  }
+
+  function stepFind(direction: -1 | 1) {
+    if (!findHits.length) return;
+    findCurrent = stepHit(findHits, findCurrent, direction);
+    highlightAbsolute = findHits[findCurrent].messageIndex;
+    unfoldSelection();
+    void scrollToHighlight();
+  }
+
+  async function scrollToHighlight() {
+    await tick();
+    const absolute = highlightAbsolute;
+    if (absolute === null || !scroller) return;
+    const local = absolute - absoluteBase;
+    if (local < 0 || local >= history.length) return;
+    const target = scroller.querySelector(`[data-message-index="${local}"]`);
+    target?.scrollIntoView({block:'center'});
+  }
+
+  export function openFind() {
+    findOpen = true;
+    void tick().then(() => {
+      findInput?.focus();
+      findInput?.select();
+    });
+  }
+
+  export function closeFind(): boolean {
+    if (!findOpen) return false;
+    findOpen = false;
+    findQuery = '';
+    findHits = [];
+    findCurrent = -1;
+    findNote = '';
+    highlightAbsolute = null;
+    return true;
+  }
+
+  function onFindKey(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeFind();
+      return;
+    }
+    if (event.key === 'Enter' && !event.isComposing) {
+      event.preventDefault();
+      stepFind(event.shiftKey ? -1 : 1);
+    }
+  }
+
+  /** Open a conversation hit: page older history, bounded, until the absolute
+   * target is inside the loaded window, then highlight the exact message. */
+  export async function revealMessage(index: number): Promise<void> {
+    if (!Number.isInteger(index) || index < 0) return;
+    // A session switch installs its snapshot immediately before this call; wait
+    // for the reactive window to describe that conversation before measuring it.
+    await tick();
+    const request = ++revealRequest;
+    const generation = getTaskGeneration();
+    const project = getData()?.project ?? '';
+    const session = getData()?.snapshot?.session_id ?? '';
+    const stillCurrent = () => (getData()?.project ?? '') === project
+      && getData()?.snapshot?.session_id === session;
+    let pages = 0;
+    while (pages < 12 && absoluteBase > index && historyHasMore && !historyBusy) {
+      if (!stillCurrent()) return;
+      const current = getData()?.snapshot;
+      const loaded = olderMessages.length + (current?.messages.length ?? 0);
+      const before = Math.max(0, (current?.total_messages ?? loaded) - loaded);
+      if (before <= 0) break;
+      let page;
+      try {
+        page = await api.historyPage(before, 500);
+      } catch (failure) {
+        if (request === revealRequest) showError(failure);
+        return;
+      }
+      if (request !== revealRequest || !stillCurrent()
+          || !historyPageBelongsTo(page.session_id, getData()?.snapshot?.session_id,
+            generation, getTaskGeneration())
+          || page.session_id !== session) return;
+      if (!page.messages.length) break;
+      olderMessages = [...page.messages, ...olderMessages];
+      historyCount += page.messages.length;
+      historyHasMore = page.next_before != null && page.next_before > 0;
+      pages += 1;
+      await tick();
+    }
+    if (request !== revealRequest || !stillCurrent()) return;
+    // A task that started during paging owns newer history; do not paint a
+    // selection that belongs to the previous generation.
+    if (getTaskGeneration() !== generation) return;
+    const local = index - absoluteBase;
+    if (local < 0 || local >= history.length) {
+      showError(new Error('匹配的消息在更早的历史中；请点“加载更早的完整历史”继续查找'));
+      return;
+    }
+    highlightAbsolute = index;
+    unfoldSelection();
+    findOpen = false;
+    await scrollToHighlight();
+  }
+
   function trackScroll() {
     if (!scroller) return;
     atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 115;
   }
 </script>
 
+  <div class="transcript-region">
+{#if findOpen}
+  <div class="find-bar" role="search" aria-label="在当前会话中查找">
+    <Search size={14}/>
+    <input bind:this={findInput} bind:value={findQuery} onkeydown={onFindKey}
+      aria-label="在当前会话中查找" placeholder="在当前会话中查找文字" />
+    <span class="find-count" aria-live="polite">{findCountLabel(findHits, findCurrent)}</span>
+    <button class="icon-button" title="上一个匹配（Shift+Enter）" aria-label="上一个匹配"
+      disabled={!findHits.length} onclick={() => stepFind(-1)}><ChevronUp size={14}/></button>
+    <button class="icon-button" title="下一个匹配（Enter）" aria-label="下一个匹配"
+      disabled={!findHits.length} onclick={() => stepFind(1)}><ChevronDown size={14}/></button>
+    <button class="icon-button" title="关闭查找（Esc）" aria-label="关闭查找" onclick={closeFind}><X size={14}/></button>
+    {#if findNote}<span class="find-note">{findNote}</span>{/if}
+  </div>
+{/if}
 <div class="transcript" class:at-bottom={atBottom} bind:this={scroller} onscroll={trackScroll} aria-busy={!!switchingTo}>
-  {#if switchingTo && !previewSnapshot}
-    <div class="session-loading" role="status">
+  {#if switchingTo && (!previewSnapshot || history.length === 0)}
+    <div class="session-loading" class:session-preview-note={!!previewSnapshot} role="status">
       <LoaderCircle size={18} class="spin"/>
-      <span>正在打开会话…</span>
+      <span>{previewSnapshot ? '正在同步最新记录…' : '正在打开会话…'}</span>
     </div>
   {:else if history.length === 0 && !running}
     <div class="welcome">
-      <div class="welcome-mark">K</div>
-      <h1>有什么想做的？</h1>
-      <p>直接描述目标，Kroma 会在当前工作目录中帮你完成。</p>
+      <div class="welcome-mark" aria-hidden="true">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><path d="M4 3h4v18H4zM10 12l7-9h5l-7 9 7 9h-5z"/></svg>
+      </div>
+      <div class="welcome-location" title={data?.project}><FolderClosed size={13}/><span>{data?.project === data?.default_project ? '个人对话' : workspaceDisplayName(data?.project ?? '', data?.user_home)}</span></div>
+      <h1>从这里，开始下一步。</h1>
+      <p>{ready ? '描述你想完成的事，或选一个起点。' : '先连接一个模型，再把你的想法带进工作区。'}</p>
       {#if !ready}
         <button class="primary" onclick={() => onSetTab('settings')}><Settings2 size={16}/> 连接模型，开始使用</button>
       {:else}
         <div class="welcome-prompts" aria-label="示例任务">
-          <button onclick={() => onUsePrompt('检查当前项目，找出值得优先修复的问题')}>检查项目 <ChevronRight size={13}/></button>
-          <button onclick={() => onUsePrompt('运行测试并修复发现的错误')}>修复错误 <ChevronRight size={13}/></button>
-          <button onclick={() => onUsePrompt('帮我实现一个新功能')}>实现功能 <ChevronRight size={13}/></button>
+          <button onclick={() => onUsePrompt('检查当前项目，找出值得优先修复的问题')}><ScanSearch size={18}/><strong>检查项目</strong><small>找出值得优先修复的问题</small><ChevronRight size={14}/></button>
+          <button onclick={() => onUsePrompt('运行测试并修复发现的错误')}><Wrench size={18}/><strong>修复错误</strong><small>从测试失败开始排查</small><ChevronRight size={14}/></button>
+          <button onclick={() => onUsePrompt('帮我实现一个新功能')}><GitPullRequest size={18}/><strong>实现功能</strong><small>把一个想法落到代码里</small><ChevronRight size={14}/></button>
         </div>
+        <small class="welcome-footnote">示例只填入草稿，不会自动执行。</small>
       {/if}
     </div>
   {:else}
@@ -244,7 +474,7 @@
         {@const checkpointTurn = turnNumbers.get(turn.id)}
         {@const agentIndex = turn.id - olderMessages.length}
         {@const agentTurn = canActOnTurn(snapshot?.messages ?? [], agentIndex) ? agentIndex : -1}
-        <TranscriptTurn {turn}
+        <TranscriptTurn {turn} searchHighlight={highlightIndex} {showError}
           onRewind={agentTurn >= 0 ? () => onRewind(agentTurn, checkpointTurn ?? null, turnDiffFor(turnDiffs, checkpointTurn ?? null)) : null}
           onFork={agentTurn >= 0 ? () => onFork(agentTurn) : null}
           onEdit={agentTurn >= 0 ? () => onEdit(agentTurn, (turn.user?.content ?? '').replace(/[\uE000-\uF8FF]/g, '')) : null}
@@ -256,24 +486,26 @@
       {/each}
       {#if running && !taskSnapshotReceived}
         <div class="conversation-turn">
-          <article class="message user draft">
-            <div class="message-body"><div class="user-bubble">{draftPrompt}</div></div>
-          </article>
-          <article class="message assistant live-message">
-            <div class="avatar agent-avatar">K</div>
-            <div class="message-body">
-              <div class="message-author">Kroma <span class="streaming-status"><span class="live-dot"></span> 正在工作</span></div>
-              <LiveTimeline activities={liveActivities} elapsed={activeElapsed}/>
+          {#if draftPrompt}
+            <div class="prompt draft">
+              <p class="prompt-text">{draftPrompt}</p>
             </div>
+          {/if}
+          <article class="answer live-message">
+            <LiveTimeline activities={liveActivities} elapsed={activeElapsed}/>
           </article>
         </div>
       {/if}
     </div>
   {/if}
+  <div class="transcript-widgets">
+    <PluginWidgets placement="transcript" busy={widgetActionBusy} onAction={onWidgetAction}/>
+  </div>
 </div>
 {#if !atBottom}
   <button class="scroll-latest" title="回到最新消息" aria-label="回到最新消息" onclick={scrollDown}><ArrowDown size={17}/></button>
 {/if}
+</div>
 
 {#if turnChangesView}
   <TurnChanges turn={turnChangesView.turn} summary={turnChangesView.summary}

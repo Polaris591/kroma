@@ -1,4 +1,5 @@
 import type { CheckpointTurn, Message, TurnDiffSummary } from './api';
+import { isUserMessage } from './transcript';
 
 /** Snapshots are taken per tool-using task, so a rendered turn is paired with
  * the newest snapshot whose transcript anchor falls inside it. */
@@ -8,7 +9,7 @@ export function turnNumberByUserIndex(
   const map = new Map<number, number>();
   if (!turns.length) return map;
   const userIndices: number[] = [];
-  messages.forEach((message, index) => { if (message.role === 'user') userIndices.push(index); });
+  messages.forEach((message, index) => { if (isUserMessage(message)) userIndices.push(index); });
   for (const entry of turns) {
     if (entry.anchor == null) continue;
     let chosen: number | null = null;
@@ -23,7 +24,7 @@ export function turnNumberByUserIndex(
 /** Only offer a turn action when the index really addresses a user message in
  * the Agent's own list; a stale or shifted index must never rewind the wrong place. */
 export function canActOnTurn(messages: Message[], index: number): boolean {
-  return index >= 0 && index < messages.length && messages[index].role === 'user';
+  return index >= 0 && index < messages.length && isUserMessage(messages[index]);
 }
 
 export function turnDiffFor(

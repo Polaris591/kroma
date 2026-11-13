@@ -37,7 +37,6 @@ Esc never clears a draft; modal Esc closes the modal, running-task Esc cancels.
 While running: Enter steers; Alt+Enter (Ctrl+Q on Windows) queues a follow-up; Esc or Ctrl+C cancels.
 When idle and the draft is empty: Ctrl+D, Ctrl+Q, Ctrl+C or /exit quits; Ctrl+Q with a draft preserves it.
 /history [count] · /sessions · /resume ID · /fork N · /rewind N · /undo
-/checkpoints · /restore-files N（仅 Git 工作区；只恢复文件）
 /checkpoints · /restore-files N (Git worktrees; files only)
 /theme [dark|light|mono|reload] · /think [auto|off|low|medium|high|xhigh|max]
 /queue task · /skills · /tools

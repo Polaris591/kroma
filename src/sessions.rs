@@ -52,6 +52,18 @@ pub struct SessionTextMatch {
     pub snippet: String,
 }
 
+/// One hit in a conversation that the Desktop can navigate to. `message_index`
+/// is the absolute index in the complete replayed history, so it stays valid
+/// when the UI shows only its newest page.
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionMessageMatch {
+    pub id: String,
+    /// `user` or `assistant`; the Desktop only ever searches visible text.
+    pub role: String,
+    pub message_index: usize,
+    pub snippet: String,
+}
+
 /// Back up per-session display/model metadata beside the archived history.
 /// Existing archives without this file still restore their transcripts.
 #[derive(Default, Serialize, Deserialize)]
@@ -59,6 +71,7 @@ struct TrashedSessionMetadata {
     name: Option<String>,
     model: Option<SessionModel>,
     usage: Option<SessionUsage>,
+    capabilities: Option<crate::capabilities::CapabilityOverrides>,
 }
 
 impl SessionCatalog {
@@ -80,6 +93,68 @@ impl SessionCatalog {
         name.push(".");
         name.push(suffix);
         PathBuf::from(name)
+    }
+
+    fn capabilities_path(&self) -> PathBuf {
+        self.sidecar("capabilities.json")
+    }
+
+    fn capabilities_map(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, crate::capabilities::CapabilityOverrides>> {
+        crate::capabilities::read_or_default(&self.capabilities_path())
+    }
+
+    pub fn capability_overrides(
+        &self,
+        id: &str,
+    ) -> Result<crate::capabilities::CapabilityOverrides> {
+        if id == "unknown" {
+            return Ok(Default::default());
+        }
+        self.path_for(id)?;
+        Ok(self
+            .capabilities_map()?
+            .get(id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    pub fn patch_capability_items(
+        &self,
+        id: &str,
+        workdir: &Path,
+        group: crate::capabilities::CapabilityGroup,
+        items: &std::collections::BTreeMap<String, Option<bool>>,
+    ) -> Result<()> {
+        self.resolve(id)?;
+        crate::catalog_file::update(&self.default, &self.capabilities_path(), || {
+            let mut map = self.capabilities_map()?;
+            let settings = map.entry(id.into()).or_default();
+            settings.expand_legacy(workdir)?;
+            settings.items.patch(group, items, false)?;
+            if settings == &Default::default() {
+                map.remove(id);
+            }
+            Ok(map)
+        })
+    }
+
+    pub fn set_capability_overrides(
+        &self,
+        id: &str,
+        settings: crate::capabilities::CapabilityOverrides,
+    ) -> Result<()> {
+        self.resolve(id)?;
+        crate::catalog_file::update(&self.default, &self.capabilities_path(), || {
+            let mut map = self.capabilities_map()?;
+            if settings == Default::default() {
+                map.remove(id);
+            } else {
+                map.insert(id.into(), settings);
+            }
+            Ok(map)
+        })
     }
 
     fn last_path(&self) -> PathBuf {
@@ -221,6 +296,7 @@ impl SessionCatalog {
         if let Some(choice) = self.model_choice(from)? {
             self.set_model_choice(to, choice)?;
         }
+        self.set_capability_overrides(to, self.capability_overrides(from)?)?;
         Ok(())
     }
     fn names_path(&self) -> PathBuf {
@@ -383,6 +459,7 @@ impl SessionCatalog {
             name: self.names()?.get(id).cloned(),
             model: self.models()?.get(id).cloned(),
             usage: self.usage_map()?.get(id).cloned(),
+            capabilities: self.capabilities_map()?.get(id).cloned(),
         };
         fs::write(&metadata_path, serde_json::to_vec(&metadata)?)
             .context("saving recoverable session metadata")?;
@@ -420,6 +497,11 @@ impl SessionCatalog {
                 let mut usage = self.usage_map()?;
                 usage.remove(id);
                 Ok(usage)
+            })?;
+            crate::catalog_file::update(&self.default, &self.capabilities_path(), || {
+                let mut capabilities = self.capabilities_map()?;
+                capabilities.remove(id);
+                Ok(capabilities)
             })
         })();
         if let Err(error) = cleanup {
@@ -433,6 +515,7 @@ impl SessionCatalog {
     /// live session or journal; earlier archives remain available on disk.
     pub fn restore_session(&self, id: &str) -> Result<()> {
         let path = self.path_for(id)?;
+        let _lock = crate::session::acquire_session_lock(&path)?;
         let journal = crate::session::journal_path(&path);
         if path.exists() {
             bail!("cannot restore: a session with this ID already exists");
@@ -491,6 +574,9 @@ impl SessionCatalog {
                 if let Some(usage) = metadata.usage {
                     self.set_usage(id, usage)?;
                 }
+                if let Some(capabilities) = metadata.capabilities {
+                    self.set_capability_overrides(id, capabilities)?;
+                }
                 Ok(())
             })();
             if let Err(error) = restore_metadata {
@@ -529,6 +615,35 @@ impl SessionCatalog {
         max_sessions: usize,
         max_hits: usize,
     ) -> Result<Vec<SessionTextMatch>> {
+        Ok(self
+            .search_messages(query, max_sessions, max_hits, SearchScope::UserOnly)?
+            .into_iter()
+            .map(|hit| SessionTextMatch {
+                id: hit.id,
+                snippet: hit.snippet,
+            })
+            .collect())
+    }
+
+    /// The same bounded scan, also covering assistant answers that the
+    /// transcript renders. Tool output, system prompts and reasoning are never
+    /// searched. `search_user_messages` stays as the compatible user-only form.
+    pub fn search_conversation_messages(
+        &self,
+        query: &str,
+        max_sessions: usize,
+        max_hits: usize,
+    ) -> Result<Vec<SessionMessageMatch>> {
+        self.search_messages(query, max_sessions, max_hits, SearchScope::Conversation)
+    }
+
+    fn search_messages(
+        &self,
+        query: &str,
+        max_sessions: usize,
+        max_hits: usize,
+        scope: SearchScope,
+    ) -> Result<Vec<SessionMessageMatch>> {
         const MAX_ARCHIVE_BYTES: u64 = 12 * 1024 * 1024;
         let term = query.trim().to_lowercase();
         if term.chars().count() < 2 || term.chars().count() > 120 || max_hits == 0 {
@@ -554,8 +669,8 @@ impl SessionCatalog {
                     continue;
                 }
             };
-            for message in messages.iter().rev() {
-                if message.role != "user" {
+            for (index, message) in messages.iter().enumerate().rev() {
+                if !scope.matches(message) {
                     continue;
                 }
                 let Some(content) = message.content.as_deref() else {
@@ -565,21 +680,23 @@ impl SessionCatalog {
                     continue;
                 }
                 let lower = content.to_lowercase();
-                let Some(index) = lower.find(&term) else {
+                let Some(position) = lower.find(&term) else {
                     continue;
                 };
                 // Count Unicode scalar values rather than byte offsets so
                 // Chinese project/task names can be centered in the preview.
-                let position = lower[..index].chars().count();
-                let start = position.saturating_sub(32);
+                let start = lower[..position].chars().count().saturating_sub(32);
                 let snippet = content
                     .chars()
                     .skip(start)
                     .take(145)
+                    .filter(|character| !('\u{e000}'..='\u{f8ff}').contains(character))
                     .collect::<String>()
                     .replace(['\r', '\n'], " ");
-                matches.push(SessionTextMatch {
+                matches.push(SessionMessageMatch {
                     id: entry.id.clone(),
+                    role: message.role.clone(),
+                    message_index: index,
                     snippet: format!(
                         "{}{}{}",
                         if start > 0 { "…" } else { "" },
@@ -638,6 +755,37 @@ impl SessionCatalog {
     }
 }
 
+/// Which visible transcript text a local search may read.
+#[derive(Clone, Copy)]
+enum SearchScope {
+    UserOnly,
+    Conversation,
+}
+
+impl SearchScope {
+    fn matches(self, message: &crate::protocol::Message) -> bool {
+        if crate::protocol::is_actual_user_message(message) {
+            return true;
+        }
+        if !matches!(self, Self::Conversation) || message.role != "assistant" {
+            return false;
+        }
+        // These assistant messages are not shown as answer text; matching
+        // them would report a hit the transcript never renders.
+        !message
+            .provider_items
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|item| {
+                matches!(
+                    item["type"].as_str(),
+                    Some("kroma_context_reference" | "kroma_continuation")
+                )
+            })
+    }
+}
+
 fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 80
@@ -649,6 +797,195 @@ fn valid_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn item_patches_migrate_legacy_reset_and_survive_session_lifecycle() -> Result<()> {
+        use crate::capabilities::{Capabilities, CapabilityGroup, CapabilityOverrides};
+        use std::collections::BTreeMap;
+        let root = std::env::temp_dir().join(format!(
+            "kroma-item-sessions-{}-{}",
+            std::process::id(),
+            NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root)?;
+        let path = root.join("main.json");
+        let catalog = SessionCatalog::from_default(path.clone())?;
+        let store = SessionStore::open_at(path.clone(), &root)?;
+        store.save(
+            &[crate::protocol::Message::new("system", "test")],
+            &crate::context_state::CompactionState::default(),
+        )?;
+        drop(store);
+        catalog.set_capability_overrides(
+            "default",
+            CapabilityOverrides {
+                tools: Some(false),
+                ..Default::default()
+            },
+        )?;
+        catalog.patch_capability_items(
+            "default",
+            &root,
+            CapabilityGroup::Tools,
+            &BTreeMap::from([("shell".into(), None)]),
+        )?;
+        let migrated = catalog.capability_overrides("default")?;
+        assert_eq!(migrated.tools, None);
+        assert!(!migrated.items.tools.contains_key("shell"));
+        assert_eq!(migrated.items.tools.get("history_read"), Some(&false));
+        let defaults = Capabilities::default();
+        assert!(migrated.effective(defaults.clone()).enabled(
+            CapabilityGroup::Tools,
+            "shell",
+            true
+        ));
+        assert!(!migrated.effective(defaults.clone()).enabled(
+            CapabilityGroup::Tools,
+            "history_read",
+            true
+        ));
+        catalog.patch_capability_items(
+            "default",
+            &root,
+            CapabilityGroup::Skills,
+            &BTreeMap::from([("one".into(), Some(false)), ("two".into(), Some(true))]),
+        )?;
+        catalog.patch_capability_items(
+            "default",
+            &root,
+            CapabilityGroup::Mcp,
+            &BTreeMap::from([("server".into(), Some(false))]),
+        )?;
+        catalog.patch_capability_items(
+            "default",
+            &root,
+            CapabilityGroup::Plugins,
+            &BTreeMap::from([("plugin".into(), Some(true))]),
+        )?;
+        let settings = catalog.capability_overrides("default")?;
+        assert_eq!(settings.items.tools, migrated.items.tools);
+        assert_eq!(settings.items.skills.get("two"), Some(&true));
+        let before = fs::read(catalog.capabilities_path())?;
+        assert!(catalog
+            .patch_capability_items(
+                "default",
+                &root,
+                CapabilityGroup::Tools,
+                &BTreeMap::from([("".into(), Some(true))])
+            )
+            .is_err());
+        assert_eq!(fs::read(catalog.capabilities_path())?, before);
+        let reopened = SessionCatalog::from_default(path)?;
+        assert_eq!(reopened.capability_overrides("default")?, settings);
+        let (branch, branch_path) = reopened.new_path()?;
+        let store = SessionStore::open_at(branch_path, &root)?;
+        store.save(
+            &[crate::protocol::Message::new("system", "test")],
+            &crate::context_state::CompactionState::default(),
+        )?;
+        drop(store);
+        reopened.copy_model_choice("default", &branch)?;
+        assert_eq!(reopened.capability_overrides(&branch)?, settings);
+        reopened.trash_session(&branch)?;
+        assert_eq!(
+            reopened.capability_overrides(&branch)?,
+            CapabilityOverrides::default()
+        );
+        reopened.restore_session(&branch)?;
+        assert_eq!(reopened.capability_overrides(&branch)?, settings);
+        reopened.patch_capability_items(
+            &branch,
+            &root,
+            CapabilityGroup::Plugins,
+            &BTreeMap::from([("plugin".into(), None)]),
+        )?;
+        assert!(!reopened
+            .capability_overrides(&branch)?
+            .items
+            .plugins
+            .contains_key("plugin"));
+        assert_eq!(reopened.capability_overrides("default")?, settings);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn capability_overrides_survive_reopen_fork_trash_and_restore() -> Result<()> {
+        use crate::capabilities::{Capabilities, CapabilityOverrides};
+        let root = std::env::temp_dir().join(format!(
+            "kroma-session-capabilities-{}-{}",
+            std::process::id(),
+            NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root)?;
+        let path = root.join("main.json");
+        let catalog = SessionCatalog::from_default(path.clone())?;
+        let store = SessionStore::open_at(path.clone(), &root)?;
+        store.save(
+            &[crate::protocol::Message::new("system", "test")],
+            &crate::context_state::CompactionState::default(),
+        )?;
+        drop(store);
+        assert_eq!(
+            catalog.capability_overrides("default")?,
+            CapabilityOverrides::default()
+        );
+        let settings = CapabilityOverrides {
+            tools: Some(false),
+            mcp: Some(true),
+            skills: None,
+            plugins: Some(false),
+            ..Default::default()
+        };
+        catalog.set_capability_overrides("default", settings.clone())?;
+        let reopened = SessionCatalog::from_default(path)?;
+        assert_eq!(reopened.capability_overrides("default")?, settings);
+        let defaults = Capabilities {
+            skills: false,
+            ..Capabilities::default()
+        };
+        assert_eq!(
+            reopened
+                .capability_overrides("default")?
+                .effective(defaults.clone()),
+            Capabilities {
+                tools: false,
+                mcp: true,
+                skills: false,
+                plugins: false,
+                ..Default::default()
+            }
+        );
+        let (branch, branch_path) = reopened.new_path()?;
+        let store = SessionStore::open_at(branch_path, &root)?;
+        store.save(
+            &[crate::protocol::Message::new("system", "test")],
+            &crate::context_state::CompactionState::default(),
+        )?;
+        drop(store);
+        reopened.copy_model_choice("default", &branch)?;
+        assert_eq!(reopened.capability_overrides(&branch)?, settings);
+        reopened.trash_session(&branch)?;
+        assert_eq!(
+            reopened.capability_overrides(&branch)?,
+            CapabilityOverrides::default()
+        );
+        reopened.restore_session(&branch)?;
+        assert_eq!(reopened.capability_overrides(&branch)?, settings);
+        reopened.set_capability_overrides("default", CapabilityOverrides::default())?;
+        assert_eq!(
+            reopened
+                .capability_overrides("default")?
+                .effective(defaults.clone()),
+            defaults
+        );
+        assert!(reopened
+            .set_capability_overrides("unknown", settings)
+            .is_err());
+        assert!(reopened.capability_overrides("../../bad").is_err());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn search_only_user_messages_in_recent_archives() -> Result<()> {
@@ -680,6 +1017,82 @@ mod tests {
             .is_empty());
         assert!(catalog.search_user_messages("deploy", 5, 10)?.is_empty());
         assert!(catalog.search_user_messages("", 5, 10)?.is_empty());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn conversation_search_covers_answers_unicode_and_absolute_indexes() -> Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "kroma-session-answer-search-{}-{}",
+            std::process::id(),
+            NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root)?;
+        let catalog = SessionCatalog::from_default(root.join("main.json"))?;
+        let (id, path) = catalog.new_path()?;
+        let mut messages = vec![
+            crate::protocol::Message::new("system", "instructions"),
+            crate::protocol::Message::new("user", "请帮我检查 Kroma 的搜索"),
+            crate::protocol::Message::new("assistant", "已经完成 Search 功能"),
+            crate::protocol::Message::new("tool", "PRIVATE-TOOL-OUTPUT"),
+            crate::protocol::Message {
+                provider_items: Some(vec![serde_json::json!({"type":"kroma_continuation"})]),
+                reasoning_content: Some("hidden reasoning".into()),
+                ..crate::protocol::Message::new("assistant", "hidden continuation")
+            },
+        ];
+        for round in 0..20 {
+            messages.push(crate::protocol::Message::new(
+                "user",
+                format!("继续第 {round} 步"),
+            ));
+            messages.push(crate::protocol::Message::new(
+                "assistant",
+                format!("完成第 {round} 步"),
+            ));
+        }
+        messages.push(crate::protocol::Message::new("assistant", "最终回答"));
+        let last_index = messages.len() - 1;
+        // Only the first entries are in the snapshot; the answer lives in WAL.
+        let store = SessionStore::open_at(path, &root)?;
+        store.save(
+            &messages[..3],
+            &crate::context_state::CompactionState::default(),
+        )?;
+        let mut live = messages[..3].to_vec();
+        for message in &messages[3..] {
+            live.push(message.clone());
+            store.append(&live, &crate::context_state::CompactionState::default())?;
+        }
+        drop(store);
+        let hits = catalog.search_conversation_messages("search", 5, 10)?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, id);
+        assert_eq!(hits[0].role, "assistant");
+        assert_eq!(hits[0].message_index, 2);
+        assert!(hits[0].snippet.contains("Search"));
+        // Unicode text is found and previewed, not only ASCII.
+        let unicode = catalog.search_conversation_messages("搜索", 5, 10)?;
+        assert_eq!(unicode.len(), 1);
+        assert_eq!(unicode[0].role, "user");
+        assert!(unicode[0].snippet.contains("搜索"));
+        // A WAL-only answer keeps its absolute index.
+        let latest = catalog.search_conversation_messages("最终", 5, 10)?;
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].message_index, last_index);
+        assert_eq!(latest[0].role, "assistant");
+        // Tool output, reasoning and continuation text are never searched.
+        assert!(catalog
+            .search_conversation_messages("PRIVATE-TOOL-OUTPUT", 5, 10)?
+            .is_empty());
+        assert!(catalog
+            .search_conversation_messages("hidden", 5, 10)?
+            .is_empty());
+        // The compatible user-only search keeps its old semantics.
+        let user_only = catalog.search_user_messages("完成第", 5, 10)?;
+        assert!(user_only.is_empty());
+        assert_eq!(catalog.search_user_messages("kroma", 5, 10)?.len(), 1);
         fs::remove_dir_all(root)?;
         Ok(())
     }

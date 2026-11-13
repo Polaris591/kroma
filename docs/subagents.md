@@ -197,9 +197,10 @@ in-memory draft per task.
 - Child Kromas inherit the user's privileges and environment. With
   `KROMA_PLUGIN_ISOLATE_ENV=1` the host strips credential-shaped variables from
   the plugin worker, so children must then rely on saved profiles.
-- Model configuration is inherited from the environment and saved profiles;
-  a temporary in-session model switch is not forwarded, and the plugin does not
-  promise otherwise.
+- Model configuration is not forwarded. A child resolves its own model the way
+  a plain Kroma on this machine would: environment and saved profiles. So a
+  child always runs the configured default model, and an in-session model
+  switch (`/model`, a per-session choice) never reaches it.
 - `resume` tokens are resolved only inside this plugin's `runs` directory; a
 token that escapes it, references an unfinished task or has no saved session is
 refused before any child starts. A copied session is still the child's private
@@ -251,7 +252,7 @@ exited non-zero, and the plugin returned `CHILD_EXIT` with artifacts.
 Not executed in this environment, and therefore not claimed:
 
 - a live end-to-end subtask against a real model provider (no paid calls were
-  made), so model profile inheritance is only reasoned about, not observed;
+  made), so a child's own model setup is only reasoned about, not observed;
 - the Unix process-group teardown path (verification ran on Windows only);
 - cancellation observed from a live TUI while a child Kroma is running a
   Shell, beyond the descendant-teardown test above.

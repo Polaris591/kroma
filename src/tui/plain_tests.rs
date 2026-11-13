@@ -43,6 +43,7 @@ fn measured(ui: &mut UiState) {
         output: Some(300),
         cached: Some(9_600),
         reasoning: None,
+        cache_write: None,
     });
     ui.event(UiEvent::ActualInput(12_000));
 }
@@ -335,6 +336,7 @@ fn plain_footer_preserves_measurements_unknowns_estimates_and_foreground_scope()
         input: Some(100),
         output: Some(50),
         cached: Some(0),
+        cache_write: None,
     });
     assert_eq!(
         ui.footer_line(ui.active_colors(), 100).to_string(),
@@ -351,6 +353,7 @@ fn plain_footer_preserves_measurements_unknowns_estimates_and_foreground_scope()
         output: None,
         cached: Some(0),
         reasoning: None,
+        cache_write: None,
     });
     assert!(ui
         .footer_line(ui.active_colors(), 100)
@@ -361,6 +364,7 @@ fn plain_footer_preserves_measurements_unknowns_estimates_and_foreground_scope()
         output: None,
         cached: None,
         reasoning: None,
+        cache_write: None,
     });
     assert!(ui
         .footer_line(ui.active_colors(), 100)

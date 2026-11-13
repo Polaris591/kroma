@@ -1,13 +1,14 @@
 <script lang="ts">
+  import { modal } from '../lib/modal';
   import { Wrench } from '@lucide/svelte';
   export let toolNames: string[] = [];
   export let skills: Array<{name: string; description?: string}> = [];
   export let onClose: () => void;
 </script>
 
-<div class="dialog-overlay" role="presentation">
+<dialog class="dialog-overlay" aria-labelledby="abilities-heading" use:modal={{ onClose }}>
   <div class="dialog-dim"></div>
-  <div class="dialog-panel abilities-panel" role="dialog" aria-modal="true" aria-labelledby="abilities-heading">
+  <div class="dialog-panel abilities-panel">
     <div class="dialog-heading">
       <span class="dialog-emblem"><Wrench size={18}/></span>
       <div><h2 id="abilities-heading">本会话已加载的能力</h2>
@@ -29,4 +30,4 @@
       <button class="dialog-secondary" onclick={onClose}>关闭</button>
     </div>
   </div>
-</div>
+</dialog>

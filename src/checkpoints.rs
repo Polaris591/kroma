@@ -57,11 +57,7 @@ pub struct RestoreReport {
 }
 
 fn path_key(path: &Path) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in path.to_string_lossy().as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
+    let hash = crate::cache_trace::fingerprint(path.to_string_lossy().as_bytes());
     format!("{hash:016x}")
 }
 
@@ -327,8 +323,10 @@ fn terminate_git(child: &mut std::process::Child) {
     }
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         let _ = std::process::Command::new("taskkill")
             .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
@@ -413,10 +411,11 @@ fn pathspecs() -> Vec<String> {
 }
 
 fn is_excluded(path: &Path) -> bool {
-    path.components()
-        .next()
-        .and_then(|part| part.as_os_str().to_str())
-        .is_some_and(|first| EXCLUDED_DIRS.contains(&first))
+    path.components().any(|part| {
+        part.as_os_str()
+            .to_str()
+            .is_some_and(|name| EXCLUDED_DIRS.contains(&name))
+    })
 }
 
 fn prune_history(repo: &Repo, reference: &str) -> Result<()> {

@@ -107,7 +107,7 @@ impl UiState {
     pub fn restore_input_history(&mut self, messages: &[Message]) {
         let entries = messages
             .iter()
-            .filter(|m| m.role == "user")
+            .filter(|m| crate::protocol::is_actual_user_message(m))
             .rev()
             .take(120)
             .collect::<Vec<_>>();

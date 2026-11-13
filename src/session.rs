@@ -76,6 +76,56 @@ pub(crate) fn read_archive_messages(path: &Path) -> Result<Vec<Message>> {
     Ok(session.messages)
 }
 
+/// Read-only full replay for a host that must not take the session lock:
+/// the checkpoint plus every valid journal entry, together with the persisted
+/// context that produced it. Unlike `load` this never rewrites the session,
+/// never synthesizes recovery messages and never resets compaction state.
+/// A backup therefore carries the transcript and the context of the same
+/// durable moment, including tool call/result pairing.
+pub(crate) fn read_loaded_session(path: &Path) -> Result<Option<LoadedSession>> {
+    let data = match fs::read(path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let journal = journal_name(path);
+            if journal.exists() && fs::metadata(&journal)?.len() > 0 {
+                bail!("session snapshot missing while a journal still exists; refusing to discard history");
+            }
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading session {}", path.display()))
+        }
+    };
+    let mut session: SavedSession = serde_json::from_slice(&data)
+        .with_context(|| format!("invalid session {}", path.display()))?;
+    if !matches!(session.version, 1..=3) {
+        bail!("unsupported session format version {}", session.version);
+    }
+    replay_journal(
+        &journal_name(path),
+        session.generation,
+        &mut session.messages,
+        &mut session.compression,
+    )?;
+    if session
+        .messages
+        .first()
+        .is_none_or(|msg| msg.role != "system")
+    {
+        bail!("saved session has no system message");
+    }
+    // Legacy on-disk shape only: migrate the in-memory copy so the caller gets
+    // the state a reload would produce, without touching the saved session.
+    if let PersistedContext::Builtin(state) = &mut session.compression {
+        state.migrate_legacy()?;
+    }
+    session.compression.validate(&session.messages)?;
+    Ok(Some(LoadedSession {
+        messages: session.messages,
+        context: session.compression,
+    }))
+}
+
 struct JournalReplay {
     entries: usize,
     complete_bytes: usize,
@@ -278,9 +328,7 @@ pub(crate) fn journal_path(path: &Path) -> PathBuf {
 // Stable FNV-1a: detects incomplete/corrupt journal entries without a crate.
 // The journal is not an authenticated security boundary.
 fn checksum(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf29ce484222325u64, |h, b| {
-        (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
-    })
+    crate::cache_trace::fingerprint(bytes)
 }
 
 impl SessionStore {
@@ -300,13 +348,7 @@ impl SessionStore {
                 .context("HOME is unset; set KROMA_SESSION_FILE to choose a history path")?;
 
             // Stable file name; verify the full workdir when loading to avoid hash collisions.
-            let hash = workdir
-                .to_string_lossy()
-                .as_bytes()
-                .iter()
-                .fold(0xcbf29ce484222325u64, |hash, byte| {
-                    (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-                });
+            let hash = crate::cache_trace::fingerprint(workdir.to_string_lossy().as_bytes());
             PathBuf::from(home)
                 .join(".kroma")
                 .join("sessions")
@@ -330,47 +372,7 @@ impl SessionStore {
     }
 
     fn open_at_with_lifecycle(path: PathBuf, workdir: &Path, transient: bool) -> Result<Self> {
-        let parent = path.parent().context("invalid session path")?;
-        #[cfg(unix)]
-        let parent_existed = parent.exists();
-        fs::create_dir_all(parent).context("failed to create session directory")?;
-        #[cfg(unix)]
-        if !parent_existed {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-        }
-        let file_name = path.file_name().context("invalid session file name")?;
-        let lock_path = parent.join(format!(".{}.lock", file_name.to_string_lossy()));
-        let mut opts = fs::OpenOptions::new();
-        opts.read(true).write(true).create(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            opts.share_mode(0);
-        }
-        let lock_file = opts.open(&lock_path).with_context(|| {
-            format!(
-                "session already in use or lock inaccessible: {}",
-                path.display()
-            )
-        })?;
-        #[cfg(unix)]
-        {
-            let status =
-                unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if status != 0 {
-                bail!(
-                    "session already open in another Kroma process ({}): {}",
-                    path.display(),
-                    std::io::Error::last_os_error()
-                );
-            }
-        }
+        let lock_file = acquire_session_lock(&path)?;
         Ok(Self {
             journal_path: journal_name(&path),
             path,
@@ -383,7 +385,54 @@ impl SessionStore {
             }),
         })
     }
+}
 
+pub(crate) fn acquire_session_lock(path: &Path) -> Result<fs::File> {
+    let parent = path.parent().context("invalid session path")?;
+    #[cfg(unix)]
+    let parent_existed = parent.exists();
+    fs::create_dir_all(parent).context("failed to create session directory")?;
+    #[cfg(unix)]
+    if !parent_existed {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
+    let file_name = path.file_name().context("invalid session file name")?;
+    let lock_path = parent.join(format!(".{}.lock", file_name.to_string_lossy()));
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.share_mode(0);
+    }
+    let lock_file = opts.open(&lock_path).with_context(|| {
+        format!(
+            "session already in use or lock inaccessible: {}",
+            path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let status = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if status != 0 {
+            bail!(
+                "session already open in another Kroma process ({}): {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+    Ok(lock_file)
+}
+
+impl SessionStore {
     /// Real history generation this store appends to. It changes when the
     /// history is replaced, so host metadata cannot follow a copied prefix.
     pub fn generation(&self) -> u64 {

@@ -44,6 +44,7 @@ impl Fixture {
             SessionCatalog::from_default(self.0.join("default.json"))?,
             ContextConfig::with_output_reserve(window, 4096)?,
             false,
+            None,
         )
     }
 }
@@ -195,6 +196,8 @@ impl EventSink for Events {
                 output_tokens,
                 cached_tokens,
                 reasoning_tokens,
+                cache_write_tokens: None,
+                cache_write_1h_tokens: None,
             } => {
                 assert!(
                     input_tokens.is_none()
@@ -430,6 +433,7 @@ async fn native_search_keeps_local_tool_available_for_provider_retry() -> Result
             SessionCatalog::from_default(fixture.0.join("default.json"))?,
             ContextConfig::with_output_reserve(128_000, 4096)?,
             false,
+            None,
         )?;
         agent.run("search the web", &mut |_| {}).await?;
         let seen = model.seen_tools.lock().unwrap();
@@ -548,6 +552,7 @@ async fn the_agent_waits_for_the_person_and_feeds_the_answer_back() -> Result<()
         SessionCatalog::from_default(fixture.0.join("default.json"))?,
         ContextConfig::with_output_reserve(24_000, 4096)?,
         false,
+        None,
     )?;
     let answerer = Arc::new(Answerer::default());
     agent.set_asker(answerer.clone());

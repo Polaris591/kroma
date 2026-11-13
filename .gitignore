@@ -18,7 +18,11 @@ __pycache__/
 # reproducible locally and never belong to a source commit.
 /reviews/**/*.html
 /reviews/**/*.png
+/.playwright-mcp/
 
 # Generated npm package staging and tarballs
 /.npm-dist*/
 /npm/.npm-dist*/
+/desktop/src-tauri/target*/
+/examples/plugins/project-memory/target/
+/reviews/KROMA_AUDIT_*.json

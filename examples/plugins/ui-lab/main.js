@@ -8,7 +8,10 @@ let customIndex = 0;
 const customChoices = ["刷新看板", "填充输入栏", "发送通知"];
 
 function stateFile(req) {
-  return path.join(req?.data_dir || ".", "ui-lab-state.json");
+  const id = String(req?.session_id || "default")
+    .replace(/[^A-Za-z0-9_-]/g, "_")
+    .slice(0, 80);
+  return path.join(req?.data_dir || ".", `ui-lab-${id}.json`);
 }
 
 function readState(req) {
@@ -246,7 +249,7 @@ async function pump() {
   processing = false;
 }
 
-const rl = readline.createInterface({ input: process.stdin });
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 rl.on("line", (line) => {
   let msg;
   try {

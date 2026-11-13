@@ -96,8 +96,8 @@ mod tool_status_tests {
     }
 }
 
-/// A message the person actually wrote. Host-injected guidance (a turn-end
-/// gate note or a control note) is not a new user instruction.
+/// A message the person actually wrote. Host guidance and context references
+/// do not start a user turn or supply user quotes.
 pub fn is_actual_user_message(message: &Message) -> bool {
     message.role == "user"
         && !message
@@ -108,7 +108,39 @@ pub fn is_actual_user_message(message: &Message) -> bool {
             .any(|item| {
                 matches!(
                     item["type"].as_str(),
-                    Some("kroma_task_control") | Some("kroma_turn_gate")
+                    Some(
+                        "kroma_task_control"
+                            | "kroma_turn_gate"
+                            | "kroma_context_reference"
+                            | "kroma_continuation"
+                    )
+                )
+            })
+}
+
+/// A host-authored reference block. The Agent journals sent blocks as distinct
+/// input messages; they are never human requests or replacements for user text.
+pub fn is_host_reference(message: &Message) -> bool {
+    message
+        .provider_items
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|item| item["type"] == "kroma_context_reference")
+}
+
+/// Durable model input that must not appear as a user-authored chat turn.
+pub fn is_host_input(message: &Message) -> bool {
+    message.role == "user"
+        && message
+            .provider_items
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|item| {
+                matches!(
+                    item["type"].as_str(),
+                    Some("kroma_context_reference" | "kroma_continuation")
                 )
             })
 }

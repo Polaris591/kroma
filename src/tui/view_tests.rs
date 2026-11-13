@@ -69,6 +69,7 @@ fn plugin_presentation_slots_render_without_changing_model_history() {
         labels,
         Some(PluginLayoutSpec {
             composer_max_rows: Some(6),
+            ..Default::default()
         }),
         BTreeMap::from([("accent".into(), "#112233".into())]),
     );
@@ -252,6 +253,7 @@ fn usage_and_cache_restore_before_next_model_call_and_are_session_scoped() -> an
         output: Some(600),
         cached: Some(8_000),
         reasoning: Some(150),
+        cache_write: None,
     });
     first.event(UiEvent::ActualInput(10_000));
     first.event(UiEvent::ApecUsage {
@@ -259,6 +261,7 @@ fn usage_and_cache_restore_before_next_model_call_and_are_session_scoped() -> an
         input: Some(1_200),
         output: Some(140),
         cached: Some(200),
+        cache_write: None,
     });
     first.save_usage()?;
     drop(first);
@@ -652,6 +655,7 @@ fn footer_distinguishes_context_from_api_tokens_and_cached_ratio() {
         output: Some(500),
         cached: Some(6_000),
         reasoning: Some(200),
+        cache_write: None,
     });
     let mut terminal = Terminal::new(TestBackend::new(130, 26)).unwrap();
     terminal.draw(|frame| ui.draw(frame)).unwrap();
@@ -696,6 +700,7 @@ fn background_title_and_apec_usage_cannot_replace_coding_cache_or_context() {
         output: Some(80),
         cached: Some(800),
         reasoning: Some(20),
+        cache_write: None,
     });
     ui.event(UiEvent::ActualInput(1_000));
     let coding_footer = ui.usage.compact_status(150);
@@ -713,6 +718,7 @@ fn background_title_and_apec_usage_cannot_replace_coding_cache_or_context() {
         input: Some(500),
         output: Some(100),
         cached: Some(200),
+        cache_write: None,
     });
     assert_eq!(ui.usage.compact_status(150), coding_footer);
     assert_eq!(ui.context_display(), context);
@@ -2571,6 +2577,8 @@ fn context_display_uses_total_window_not_reserved_input_budget() {
         output_tokens: Some(10_000),
         cached_tokens: Some(80_000),
         reasoning_tokens: Some(3_000),
+        cache_write_tokens: None,
+        cache_write_1h_tokens: None,
     });
     while let Ok(event) = rx.try_recv() {
         state.event(event);
@@ -2581,6 +2589,7 @@ fn context_display_uses_total_window_not_reserved_input_budget() {
         input_tokens: Some(1_000),
         output_tokens: Some(200),
         cached_tokens: Some(800),
+        cache_write_tokens: None,
     });
     while let Ok(event) = rx.try_recv() {
         state.event(event);
@@ -2746,6 +2755,7 @@ fn bilingual_chrome_picker_descriptions_and_unknown_usage_render_at_multiple_siz
         output: None,
         cached: None,
         reasoning: None,
+        cache_write: None,
     });
     for width in [30, 40, 80, 160] {
         let output = rendered_rows(&mut ui, width, 26).join("\n");
@@ -3401,6 +3411,7 @@ fn footer_is_one_compact_row_without_repeated_command_hints() {
         output: Some(8),
         cached: Some(1305),
         reasoning: None,
+        cache_write: None,
     });
     ui.add_user("你好");
     ui.event(UiEvent::Text("answer".into()));

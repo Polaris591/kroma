@@ -28,17 +28,34 @@ const CHECKPOINT: &str = "1. OBJECTIVE\nContinue the task after the tool result.
 7. NEXT ACTION\nProduce the final answer without another tool call.";
 
 struct HugeOutput {
+    name: &'static str,
     bytes: usize,
+}
+
+impl HugeOutput {
+    fn non_shell(bytes: usize) -> Self {
+        Self {
+            name: "huge_output",
+            bytes,
+        }
+    }
+
+    fn shell(bytes: usize) -> Self {
+        Self {
+            name: "shell",
+            bytes,
+        }
+    }
 }
 
 impl Tool for HugeOutput {
     fn name(&self) -> &str {
-        "huge_output"
+        self.name
     }
 
     fn definition(&self) -> Value {
         json!({"type":"function","function":{
-            "name":"huge_output","description":"return a large evidence blob",
+            "name":self.name,"description":"return a large evidence blob",
             "parameters":{"type":"object","properties":{}}
         }})
     }
@@ -54,6 +71,7 @@ struct ScriptedModel {
     fail_checkpoints: bool,
     checkpoint_delay: Duration,
     usage_divisor: Option<usize>,
+    tool_name: &'static str,
     seen: Mutex<Vec<Vec<Message>>>,
     checkpoint_prompts: Mutex<Vec<String>>,
 }
@@ -66,6 +84,7 @@ impl ScriptedModel {
             fail_checkpoints: false,
             checkpoint_delay: Duration::ZERO,
             usage_divisor: None,
+            tool_name: "huge_output",
             seen: Mutex::new(Vec::new()),
             checkpoint_prompts: Mutex::new(Vec::new()),
         }
@@ -74,6 +93,14 @@ impl ScriptedModel {
     fn with_checkpoint_failure() -> Self {
         Self {
             fail_checkpoints: true,
+            ..Self::new()
+        }
+    }
+
+    fn with_shell_checkpoint_failure() -> Self {
+        Self {
+            fail_checkpoints: true,
+            tool_name: "shell",
             ..Self::new()
         }
     }
@@ -98,7 +125,7 @@ impl ModelBackend for ScriptedModel {
                         id: "evidence-1".into(),
                         kind: "function".into(),
                         function: FunctionCall {
-                            name: "huge_output".into(),
+                            name: self.tool_name.into(),
                             arguments: "{}".into(),
                         },
                     }]),
@@ -186,7 +213,7 @@ fn remove_session(dir: &Path) {
 
 fn manual_agent(model: Arc<ScriptedModel>, dir: &Path) -> Result<Agent> {
     let mut tools = ToolRegistry::new();
-    tools.register(Arc::new(HugeOutput { bytes: 48_000 }))?;
+    tools.register(Arc::new(HugeOutput::non_shell(48_000)))?;
     Agent::with_runtime_budget(
         model,
         tools,
@@ -351,7 +378,7 @@ async fn one_checkpoint_then_tool_work_continues_and_raw_wal_survives() -> Resul
     let dir = isolated_dir()?;
     let model = Arc::new(ScriptedModel::new());
     let mut tools = ToolRegistry::new();
-    tools.register(Arc::new(HugeOutput { bytes: 65_000 }))?;
+    tools.register(Arc::new(HugeOutput::non_shell(65_000)))?;
     let budget = ContextConfig::with_output_reserve(32_768, 4_096)?;
     let mut agent = Agent::with_runtime_budget(
         model.clone(),
@@ -423,7 +450,7 @@ async fn checkpoint_failure_below_hard_limit_does_not_abort_the_task() -> Result
     let mut tools = ToolRegistry::new();
     // Keep this fixture between the trigger and the hard limit with the full
     // built-in prompt included, even after the calibrated estimate.
-    tools.register(Arc::new(HugeOutput { bytes: 62_000 }))?;
+    tools.register(Arc::new(HugeOutput::non_shell(62_000)))?;
     let budget = ContextConfig::with_output_reserve(32_768, 4_096)?;
     let mut agent = Agent::with_runtime_budget(
         model.clone(),
@@ -488,9 +515,9 @@ async fn checkpoint_failure_below_hard_limit_does_not_abort_the_task() -> Result
 #[tokio::test]
 async fn checkpoint_failure_at_hard_limit_uses_preview_and_continues() -> Result<()> {
     let dir = isolated_dir()?;
-    let model = Arc::new(ScriptedModel::with_checkpoint_failure());
+    let model = Arc::new(ScriptedModel::with_shell_checkpoint_failure());
     let mut tools = ToolRegistry::new();
-    tools.register(Arc::new(HugeOutput { bytes: 70_000 }))?;
+    tools.register(Arc::new(HugeOutput::shell(70_000)))?;
     let budget = ContextConfig::with_output_reserve(32_768, 4_096)?;
     let mut agent = Agent::with_runtime_budget(
         model.clone(),
@@ -581,7 +608,7 @@ hooks=['before_model_request']
             model.clone()
         };
         let mut tools = ToolRegistry::new();
-        tools.register(Arc::new(HugeOutput { bytes: 0 }))?;
+        tools.register(Arc::new(HugeOutput::non_shell(0)))?;
         let mut agent = Agent::with_runtime_budget(
             backend,
             tools,
@@ -621,5 +648,43 @@ hooks=['before_model_request']
         drop(agent);
         remove_session(&dir);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn archived_large_non_shell_output_avoids_hard_overflow_while_keeping_raw_wal() -> Result<()>
+{
+    let dir = isolated_dir()?;
+    let model = Arc::new(ScriptedModel::with_checkpoint_failure());
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(HugeOutput::non_shell(70_000)))?;
+    let budget = ContextConfig::with_output_reserve(32_768, 4_096)?;
+    let mut agent = Agent::with_runtime_budget(
+        model.clone(),
+        tools,
+        Arc::new(BuiltinContextFactory),
+        PromptComposer::default(),
+        None,
+        dir.clone(),
+        budget,
+    )?;
+    let answer = agent
+        .run("Archive large plugin/mcp output cleanly.", &mut |_| {})
+        .await?;
+    assert_eq!(answer, "finished after compaction");
+    assert_eq!(model.checkpoints.load(Ordering::SeqCst), 0);
+    let seen = model.seen.lock().unwrap().clone();
+    assert!(seen[1].iter().any(|message| message.role == "tool"
+        && message
+            .content
+            .as_deref()
+            .is_some_and(|text| text.len() < 10_000 && !text.contains("kroma_context_overflow"))));
+    assert!(agent.messages().iter().any(|message| message.role == "tool"
+        && message
+            .content
+            .as_deref()
+            .is_some_and(|text| text.len() == 70_000)));
+    drop(agent);
+    remove_session(&dir);
     Ok(())
 }

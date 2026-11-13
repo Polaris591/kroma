@@ -1,10 +1,67 @@
 "use strict";
 
+const dns = require("node:dns").promises;
+const net = require("node:net");
+
 class WebError extends Error {
   constructor(code, message) {
     super(message);
     this.code = code;
   }
+}
+
+function isPrivateAddress(address) {
+  const clean = String(address ?? "").trim().replace(/^\[|\]$/g, "").split("%")[0];
+  const version = net.isIP(clean);
+  if (version === 4) {
+    const [a, b] = clean.split(".").map(Number);
+    return a === 0 || a === 10 || a === 127 ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      a >= 224;
+  }
+  if (version === 6) {
+    const value = clean.toLowerCase();
+    if (value === "::" || value === "::1") return true;
+    if (/^f[cd]/.test(value) || /^fe[89ab]/.test(value) || /^ff/.test(value)) return true;
+    const mapped = value.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (mapped) return isPrivateAddress(mapped[1]);
+    const hex = value.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (hex) {
+      const high = parseInt(hex[1], 16);
+      const low = parseInt(hex[2], 16);
+      return isPrivateAddress(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`);
+    }
+    return false;
+  }
+  return true;
+}
+
+// Local dev servers and intranet URLs may be fetched directly, but must never be
+// leaked to external fallback services (Exa public MCP or Firecrawl).
+async function isPublicDestination(address) {
+  const url = address instanceof URL ? address : httpUrl(address);
+  const host = url.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
+  if (!host || host === "localhost" || host.endsWith(".localhost") ||
+      host.endsWith(".local") || host.endsWith(".internal") || host.endsWith(".home.arpa")) {
+    return false;
+  }
+  if (net.isIP(host)) return !isPrivateAddress(host);
+  if (!host.includes(".")) return false;
+  try {
+    const records = await Promise.race([
+      dns.lookup(host, {all: true}),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("dns timeout")), 1000).unref()),
+    ]);
+    if (Array.isArray(records) && records.some(record => isPrivateAddress(record.address))) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  return true;
 }
 
 // Sites that block obvious bots answer a browser-shaped request far more often
@@ -13,7 +70,7 @@ class WebError extends Error {
 const BROWSER_HEADERS = Object.freeze({
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
   Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7",
-  "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
   "Cache-Control": "no-cache",
   "Upgrade-Insecure-Requests": "1",
   "Sec-Fetch-Dest": "document",
@@ -117,4 +174,4 @@ async function download(address, options = {}) {
   }
 }
 
-module.exports = {WebError, httpUrl, download};
+module.exports = {WebError, httpUrl, download, isPrivateAddress, isPublicDestination};

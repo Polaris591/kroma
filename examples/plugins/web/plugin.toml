@@ -35,6 +35,7 @@ firecrawl_api_key = ""
 
 [[tools]]
 name = "web_search"
+may_mutate_worktree = false
 description = "Search the web for titles, URLs and snippets. The provider is chosen in plugin settings; site: and -site: filters are honored."
 
 [tools.parameters]
@@ -61,6 +62,7 @@ maximum = 10
 
 [[tools]]
 name = "web_fetch"
+may_mutate_worktree = false
 description = "Read an HTTP(S) page as Markdown: pass urls to read several at once. Pages that need JavaScript are read through Exa's keyless endpoint first; PDFs need a Firecrawl key; YouTube transcripts are best effort; pass next_start back as start_char to continue, or use find for a few passages."
 
 [tools.parameters]

@@ -71,6 +71,7 @@ fn config(workdir: PathBuf) -> Config {
         catalog_model: None,
         catalog_model_source: None,
         native_web_search: false,
+        cache_policy: Default::default(),
         selected_profile: None,
     }
 }
@@ -140,6 +141,130 @@ additionalProperties = false
 "#,
     )?;
     fs::write(plugin.join("main.js"), "module.exports = {}\n")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn item_tool_and_skill_filters_are_independent_and_failed_updates_are_atomic() -> Result<()> {
+    use kroma::{app::default_runtime_with_capabilities, capabilities::Capabilities};
+    use std::collections::BTreeMap;
+    let temp = TestDirectory::new()?;
+    for name in ["one", "two"] {
+        let directory = temp.path().join(".kroma/skills").join(name);
+        fs::create_dir_all(&directory)?;
+        fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: MARKER-{name}\n---\nBODY-{name}\n"),
+        )?;
+    }
+    let mut settings = Capabilities {
+        mcp: false,
+        plugins: false,
+        ..Default::default()
+    };
+    settings.items.tools.insert("shell".into(), false);
+    settings.items.tools.insert("host_marker".into(), false);
+    settings.items.skills.insert("one".into(), false);
+    settings.items.skills.insert("two".into(), true);
+    let mut runtime = default_runtime_with_capabilities(
+        config(temp.path().to_owned()),
+        settings.clone(),
+        |components| {
+            components.defer_initial_session = true;
+            components.tools.register(Arc::new(HostMarkerTool))?;
+            Ok(())
+        },
+    )
+    .await?;
+    let history = serde_json::to_value(runtime.agent.messages())?;
+    let names = runtime.agent.available_tool_names();
+    assert!(!names.contains(&"shell".to_owned()));
+    assert!(!names.contains(&"host_marker".to_owned()));
+    assert!(names.contains(&"history_read".to_owned()));
+    assert!(names.contains(&"load_skill".to_owned()));
+    assert!(runtime.skills.load("one").is_err());
+    assert!(runtime.skills.load("two")?.to_string().contains("BODY-two"));
+    let prompt = rendered_prompt(&runtime.base_prompt);
+    assert!(!prompt.contains("MARKER-one") && prompt.contains("MARKER-two"));
+    let mut registry = runtime.base_tools.clone();
+    registry.retain_enabled(&settings);
+    let archive = temp.path().join("unused.json");
+    let context = ToolContext {
+        model_connection: None,
+        user_message: None,
+        user_turn: None,
+        user_images: None,
+        previous_user_images: None,
+        workdir: temp.path(),
+        archive: &archive,
+        on_output: None,
+        ask: None,
+    };
+    let call = ToolCall {
+        id: "disabled".into(),
+        kind: "function".into(),
+        function: kroma::provider::FunctionCall {
+            name: "host_marker".into(),
+            arguments: "{}".into(),
+        },
+    };
+    assert!(registry
+        .execute(&call, context)
+        .await
+        .content
+        .contains("unsupported tool"));
+    let mut next = settings.clone();
+    next.items.tools.insert("shell".into(), true);
+    next.items.tools.insert("host_marker".into(), true);
+    next.items.skills.insert("one".into(), true);
+    next.items.skills.insert("two".into(), false);
+    let writes = std::cell::Cell::new(0);
+    let error = runtime
+        .update_capabilities(next.clone(), &BTreeMap::new(), || {
+            writes.set(writes.get() + 1);
+            anyhow::bail!("fixture write failed")
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("fixture write failed"));
+    assert_eq!(writes.get(), 1);
+    assert_eq!(runtime.capabilities(), settings);
+    assert_eq!(runtime.agent.available_tool_names(), names);
+    assert_eq!(serde_json::to_value(runtime.agent.messages())?, history);
+    assert!(runtime.skills.load("one").is_err());
+    runtime
+        .update_capabilities(next.clone(), &BTreeMap::new(), || {
+            writes.set(writes.get() + 1);
+            Ok(())
+        })
+        .await?;
+    assert_eq!(writes.get(), 2);
+    assert_eq!(runtime.capabilities(), next);
+    assert!(runtime
+        .agent
+        .available_tool_names()
+        .contains(&"host_marker".to_owned()));
+    assert!(runtime
+        .agent
+        .available_tool_names()
+        .contains(&"shell".to_owned()));
+    assert!(runtime.skills.load("one").is_ok());
+    assert!(runtime.skills.load("two").is_err());
+    assert_eq!(serde_json::to_value(runtime.agent.messages())?, history);
+    // Invalid preparation cannot write settings or replace the active runtime.
+    fs::write(temp.path().join(".kroma/mcp.json"), "not JSON")?;
+    let mut invalid = next.clone();
+    invalid.mcp = true;
+    assert!(runtime
+        .update_capabilities(invalid, &BTreeMap::new(), || {
+            writes.set(99);
+            Ok(())
+        })
+        .await
+        .is_err());
+    assert_eq!(writes.get(), 2);
+    assert_eq!(runtime.capabilities(), next);
+    assert_eq!(serde_json::to_value(runtime.agent.messages())?, history);
     Ok(())
 }
 
@@ -251,5 +376,127 @@ async fn idle_reload_starts_from_host_tools_and_prompt_without_plugins() -> Resu
         .agent
         .available_tool_names()
         .contains(&"host_marker".to_owned()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn capability_toggles_keep_skills_independent_and_preserve_history() -> Result<()> {
+    use kroma::{app::default_runtime_with_capabilities, capabilities::Capabilities};
+    let temp = TestDirectory::new()?;
+    let skill = temp.path().join(".agents/skills/capability-probe");
+    fs::create_dir_all(&skill)?;
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: capability-probe\ndescription: CAPABILITY-SKILL-MARKER\n---\nSkill body.\n",
+    )?;
+    let disabled = Capabilities {
+        tools: false,
+        mcp: false,
+        skills: false,
+        plugins: false,
+        ..Default::default()
+    };
+    let mut runtime = default_runtime_with_capabilities(
+        config(temp.path().to_path_buf()),
+        disabled.clone(),
+        |components| {
+            components.defer_initial_session = true;
+            components.tools.register(Arc::new(HostMarkerTool))?;
+            Ok(())
+        },
+    )
+    .await?;
+    let original = serde_json::to_value(runtime.agent.messages())?;
+    assert_eq!(runtime.agent.available_tool_names(), vec!["host_marker"]);
+    assert!(runtime.skills.is_empty());
+    assert!(!rendered_prompt(&runtime.base_prompt).contains("CAPABILITY-SKILL-MARKER"));
+    runtime
+        .set_capabilities(Capabilities {
+            skills: true,
+            ..disabled.clone()
+        })
+        .await?;
+    assert!(runtime
+        .agent
+        .available_tool_names()
+        .contains(&"load_skill".to_owned()));
+    assert!(!runtime
+        .agent
+        .available_tool_names()
+        .contains(&"shell".to_owned()));
+    assert!(rendered_prompt(&runtime.base_prompt).contains("CAPABILITY-SKILL-MARKER"));
+    runtime.set_capabilities(disabled.clone()).await?;
+    assert_eq!(runtime.agent.available_tool_names(), vec!["host_marker"]);
+    assert!(!rendered_prompt(&runtime.base_prompt).contains("CAPABILITY-SKILL-MARKER"));
+    assert_eq!(serde_json::to_value(runtime.agent.messages())?, original);
+    assert_eq!(runtime.agent.session_id(), "unknown");
+    let snapshot =
+        kroma::desktop_host::snapshot_with_plugins(&runtime.agent, Some(&runtime.plugins))?;
+    assert_eq!(snapshot["capabilities"], serde_json::to_value(disabled)?);
+    assert_eq!(snapshot["skills"], serde_json::json!([]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn capability_tools_switch_does_not_remove_lazy_mcp_and_off_skips_config() -> Result<()> {
+    use kroma::{app::default_runtime_with_capabilities, capabilities::Capabilities};
+    let temp = TestDirectory::new()?;
+    fs::create_dir_all(temp.path().join(".kroma"))?;
+    let mcp_file = temp.path().join(".kroma/mcp.json");
+    fs::write(
+        &mcp_file,
+        r#"{"mcpServers":{"capability-probe":{"command":"this-program-must-not-be-started","env":{"SECRET":"not-for-ui"}}}}"#,
+    )?;
+    let capabilities = Capabilities {
+        tools: false,
+        mcp: true,
+        skills: false,
+        plugins: false,
+        ..Default::default()
+    };
+    let mut runtime = default_runtime_with_capabilities(
+        config(temp.path().to_path_buf()),
+        capabilities.clone(),
+        |components| {
+            components.defer_initial_session = true;
+            Ok(())
+        },
+    )
+    .await?;
+    assert!(runtime
+        .agent
+        .available_tool_names()
+        .contains(&"mcp_search".to_owned()));
+    assert!(runtime
+        .agent
+        .available_tool_names()
+        .contains(&"mcp_call".to_owned()));
+    assert!(!runtime
+        .agent
+        .available_tool_names()
+        .contains(&"shell".to_owned()));
+    let summaries = serde_json::to_string(&kroma::mcp::configured_server_summaries(temp.path())?)?;
+    assert!(summaries.contains("capability-probe"));
+    assert!(!summaries.contains("not-for-ui"));
+    fs::write(mcp_file, "not json")?;
+    runtime
+        .set_capabilities(Capabilities {
+            tools: true,
+            mcp: false,
+            ..capabilities
+        })
+        .await?;
+    assert!(runtime
+        .agent
+        .available_tool_names()
+        .contains(&"shell".to_owned()));
+    assert!(!runtime
+        .agent
+        .available_tool_names()
+        .contains(&"mcp_search".to_owned()));
+    assert!(!runtime
+        .agent
+        .available_tool_names()
+        .contains(&"mcp_call".to_owned()));
     Ok(())
 }

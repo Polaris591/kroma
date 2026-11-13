@@ -69,7 +69,7 @@ pub(super) fn payload_with_cache_at(
     let active_turn = active_turn_override.unwrap_or_else(|| {
         messages
             .iter()
-            .rposition(|msg| msg.role == "user")
+            .rposition(crate::protocol::is_actual_user_message)
             .unwrap_or(0)
     });
     for (index, msg) in messages.iter().enumerate() {
@@ -105,7 +105,7 @@ pub(super) fn payload_with_cache_at(
             }
             "tool" => input.push(json!({"type":"function_call_output",
                 "call_id":msg.tool_call_id.as_deref().context("missing tool_call_id")?,
-                "output":msg.content.as_deref().unwrap_or("")})),
+                "output":crate::tool_archive::model_content(msg)})),
             other => bail!("unsupported role for Responses: {other}"),
         }
     }

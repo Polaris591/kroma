@@ -189,14 +189,14 @@ kroma plugins install <本地目录 | git 地址>
 | 常驻挂件与按钮 | `ui.widget`（`id`, `placement`, `title`, `blocks`, `actions`, `clear`） | 在 `above_composer` / `below_composer` / `sidebar` / `header` / `footer` 实时渲染并接收 `ui_action` 点击事件；`placement = "transcript"` 把内容块插进消息流（随对话滚动，仅内容、不带按钮） |
 | 主动弹出/刷新面板 | `ui.panel`（`action = "open"\|"update"\|"close"`, `title`, `blocks`, `actions`） | 无需等待用户敲 `/plugins view`，插件主动弹窗展示结构化内容 |
 | 面板文字与按需面板 | `[ui] panel_title` / `panel_text` / `dynamic_panel = true` | `/plugins view <id>` 与插件页卡片查看 |
-| 快捷键 / 名称 / 动画 / 颜色 / 布局 | `[[ui.shortcuts]]`、`[ui.tool_labels]`、`[ui] activity_frames`、`[ui.colors]`、`[ui.layout]` | 快捷键触发命令、改工具显示名、覆盖主题色等 |
+| 快捷键 / 名称 / 动画 / 颜色 / 布局 | `[[ui.shortcuts]]`、`[ui.tool_labels]`、`[ui] activity_frames`、`[ui.colors]`、`[ui.layout]` | 快捷键触发命令、改工具显示名、覆盖主题色；`[ui.colors]` 的颜色桌面端已全部接通（含强调色）；`[ui.layout]` 的桌面端开关：`desktop_content_width`（360–1400 像素阅读宽度）、`desktop_sidebar`（`visible`/`hidden`，默认侧栏开合）、`desktop_density`（`regular`/`compact`，宽松或紧凑）。桌面端只认这三个和 `composer_max_rows`，其余字段忽略 |
 
 ### 第二层：两端各自的自由接管区
 
 | 端 | 接管方式 | 说明 |
 | --- | --- | --- |
 | 终端（TUI） | `ui.custom` 宿主调用 | 插件申请弹层或全屏画布（`ui_render` / `ui_input` / `ui_close`），宿主按 `(width, height)` 接收样式行与光标坐标，并将按键/缩放实时转发给插件；`Ctrl+C` 随时安全退出；`--print`/桌面返回 `ok:false` |
-| 桌面端（Desktop） | `[ui.desktop]`（`entry`, `slot = "sidebar"\|"tab"\|"above_composer"\|"panel"`, `title`, `height`） | 在沙盒化的独立网页容器内加载插件的本地 HTML/CSS/JS（防路径越界），注入 `window.kroma` 桥接 SDK（`request` 发 `ui_message`、`onEvent` 收 `ui.desktop_emit` 与会话上下文、`runTask`、`setComposer`、`notify`） |
+| 桌面端（Desktop） | `[ui.desktop]`（`entry`, `slot = "sidebar"\|"tab"\|"above_composer"\|"panel"\|"workspace"`, `title`, `height`） | 在沙盒化的独立网页容器内加载插件的本地 HTML/CSS/JS（防路径越界），注入 `window.kroma` 桥接 SDK（`request` 发 `ui_message`、`onEvent` 收 `ui.desktop_emit` 与会话上下文、`runTask`、`setComposer`、`notify`）；`workspace` 表示整块主工作区接管，默认顶替对话画面，界面右上角始终保留「回到对话」，插件界面写坏也不会被困住 |
 
 - 完整可运行参考实现：`examples/plugins/ui-lab`（`kroma plugins check examples/plugins/ui-lab`）；端到端用例见 `tests/plugins_e2e.rs`（`ui_lab_widgets_actions_notify_composer_and_desktop_bundle_roundtrip` 与 `plugin_custom_tui_screen_renders_and_handles_input_roundtrip`）以及 `src/tui/view_tests.rs`。
 

@@ -34,7 +34,35 @@ pub(crate) struct CacheTrace {
     request: u64,
 }
 
-fn fingerprint(bytes: &[u8]) -> u64 {
+/// Content-free facts about the request that was actually built. Recorded so a
+/// hook rewrite, a host reference block, a provider-native tool injection or a
+/// mis-paired calibration cannot stay invisible. Never carries prompt text,
+/// tool arguments or credentials: only counters, hashes and role names.
+pub(crate) struct TraceObservation {
+    /// `final_request` when the provider layer published the exact view it
+    /// sent, `provider_budget` when only the pre-hook projection is available.
+    pub projection: &'static str,
+    pub rewritten: bool,
+    pub reference_bytes: usize,
+    pub protocol: Option<String>,
+    pub model: Option<String>,
+    /// Hash of the configured base URL, never the URL itself.
+    pub endpoint_fingerprint: Option<String>,
+    pub native_tools: Vec<String>,
+    pub payload_fingerprint: Option<String>,
+    pub payload_bytes: Option<usize>,
+    pub tool_definitions: Option<usize>,
+    pub provider_request_id: Option<String>,
+    pub elapsed_ms: Option<u64>,
+    pub first_token_ms: Option<u64>,
+    /// Whether this request's provider-reported tokens were recorded as a
+    /// calibration basis for later admission: false when a request hook rewrote
+    /// the projection, or when the endpoint reported no input tokens. It does not
+    /// claim that a later request reused the measurement.
+    pub calibrated: bool,
+}
+
+pub(crate) fn fingerprint(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
     })
@@ -129,8 +157,15 @@ impl CacheSnapshot {
 }
 
 impl CacheTrace {
+    /// Whether opt-in cache diagnostics are enabled. The wire identity is a
+    /// diagnostics-only value, so it is not computed (and the payload is not
+    /// serialized a second time) unless the operator asked for the trace.
+    pub(crate) fn enabled() -> bool {
+        std::env::var("KROMA_CACHE_TRACE").ok().as_deref() == Some("1")
+    }
+
     pub(crate) fn from_env() -> Option<Self> {
-        (std::env::var("KROMA_CACHE_TRACE").ok().as_deref() == Some("1")).then_some(Self {
+        Self::enabled().then_some(Self {
             previous: None,
             session: None,
             request: 0,
@@ -149,6 +184,7 @@ impl CacheTrace {
         snapshot: CacheSnapshot,
         usage: Option<&Usage>,
         success: bool,
+        observation: &TraceObservation,
     ) {
         if self.session.as_deref() != Some(session) {
             self.session = Some(session.to_owned());
@@ -167,7 +203,7 @@ impl CacheTrace {
             "pid": std::process::id(),
             "request": self.request,
             "status": if success {"ok"} else {"error"},
-            "projection": "provider_budget",
+            "projection": observation.projection,
             "message_count": snapshot.messages.len(),
             "system_hash": format!("{:016x}", snapshot.system_hash),
             "tools_hash": format!("{:016x}", snapshot.tools_hash),
@@ -177,12 +213,28 @@ impl CacheTrace {
             "summaries": snapshot.summaries,
             "cleared_tools": snapshot.cleared_tools,
             "change": change,
+            "append_only": matches!(change, "baseline" | "append_only" | "unchanged"),
             "common_prefix_messages": same_prefix_messages,
             "common_prefix_json_bytes": same_prefix_json_bytes,
             "first_changed_role": first_changed_role,
+            "hooks_rewritten": observation.rewritten,
+            "reference_bytes": observation.reference_bytes,
+            "calibrated": observation.calibrated,
+            "protocol": observation.protocol.as_deref(),
+            "model": observation.model.as_deref(),
+            "endpoint_fingerprint": observation.endpoint_fingerprint.as_deref(),
+            "native_tools": observation.native_tools,
+            "payload_fingerprint": observation.payload_fingerprint.as_deref(),
+            "payload_bytes": observation.payload_bytes,
+            "tool_definitions": observation.tool_definitions,
+            "provider_request_id": observation.provider_request_id.as_deref(),
+            "elapsed_ms": observation.elapsed_ms,
+            "first_token_ms": observation.first_token_ms,
             "input_tokens": usage.and_then(|u| u.input),
             "output_tokens": usage.and_then(|u| u.output),
             "cached_tokens": usage.and_then(|u| u.cached),
+            "cache_write_tokens": usage.and_then(|u| u.cache_write),
+            "cache_write_1h_tokens": usage.and_then(|u| u.cache_write_1h),
             "reasoning_tokens": usage.and_then(|u| u.reasoning),
         });
         if let Err(error) = append_record(&Self::sidecar(session), &record) {
@@ -218,6 +270,25 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    fn observation() -> TraceObservation {
+        TraceObservation {
+            projection: "final_request",
+            rewritten: false,
+            reference_bytes: 42,
+            protocol: Some("anthropic".into()),
+            model: Some("claude-test".into()),
+            endpoint_fingerprint: Some("0123456789abcdef".into()),
+            native_tools: vec!["web_search".into()],
+            payload_fingerprint: Some("fedcba9876543210".into()),
+            payload_bytes: Some(4_096),
+            tool_definitions: Some(3),
+            provider_request_id: Some("req_123".into()),
+            elapsed_ms: Some(1_500),
+            first_token_ms: Some(300),
+            calibrated: true,
+        }
     }
 
     #[test]
@@ -316,6 +387,7 @@ mod tests {
             capture(&messages, &CompactionState::default()),
             None,
             true,
+            &observation(),
         );
         let jsonl = std::fs::read_to_string(CacheTrace::sidecar(&session)).unwrap();
         assert!(!jsonl.contains("DO NOT LOG"));
@@ -323,6 +395,12 @@ mod tests {
         assert_eq!(record["change"], "baseline");
         assert_eq!(record["message_count"], 2);
         assert!(record["cached_tokens"].is_null());
+        assert!(record["cache_write_tokens"].is_null());
+        assert_eq!(record["projection"], "final_request");
+        assert_eq!(record["native_tools"], json!(["web_search"]));
+        assert_eq!(record["protocol"], "anthropic");
+        assert_eq!(record["payload_fingerprint"], "fedcba9876543210");
+        assert_eq!(record["provider_request_id"], "req_123");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -350,6 +428,8 @@ mod tests {
             reasoning: Some(5),
             total: Some(102),
             web_searches: None,
+            cache_write: Some(20),
+            cache_write_1h: Some(20),
         };
         trace.record(
             &session,
@@ -359,6 +439,7 @@ mod tests {
             ),
             Some(&usage),
             false,
+            &observation(),
         );
         let jsonl = std::fs::read_to_string(CacheTrace::sidecar(&session)).unwrap();
         assert!(!jsonl.contains("SECRET"));
@@ -368,6 +449,55 @@ mod tests {
         assert_eq!(record["output_tokens"], 12);
         assert_eq!(record["cached_tokens"], 64);
         assert_eq!(record["reasoning_tokens"], 5);
+        assert_eq!(
+            record["cache_write_tokens"], 20,
+            "a cache write is recorded as a subset of input, not an extra term"
+        );
+        assert_eq!(record["cache_write_1h_tokens"], 20);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replayed_reference_reports_append_only_final_projection() {
+        let root = std::env::temp_dir().join(format!(
+            "kroma-trace-append-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let session = root.join("append.json");
+        let mut trace = CacheTrace {
+            previous: None,
+            session: None,
+            request: 0,
+        };
+        let state = CompactionState::default();
+        // The reference keeps its position after the boundary user turn, so the
+        // next request is an append even though the turn grew.
+        let first = vec![
+            Message::new("system", "system"),
+            Message::new("user", "task"),
+            Message::new("user", "<plugin-context/>"),
+        ];
+        trace.record(
+            &session,
+            capture(&first, &state),
+            None,
+            true,
+            &observation(),
+        );
+        let mut next = first.clone();
+        next.push(Message::new("assistant", "working"));
+        next.push(Message::tool("call-1".into(), "output".into()));
+        trace.record(&session, capture(&next, &state), None, true, &observation());
+        let jsonl = std::fs::read_to_string(CacheTrace::sidecar(&session)).unwrap();
+        let last: Value = serde_json::from_str(jsonl.lines().last().unwrap()).unwrap();
+        assert_eq!(last["change"], "append_only");
+        assert_eq!(last["append_only"], true);
+        assert_eq!(last["common_prefix_messages"], 3);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

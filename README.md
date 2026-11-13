@@ -71,6 +71,11 @@ See [docs/quickstart.md](docs/quickstart.md) for the full first-run flow.
 - **Honest cancellation.** Ctrl+C stops the active model request or shell process
   tree; completed side effects are not claimed as undone. Ctrl+Z restores a cleared
   draft and its attachments.
+- **Desktop edges stay honest.** The Desktop can reopen attached images read-only
+  through a bounded, magic-checked preview command, asks before closing the window
+  during a task, restores an input the backend refused before it ran, and exports
+  Markdown that lists attachment names and sizes without copying the files. See
+  [Desktop](desktop/README.md).
 
 ## Commands
 
@@ -85,7 +90,7 @@ kroma setup                   Guided model setup
 kroma config ...              Manage saved profiles
 kroma plugins ...             Manage plugins
 kroma diagnostics ...         Local support bundle
-kroma trust-project           Approve this project's MCP file
+kroma trust-project           Legacy no-op; MCP needs no approval
 kroma update [--check]        Update manually, or only check
 kroma help [COMMAND]          Help
 ```
@@ -127,8 +132,8 @@ MCP tool discovery is lazy:
 - `mcp_call` invokes a discovered tool.
 
 Set `KROMA_MCP_EAGER=1` to expose every remote tool directly, `--no-mcp` to skip MCP,
-and `KROMA_MCP_STDERR=inherit` to debug server logs. Project MCP files require
-`kroma trust-project`.
+and `KROMA_MCP_STDERR=inherit` to debug server logs. Project MCP files load directly
+without approval; inspect `.kroma/mcp.json` before using a project.
 
 Agent Skills are discovered from `SKILL.md` files and loaded only when relevant.
 See [docs/reference/configuration.md](docs/reference/configuration.md).

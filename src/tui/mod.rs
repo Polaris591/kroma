@@ -2236,11 +2236,15 @@ pub async fn run_with_resume(mut config: Config, resume_recent: bool) -> Result<
                     // swapping the active registry, so failures leave it intact.
                     let prepared = (|| -> Result<_> {
                         let mut discovered = crate::plugins::PluginCatalog::discover(&workdir)?;
-                        let (tools, prompt) = runtime.plugins.prepare_idle_reload_from(
+                        let (mut tools, mut prompt) = runtime.plugins.prepare_idle_reload_from(
                             &mut discovered,
                             &runtime.base_tools,
                             &runtime.base_prompt,
                         )?;
+                        tools.apply_capabilities(&runtime.base_tools, &agent.capabilities());
+                        if let Some(policy) = crate::child_policy::ChildPolicy::from_env()? {
+                            policy.apply(&mut tools, &mut prompt)?;
+                        }
                         let mut next_commands = CommandRegistry::builtin_with_warnings(
                             runtime.skills.list(),
                             runtime.startup_warnings.clone(),
@@ -3076,6 +3080,7 @@ mod tests {
             output: Some(140),
             cached: Some(0),
             reasoning: None,
+            cache_write: None,
         })
         .unwrap();
         tx.send(UiEvent::ActualInput(2_000)).unwrap();
@@ -3084,6 +3089,7 @@ mod tests {
             input: Some(800),
             output: Some(90),
             cached: Some(300),
+            cache_write: None,
         })
         .unwrap();
         tx.send(UiEvent::TitleUsage {

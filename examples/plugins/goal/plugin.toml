@@ -6,9 +6,10 @@ description = "Keep working toward one goal per conversation; record progress or
 command = "node"
 args = ["main.js"]
 hooks = ["before_turn_end"]
+events = ["session_rewound", "session_cleared"]
 prompt = """
 仅在有活动目标时使用 Goal；直接执行，不要求预填验收表。
-用 goal_checkpoint 记录关键进展、结论或阻塞；claim 设为 done 才算完成，blocked 会暂停目标。
+用 goal_checkpoint 记录关键进展、结论或阻塞；claim 设为 done 才算完成，blocked 会暂停目标（用户补充信息后如需继续，先用 claim=working 恢复或 done 结束）。
 这个插件只在自己的存档里记状态；它不会替你批准任何操作，也不授予新权限。用户最新指令优先。
 """
 
@@ -22,7 +23,7 @@ description = "开始、查看或取消目标"
 [[tools]]
 name = "goal_checkpoint"
 description = "记录活动目标的进展、结论或阻塞。claim 只能是 working、done 或 blocked；done 结束目标，blocked 暂停目标。"
-invalidates_context = true
+may_mutate_worktree = false
 
 [tools.parameters]
 type = "object"

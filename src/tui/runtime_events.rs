@@ -26,6 +26,8 @@ pub enum UiEvent {
         output: Option<u64>,
         cached: Option<u64>,
         reasoning: Option<u64>,
+        /// Subset of input written into the provider cache, when reported.
+        cache_write: Option<u64>,
     },
     TitleUsage {
         session_id: String,
@@ -40,6 +42,7 @@ pub enum UiEvent {
         input: Option<u64>,
         output: Option<u64>,
         cached: Option<u64>,
+        cache_write: Option<u64>,
     },
     UsageBatch(crate::usage::UsageMeter),
     ApecUsageBatch(crate::usage::UsageMeter),
@@ -94,6 +97,7 @@ impl crate::events::EventSink for UiSink {
                 reasoning_tokens,
                 cached_tokens,
                 reasoning,
+                cache_write_tokens,
                 ..
             } => {
                 let _ = self.0.send(UiEvent::Usage {
@@ -101,6 +105,7 @@ impl crate::events::EventSink for UiSink {
                     output: output_tokens,
                     cached: cached_tokens,
                     reasoning: reasoning_tokens,
+                    cache_write: cache_write_tokens,
                 });
                 if let Some(tokens) = input_tokens {
                     let _ = self.0.send(UiEvent::ActualInput(tokens));
@@ -117,12 +122,15 @@ impl crate::events::EventSink for UiSink {
                 output_tokens,
                 cached_tokens,
                 reasoning_tokens,
+                cache_write_tokens,
+                ..
             } => {
                 let _ = self.0.send(UiEvent::Usage {
                     input: input_tokens,
                     output: output_tokens,
                     cached: cached_tokens,
                     reasoning: reasoning_tokens,
+                    cache_write: cache_write_tokens,
                 });
                 None
             }
@@ -131,11 +139,13 @@ impl crate::events::EventSink for UiSink {
                 input_tokens,
                 output_tokens,
                 cached_tokens,
+                cache_write_tokens,
             } => Some(UiEvent::ApecUsage {
                 requests,
                 input: input_tokens,
                 output: output_tokens,
                 cached: cached_tokens,
+                cache_write: cache_write_tokens,
             }),
             RuntimeEvent::ToolStarted {
                 name,
@@ -191,6 +201,8 @@ mod tests {
             output_tokens: None,
             reasoning_tokens: None,
             cached_tokens: Some(0),
+            cache_write_tokens: None,
+            cache_write_1h_tokens: None,
         });
         let UiEvent::UsageBatch(batch) = receiver.try_recv().unwrap() else {
             panic!("usage must retain its queue position");

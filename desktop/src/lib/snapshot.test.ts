@@ -28,7 +28,6 @@ const bootstrap = (): Bootstrap => ({
   profiles: {active: null, profiles: []},
   plugins: [],
   plugin_warnings: [],
-  mcp_project: {configured: false, trusted: false},
 });
 
 const bootstrapFor = (project: string, sessionId: string): Bootstrap => ({

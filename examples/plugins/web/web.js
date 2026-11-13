@@ -1,5 +1,5 @@
 "use strict";
-const {WebError, httpUrl, download} = require("./http");
+const {WebError, httpUrl, download, isPublicDestination} = require("./http");
 const {extractPage, plainText} = require("./page");
 const {createStore} = require("./cache");
 // Mirrors the [settings] block in plugin.toml for the two behavioural defaults.
@@ -14,7 +14,7 @@ const KEY_ENV = Object.freeze({exa: "EXA_API_KEY", brave: "BRAVE_SEARCH_API_KEY"
   serpapi: "SERPAPI_API_KEY", linkup: "LINKUP_API_KEY",
   search1api: "SEARCH1API_API_KEY", valyu: "VALYU_API_KEY"});
 const FIRECRAWL_BASE = "https://api.firecrawl.dev";
-const FREE_WARNING = "No search credential is configured, so this used a keyless backend (Firecrawl low volume, SearXNG or Mwmbl): smaller coverage, weaker Chinese results. Set a provider key for dependable results.";
+const FREE_WARNING = "No search credential is configured, so this used a keyless backend (Exa public, Firecrawl low volume, SearXNG or Mwmbl): smaller coverage or lower rate limits. Set a provider key for dependable results.";
 
 function apiKey(provider, settings) {
   const key = settings[provider + "_api_key"] || process.env[KEY_ENV[provider]];
@@ -280,8 +280,9 @@ async function searchProvider(provider, query, settings, timeout, count, sites, 
 // Default order is quality-first: semantic and agent-tuned indexes first, then
 // broad web indexes, then the self-hosted and free fallbacks. A chain is worth
 // its cost only because it runs when something actually failed.
-const PROVIDER_ORDER = Object.freeze(["exa_public", "exa", "tavily", "brave", "kagi", "you", "serper",
-  "perplexity", "parallel", "serpapi", "searchapi", "linkup", "bocha", "search1api", "valyu", "firecrawl", "searxng", "mwmbl"]);
+const PROVIDER_ORDER = Object.freeze(["exa", "tavily", "brave", "kagi", "you", "serper",
+  "perplexity", "parallel", "serpapi", "searchapi", "linkup", "bocha", "search1api", "valyu",
+  "exa_public", "firecrawl", "searxng", "mwmbl"]);
 const KEYLESS = new Set(["exa_public", "firecrawl", "searxng", "mwmbl"]);
 
 function parseChain(value) {
@@ -413,12 +414,17 @@ async function exaInit(timeout) {
 
 async function exaTool(name, args, timeout) {
   await exaInit(timeout);
+  const hadSession = !!exaSession;
   const id = Date.now();
   const call = callId => exaRpc({jsonrpc: "2.0", id: callId, method: "tools/call", params: {name, arguments: args}}, timeout);
   try {
     return await call(id);
   } catch (error) {
-    // Only an expired session is worth one retry; anything else is the answer.
+    const expiredSession = hadSession && (
+      error?.code === "INVALID_RESPONSE" ||
+      (error?.code === "HTTP_ERROR" && [400, 404].includes(error.status))
+    );
+    if (!expiredSession) throw error;
     exaSession = null;
     await exaInit(timeout);
     return call(id + 1);
@@ -447,6 +453,9 @@ async function exaFetchPublic(url, timeout) {
   return {title: title.slice(0, 1000), text, url: url.href, source_truncated: false, provider: "exa_public"};
 }
 
+// Process memory only, capacity-bounded to 24 address names. Eviction follows
+// insertion order, not access order. A page with an open continuation is held
+// through a long download/render/build; it is not a durable task store.
 const pages = createStore({limit: 24});
 
 function linkChars(text) {
@@ -507,7 +516,6 @@ function firecrawlKey(settings) {
 // use (JavaScript shell, 403/429), and only when the owner stored a key: one
 // key, no switches, and the result says rendering was used so cost is visible.
 async function fetchFirecrawl(url, settings) {
-  const signal = AbortSignal.timeout(TIMEOUT_MS);
   const response = await download(FIRECRAWL_BASE + "/v2/scrape", {timeout: TIMEOUT_MS, bytes: 1500000,
     types: ["application/json"], method: "POST",
     headers: {Authorization: "Bearer " + firecrawlKey(settings), "Content-Type": "application/json"},
@@ -566,8 +574,11 @@ async function fetchPage(address, config = {}, requestedChars, startChar = 0, fi
   }
   const cached = pages.get(url.href);
   if (startChar > 0 && !cached) {
-    throw new WebError("CACHE_MISS", "Continuation snapshot expired or is unavailable for " + url.href +
-      "; re-read it from start_char = 0 with this URL or the requested_url of the previous result, then use its new next_start.");
+    // Never refetch and apply the old offset to a new extraction: different
+    // page versions could be silently spliced together. A miss is an explicit
+    // restart at zero, and the caller must use the new next_start.
+    throw new WebError("CACHE_MISS", "Continuation snapshot expired or was evicted for " + url.href +
+      ". The previous start_char is no longer valid and must not be reused; restart this URL from start_char = 0, then continue with the new next_start.");
   }
   let page = cached;
   if (!page) {
@@ -580,9 +591,10 @@ async function fetchPage(address, config = {}, requestedChars, startChar = 0, fi
       const eligible = ["UNREADABLE_PAGE", "NETWORK_ERROR", "TIMEOUT", "PDF_DETECTED"].includes(error.code)
         || (error.code === "HTTP_ERROR" && [403, 429].includes(error.status));
       if (!eligible) throw error;
+      if (error.code === "PDF_DETECTED" && !firecrawlKey(settings)) throw error;
+      if (!(await isPublicDestination(url))) throw error;
       try {
-        // Exa's public endpoint is free, so it answers before any paid render.
-        page = error.code === "PDF_DETECTED" && firecrawlKey(settings)
+        page = error.code === "PDF_DETECTED"
           ? await fetchFirecrawl(url, settings)
           : await exaFetchPublic(url, TIMEOUT_MS);
       } catch (fallback) {
@@ -625,14 +637,18 @@ async function fetchPage(address, config = {}, requestedChars, startChar = 0, fi
   // Avoid breaking a UTF-16 surrogate pair at the continuation boundary.
   if (end < to && /[\uD800-\uDBFF]/.test(page.text[end - 1])) end--;
   const text = page.text.slice(from, end);
-  return JSON.stringify({provider: page.provider, url: page.url, requested_url: url.href, title: page.title,
+  const result = {provider: page.provider, url: page.url, requested_url: url.href, title: page.title,
     ...(headings.length ? {headings} : {}),
     ...(headingsTruncated ? {headings_truncated: true} : {}),
     ...(chosen ? {section: chosen} : {}),
     text, chars: text.length, start_char: from, total_chars: page.text.length,
     truncated: end < to || page.source_truncated,
     next_start: end < to ? end : null,
-    ...(page.source_truncated ? {warning: SOURCE_WARNING} : {})}, null, 2);
+    ...(page.source_truncated ? {warning: SOURCE_WARNING} : {})};
+  // An open continuation keeps this snapshot through a long tool. Reading to
+  // the end releases it back to the shorter idle window.
+  pages.retain([url.href, page.url], result.next_start !== null);
+  return JSON.stringify(result, null, 2);
 }
 
 // Several pages in one call: comparing sources is a normal research step and

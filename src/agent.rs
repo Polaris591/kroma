@@ -2,7 +2,7 @@
 pub const TASK_CANCELLED_PREFIX: &str = "[Task cancelled by user.";
 
 use crate::{
-    cache_trace::{CacheSnapshot, CacheTrace},
+    cache_trace::{CacheSnapshot, CacheTrace, TraceObservation},
     child_policy::ExecutionLimits,
     context::{
         BuiltinContextFactory, CompactionUsage, ContextConfig, ContextFactory, ContextPolicy,
@@ -76,11 +76,16 @@ where
 }
 
 fn transient_session_path() -> PathBuf {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    std::env::temp_dir().join(format!("kroma-unsaved-{}-{nonce}.json", std::process::id()))
+    let seq = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "kroma-unsaved-{}-{nonce}-{seq}.json",
+        std::process::id()
+    ))
 }
 
 #[cfg(test)]
@@ -97,6 +102,7 @@ fn add_batch_guidance(view: &mut [Message]) {
 }
 
 pub struct Agent {
+    capabilities: crate::capabilities::Capabilities,
     model: Arc<dyn ModelBackend>,
     tools: ToolRegistry,
     prompt: PromptComposer,
@@ -174,6 +180,12 @@ fn history_points(messages: &[Message]) -> Vec<HistoryPoint> {
     let mut previous = 1;
     for (index, msg) in messages.iter().enumerate().skip(1) {
         if msg.role != "assistant"
+            || msg
+                .provider_items
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .any(|part| part["type"] == "kroma_output_fragment")
             || msg
                 .tool_calls
                 .as_ref()
@@ -330,6 +342,30 @@ impl Agent {
             catalog,
             budget,
             defer_initial_save,
+            None,
+        )
+    }
+
+    pub(crate) fn with_capability_runtime(
+        components: crate::app::RuntimeComponents,
+        workdir: PathBuf,
+        capabilities: crate::capabilities::Capabilities,
+    ) -> Result<Self> {
+        let catalog = SessionCatalog::new(&workdir)?;
+        let prompt = components
+            .prompt
+            .for_registered_tools(components.tools.is_builtin_only());
+        Self::with_catalog_backends(
+            components.model,
+            components.tools,
+            components.context_factory,
+            prompt,
+            components.events,
+            workdir,
+            catalog,
+            components.context_budget,
+            components.defer_initial_session,
+            Some(capabilities),
         )
     }
 
@@ -345,6 +381,7 @@ impl Agent {
             catalog,
             ContextConfig::from_env()?,
             false,
+            None,
         )
     }
 
@@ -359,6 +396,7 @@ impl Agent {
         catalog: SessionCatalog,
         context_budget: ContextConfig,
         defer_initial_save: bool,
+        capabilities: Option<crate::capabilities::Capabilities>,
     ) -> Result<Self> {
         // Welcome mode must neither load nor lock the old default
         // conversation. A second Kroma terminal can therefore open its own
@@ -388,8 +426,18 @@ impl Agent {
                 true,
             ),
         };
+        let capabilities = match capabilities {
+            Some(capabilities) => capabilities,
+            None => crate::capabilities::effective_for(
+                &workdir,
+                catalog
+                    .id_for_path(session.archive_path())
+                    .unwrap_or("unknown"),
+            )?,
+        };
         let compression = context_factory.restore(state, context_budget, session.archive_path())?;
         let agent = Self {
+            capabilities,
             model,
             tools,
             prompt,
@@ -453,6 +501,7 @@ impl Agent {
             self.session.archive_path(),
         )?;
         self.session.reset(&fresh, &new_compression.state())?;
+        self.model.invalidate_ephemeral_context();
         shell::cleanup_cleared_history(&self.workdir, self.session.archive_path(), &self.messages);
         if let Err(error) =
             shell::cleanup_session_orphans(&self.workdir, self.session.archive_path(), &[], true)
@@ -624,6 +673,7 @@ impl Agent {
                     input_tokens: usage.input,
                     output_tokens: usage.output,
                     cached_tokens: usage.cached,
+                    cache_write_tokens: usage.cache_write,
                 });
             }
             if let Ok(report) = &result {
@@ -651,6 +701,7 @@ impl Agent {
                     input_tokens: usage.input,
                     output_tokens: usage.output,
                     cached_tokens: usage.cached,
+                    cache_write_tokens: usage.cache_write,
                 });
             }
         }
@@ -750,6 +801,57 @@ impl Agent {
     /// with the generic web_search plugin without rebuilding this catalog.
     fn model_tool_definitions(&self) -> Vec<serde_json::Value> {
         self.tools.definitions()
+    }
+
+    pub fn capabilities(&self) -> crate::capabilities::Capabilities {
+        self.capabilities.clone()
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.task_active || self.model_in_flight
+    }
+
+    pub(crate) fn prepare_runtime_context(
+        &self,
+        components: &crate::app::RuntimeComponents,
+    ) -> Result<Box<dyn ContextPolicy>> {
+        if self.is_running() {
+            bail!("A task is running; capability changes were not applied");
+        }
+        let state = self.compression.state();
+        let initial = components.context_factory.initial();
+        let compatible = match (&state, &initial) {
+            (PersistedContext::Builtin(_), PersistedContext::Builtin(_)) => true,
+            (PersistedContext::External(old), PersistedContext::External(next)) => {
+                old.strategy == next.strategy && old.version == next.version
+            }
+            _ => false,
+        };
+        let state = if compatible { state } else { initial };
+        components.context_factory.restore(
+            state,
+            components.context_budget,
+            self.session.archive_path(),
+        )
+    }
+
+    pub(crate) fn replace_runtime(
+        &mut self,
+        components: crate::app::RuntimeComponents,
+        capabilities: crate::capabilities::Capabilities,
+        context: Box<dyn ContextPolicy>,
+    ) {
+        for task in self.pending_task_notifications.drain(..) {
+            task.abort();
+        }
+        self.compression.abort();
+        self.compression = context;
+        self.context_factory = components.context_factory;
+        self.context_budget = components.context_budget;
+        self.model = components.model;
+        self.model_report = components.model_report;
+        self.capabilities = capabilities;
+        self.reload_extensions(components.tools, components.prompt, components.events);
     }
 
     /// Atomically switch tool/Prompt/event contributions at an idle task
@@ -1053,6 +1155,7 @@ impl Agent {
 
         let shortened = self.messages[..until].to_vec();
         self.session.reset(&shortened, &next_compression.state())?;
+        self.model.invalidate_ephemeral_context();
         self.compression.abort();
         self.messages = shortened;
         self.compression = next_compression;
@@ -1203,6 +1306,8 @@ impl Agent {
                     output_tokens: None,
                     cached_tokens: None,
                     reasoning_tokens: None,
+                    cache_write_tokens: None,
+                    cache_write_1h_tokens: None,
                 });
             }
         }
@@ -1224,6 +1329,7 @@ impl Agent {
                     input_tokens: checkpoint.input,
                     output_tokens: checkpoint.output,
                     cached_tokens: checkpoint.cached,
+                    cache_write_tokens: checkpoint.cache_write,
                 });
             }
         }
@@ -1307,6 +1413,7 @@ impl Agent {
                     input_tokens: stats.compaction.input,
                     output_tokens: stats.compaction.output,
                     cached_tokens: stats.compaction.cached,
+                    cache_write_tokens: stats.compaction.cache_write,
                 });
             }
         }
@@ -1535,7 +1642,6 @@ impl Agent {
         // Text already shown from rounds that hit the per-turn output ceiling,
         // and whether the next request should ask the model to continue.
         let mut answer_prefix = String::new();
-        let mut pending_continuation = false;
         let mut output_continuations = 0;
         let mut continuing_native_search = false;
         let mut checkpoint_ready = false;
@@ -1565,6 +1671,10 @@ impl Agent {
                     self.model.accepts_images(),
                 ))
                 .saturating_add(inline_log_tokens);
+            // Live reasoning controls and protocol capability fallback can
+            // change between rounds; a measurement may not cross that boundary.
+            self.compression
+                .set_request_context(&self.model, &tool_definitions);
             let prepare_started = Instant::now();
             let mut view = self
                 .compression
@@ -1577,35 +1687,51 @@ impl Agent {
                 .await?;
             self.session.ensure_writable()?;
             self.prompt.apply(&mut view);
+            for message in &mut view {
+                crate::tool_archive::project_message(message);
+            }
             // Model context is a projection, not the WAL. Keep images for the
             // current task (including its tool rounds), but don't repeatedly
             // re-upload old images for every later user turn.
             crate::attachments::project_history(&mut view, self.model.accepts_images());
-            if pending_continuation {
-                pending_continuation = false;
-                // The model cannot see a partial answer that was never saved,
-                // so hand its own text back for the continuation round only.
-                if !answer_prefix.is_empty() {
-                    view.push(Message::new("assistant", answer_prefix.clone()));
-                }
-                view.push(Message::new(
-                    "user",
-                    "Your previous message was cut off by the output limit. Continue from the exact point where it stopped: do not repeat text you already wrote and do not restart the answer.",
-                ));
-            }
             // Plan with the metadata the active provider actually sends.
             // The complete view and WAL remain untouched, including opaque
             // reasoning from other models and human-visible thinking history.
             let mut budget_view = view.clone();
             self.model.project_for_budget(&mut budget_view);
+            // A decorator that already committed to host additions (an admitted
+            // memory reference) reports the exact view it will send. Planning
+            // with it lets admission calibrate against the request that is
+            // really sent; without it the conservative byte estimate stays in
+            // charge of compaction.
+            let planning_view = self
+                .model
+                .admitted_projection(&view)
+                .unwrap_or_else(|| budget_view.clone());
             // Reuse the tool-schema bytes measured once for this task,
             // and the validated message bytes for cache calibration.
             let calibrated_input = self
                 .compression
-                .calibrated_input_tokens(&self.messages, &budget_view);
-            let (estimated_input_tokens, budget_view_bytes) = self
+                .calibrated_input_tokens(&self.messages, &planning_view);
+            let (estimated_input_tokens, budget_view_bytes) = match self
                 .context_budget
-                .validate_with_tool_bytes(&budget_view, tool_schema_bytes, calibrated_input)?;
+                .validate_with_tool_bytes(&planning_view, tool_schema_bytes, calibrated_input)
+            {
+                Ok(admitted) => admitted,
+                // A host addition is withdrawn before sending when it does not
+                // fit, so it must not fail task admission.
+                Err(_) if planning_view.len() > budget_view.len() => {
+                    let calibrated = self
+                        .compression
+                        .calibrated_input_tokens(&self.messages, &budget_view);
+                    self.context_budget.validate_with_tool_bytes(
+                        &budget_view,
+                        tool_schema_bytes,
+                        calibrated,
+                    )?
+                }
+                Err(error) => return Err(error),
+            };
             if let Some(limits) = self.execution_limits {
                 if limits.max_tokens > 0 {
                     // Cached input is a subset of input; never count it twice.
@@ -1651,16 +1777,11 @@ impl Agent {
                     view.len()
                 );
             }
-            // Opt-in, content-free per-request fingerprints of the provider
-            // budget projection. No serialization or file I/O by default.
-            let cache_snapshot = self.cache_trace.as_ref().and_then(|_| {
-                CacheSnapshot::capture(
-                    &budget_view,
-                    &tool_definitions,
-                    &self.compression.state(),
-                    self.model.reasoning_level(),
-                )
-            });
+            // Opt-in, content-free per-request fingerprints. No snapshot is
+            // taken and no sidecar is opened unless KROMA_CACHE_TRACE=1; the
+            // recorded projection is the one the provider layer really built
+            // when a decorator published it.
+            let tracing = self.cache_trace.is_some();
             let mut printed_text = false;
             let mut streamed_reasoning = false;
             // Keep the streamed text so a response cut off by the output
@@ -1724,10 +1845,30 @@ impl Agent {
                 )
                 .await;
             self.model_in_flight = false;
+            // These are input messages the provider actually saw, not user
+            // text or a rewritten tool outcome. Commit them before its reply.
+            if let Some(projection) = self.model.final_projection() {
+                for reference in &projection.appended_references {
+                    self.messages.push(reference.clone());
+                    self.session
+                        .append(&self.messages, &self.compression.state())?;
+                }
+            }
             let request_wall = stats
                 .model_started
                 .take()
                 .map_or(Duration::ZERO, |at| at.elapsed());
+            // One definition for both the trace and the context calibration: a
+            // provider measurement is used only when it describes the projection
+            // that was sent (no request-rewriting hook) and actually reported
+            // input tokens. Deriving the trace from this value keeps the two from
+            // disagreeing.
+            let calibration_eligible = self.model.usage_matches_projection()
+                && matches!(&completion, Ok(c) if c
+                    .usage
+                    .as_ref()
+                    .and_then(|usage| usage.input)
+                    .is_some_and(|input| input > 0));
             if let Some(events) = &self.events {
                 for (id, name) in open_native.drain(..) {
                     events.on_event(RuntimeEvent::ToolFinished {
@@ -1738,16 +1879,77 @@ impl Agent {
                     });
                 }
             }
-            if let (Some(trace), Some(snapshot)) = (&mut self.cache_trace, cache_snapshot) {
-                trace.record(
-                    self.session.archive_path(),
-                    snapshot,
-                    match &completion {
-                        Ok(c) => c.usage.as_ref(),
-                        Err(error) => crate::provider::reported_error_usage(error),
+            if tracing {
+                let final_projection = self.model.final_projection();
+                let snapshot_messages: &[Message] = final_projection
+                    .as_ref()
+                    .map(|projection| projection.messages.as_slice())
+                    .unwrap_or(&budget_view);
+                let snapshot_tools: &[serde_json::Value] = final_projection
+                    .as_ref()
+                    .map(|projection| projection.tools.as_slice())
+                    .unwrap_or(&tool_definitions);
+                let connection = self.model.connection_info();
+                let wire = self.model.wire_observation();
+                let observation = TraceObservation {
+                    projection: if final_projection.is_some() {
+                        "final_request"
+                    } else {
+                        "provider_budget"
                     },
-                    completion.is_ok(),
-                );
+                    rewritten: final_projection
+                        .as_ref()
+                        .is_some_and(|projection| projection.rewritten),
+                    reference_bytes: final_projection
+                        .as_ref()
+                        .map_or(0, |projection| projection.reference_bytes),
+                    protocol: connection.as_ref().map(|c| c.api_protocol.clone()),
+                    model: connection.as_ref().map(|c| c.model.clone()),
+                    endpoint_fingerprint: connection.as_ref().map(|c| {
+                        format!(
+                            "{:016x}",
+                            crate::cache_trace::fingerprint(c.base_url.as_bytes())
+                        )
+                    }),
+                    native_tools: wire
+                        .as_ref()
+                        .map(|wire| wire.native_tools.clone())
+                        .unwrap_or_default(),
+                    payload_fingerprint: wire.as_ref().map(|w| w.payload_fingerprint.clone()),
+                    payload_bytes: wire.as_ref().map(|w| w.payload_bytes),
+                    tool_definitions: wire.as_ref().map(|w| w.tool_definitions),
+                    provider_request_id: wire
+                        .as_ref()
+                        .and_then(|wire| wire.provider_request_id.clone()),
+                    elapsed_ms: Some(request_wall.as_millis() as u64),
+                    first_token_ms: match &completion {
+                        Ok(completion) => {
+                            completion.first_token.map(|first| first.as_millis() as u64)
+                        }
+                        Err(_) => None,
+                    },
+                    calibrated: calibration_eligible,
+                };
+                if let (Some(trace), Some(snapshot)) = (
+                    &mut self.cache_trace,
+                    CacheSnapshot::capture(
+                        snapshot_messages,
+                        snapshot_tools,
+                        &self.compression.state(),
+                        self.model.reasoning_level(),
+                    ),
+                ) {
+                    trace.record(
+                        self.session.archive_path(),
+                        snapshot,
+                        match &completion {
+                            Ok(c) => c.usage.as_ref(),
+                            Err(error) => crate::provider::reported_error_usage(error),
+                        },
+                        completion.is_ok(),
+                        &observation,
+                    );
+                }
             }
             let completion = match completion {
                 Ok(completion) => {
@@ -1765,6 +1967,8 @@ impl Agent {
                             output_tokens: usage.and_then(|u| u.output),
                             cached_tokens: usage.and_then(|u| u.cached),
                             reasoning_tokens: usage.and_then(|u| u.reasoning),
+                            cache_write_tokens: usage.and_then(|u| u.cache_write),
+                            cache_write_1h_tokens: usage.and_then(|u| u.cache_write_1h),
                         });
                     }
                     // Set when the last continuation only repeated earlier text.
@@ -1791,7 +1995,18 @@ impl Agent {
                         if !repeated {
                             output_continuations += 1;
                             answer_prefix.push_str(&printed);
-                            pending_continuation = true;
+                            let mut fragment = Message::new("assistant", &printed);
+                            fragment.provider_items =
+                                Some(vec![serde_json::json!({"type":"kroma_output_fragment"})]);
+                            self.messages.push(fragment);
+                            self.session
+                                .append(&self.messages, &self.compression.state())?;
+                            let mut continuation = Message::new("user", "Your previous message was cut off by the output limit. Continue from the exact point where it stopped: do not repeat text you already wrote and do not restart the answer.");
+                            continuation.provider_items =
+                                Some(vec![serde_json::json!({"type":"kroma_continuation"})]);
+                            self.messages.push(continuation);
+                            self.session
+                                .append(&self.messages, &self.compression.state())?;
                             crate::runtime_log!(
                                 "[model] output hit the per-turn ceiling; asking for the continuation (#{output_continuations})"
                             );
@@ -1836,8 +2051,10 @@ impl Agent {
                         format!("{answer_prefix}{}", printed.trim_end())
                     };
                     let shown_chars = shown.chars().count();
-                    let note = if truncated && !shown.trim().is_empty() {
-                        shown
+                    let note = if repeated_round {
+                        "[Kroma stopped a repeating continuation. Prior output fragments are retained in the transcript.]".to_owned()
+                    } else if truncated && !printed.trim().is_empty() {
+                        printed.trim_end().to_owned()
                     } else if printed_text || streamed_reasoning {
                         "[Kroma interrupted: the partial streamed response was not saved. Prior completed tool results are preserved; unfinished work has not been verified.]".to_owned()
                     } else {
@@ -1886,13 +2103,19 @@ impl Agent {
             // provider view. Its reported input tokens then describe a
             // different request, so use them for cost accounting only and
             // leave the conservative estimator in charge of compaction.
-            let measured = self
-                .model
-                .usage_matches_projection()
+            // Otherwise the measurement is tied to the exact view the provider
+            // received, including host reference blocks, so a later request can
+            // reuse it without attributing tokens to a shorter prefix.
+            let measured = calibration_eligible
                 .then_some(completion.usage.as_ref())
                 .flatten();
+            let sent_projection = self.model.final_projection();
+            let sent_view: &[Message] = sent_projection
+                .as_ref()
+                .map(|projection| projection.messages.as_slice())
+                .unwrap_or(&budget_view);
             self.compression.observe_with_bytes(
-                &budget_view,
+                sent_view,
                 budget_view_bytes,
                 measured.and_then(|usage| usage.input),
                 measured.and_then(|usage| usage.cached),
@@ -1934,14 +2157,17 @@ impl Agent {
                     calls.len()
                 );
             }
-            // Rounds that hit the output ceiling were never saved; this round
-            // finishes the same answer, so it becomes one message.
-            if !answer_prefix.is_empty() {
-                let continued = response.content.take().unwrap_or_default();
-                response.content = Some(format!("{answer_prefix}{continued}"));
-                answer_prefix.clear();
-            }
-            let text = response.content.clone();
+            // Keep each protocol response intact (including native blocks).
+            // Only the API return value combines the already-durable fragments.
+            let text = if answer_prefix.is_empty() {
+                response.content.clone()
+            } else {
+                Some(format!(
+                    "{}{}",
+                    std::mem::take(&mut answer_prefix),
+                    response.content.as_deref().unwrap_or_default()
+                ))
+            };
             self.messages.push(response);
             let journal_started = Instant::now();
             self.session
@@ -1955,6 +2181,14 @@ impl Agent {
                     output_tokens: completion.usage.as_ref().and_then(|usage| usage.output),
                     reasoning_tokens: completion.usage.as_ref().and_then(|usage| usage.reasoning),
                     cached_tokens: completion.usage.as_ref().and_then(|usage| usage.cached),
+                    cache_write_tokens: completion
+                        .usage
+                        .as_ref()
+                        .and_then(|usage| usage.cache_write),
+                    cache_write_1h_tokens: completion
+                        .usage
+                        .as_ref()
+                        .and_then(|usage| usage.cache_write_1h),
                     reasoning: self
                         .messages
                         .last()
@@ -2224,6 +2458,13 @@ impl Agent {
                         .get_or_insert_with(Vec::new)
                         .push(serde_json::json!({"type":"kroma_tool_warning","message":warning}));
                 }
+                if call.function.name != crate::tools::builtin_shell_tool_name() {
+                    crate::tool_archive::archive_message(
+                        &mut message,
+                        self.session.archive_path(),
+                        &call.function.name,
+                    );
+                }
                 self.messages.push(message);
                 let journal_started = Instant::now();
                 self.session
@@ -2240,7 +2481,7 @@ impl Agent {
                         result: self
                             .messages
                             .last()
-                            .and_then(|msg| msg.content.as_deref())
+                            .map(crate::tool_archive::model_content)
                             .unwrap_or(""),
                     });
                 }
@@ -2625,6 +2866,7 @@ mod tests {
             catalog,
             ContextConfig::from_env()?,
             true,
+            None,
         )?;
         assert!(!dir.join("default.json").exists());
         assert!(agent.list_sessions()?.is_empty());
@@ -2670,6 +2912,7 @@ mod tests {
             SessionCatalog::from_default(path.clone())?,
             ContextConfig::from_env()?,
             true,
+            None,
         )?;
         assert_ne!(agent.archive_path(), path);
         assert_eq!(
@@ -2862,8 +3105,17 @@ mod tests {
         assert_eq!(visible.trim_end(), "partial answer the end");
         assert_eq!(
             agent.messages.last().unwrap().content.as_deref(),
-            Some("partial answer the end"),
-            "the continued rounds must be saved as one answer"
+            Some(" the end")
+        );
+        assert_eq!(
+            agent
+                .messages
+                .iter()
+                .filter(|message| message.role == "assistant")
+                .filter_map(|message| message.content.as_deref())
+                .collect::<String>(),
+            "partial answer the end",
+            "each fragment is durable without rewriting the final protocol response"
         );
         assert!(!agent
             .messages
@@ -2929,9 +3181,19 @@ mod tests {
         let result = agent.run("Write a long answer", &mut |_| {}).await;
         assert!(result.is_err(), "the run ends once nothing new arrives");
         assert_eq!(
-            agent.messages.last().unwrap().content.as_deref(),
-            Some("partial answer"),
-            "a repeated round must not duplicate the saved answer"
+            agent
+                .messages
+                .iter()
+                .filter(|message| message
+                    .provider_items
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|part| part["type"] == "kroma_output_fragment"))
+                .filter_map(|message| message.content.as_deref())
+                .collect::<String>(),
+            "partial answer",
+            "a repeated round must not duplicate the durable fragment"
         );
         assert_eq!(server.join().unwrap(), 2, "one continuation round");
         drop(agent);
@@ -3219,6 +3481,10 @@ mod failure_boundary_tests {
 #[cfg(test)]
 #[path = "agent_repair_tests.rs"]
 mod repair_tests;
+
+#[cfg(test)]
+#[path = "foundation_tests.rs"]
+mod foundation_tests;
 
 #[cfg(test)]
 mod idle_watchdog_tests {

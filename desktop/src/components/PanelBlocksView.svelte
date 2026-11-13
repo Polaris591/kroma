@@ -29,7 +29,8 @@
           <div class="panel-progress-label">
             <span>{block.label}</span><span>{percent}%</span>
           </div>
-          <div class="panel-progress-track">
+          <div class="panel-progress-track" role="progressbar" aria-label={block.label || '进度'}
+            aria-valuemin="0" aria-valuemax="100" aria-valuenow={percent}>
             <span class="panel-progress-fill" style:width={`${percent}%`}></span>
           </div>
         </div>

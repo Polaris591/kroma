@@ -748,7 +748,7 @@ fn tool_remember(object: &Map<String, Value>) -> Result<Value, ToolFailure> {
         "note": if is_review {
             "Saved as historical, unverified reference data. Changed evidence is marked for rechecking, never silently hidden."
         } else {
-            "Saved the user's original wording, not the model's paraphrase. No automatic expiry or per-turn quota."
+            "Saved durable rule backed by the user's verified verbatim quote. No automatic expiry or per-turn quota."
         },
     }))
 }
@@ -869,10 +869,21 @@ fn build_context(object: &Map<String, Value>) -> Result<Value, String> {
                 .store
                 .is_stale(&memory.id)
                 .map_err(|error| store_message(&error))?;
-        let block = json!({
-            "id": memory.id, "kind": memory.kind, "text": memory.text,
+        let anchor_quote = memory
+            .source_quote
+            .as_deref()
+            .filter(|quote| !quote.is_empty());
+        let rendered_text = match anchor_quote.filter(|quote| !memory.text.contains(*quote)) {
+            Some(quote) => format!("{} (user quote: \"{quote}\")", memory.text),
+            None => memory.text.clone(),
+        };
+        let mut block = json!({
+            "id": memory.id, "kind": memory.kind, "text": rendered_text,
             "paths": memory.paths, "core": core, "needs_recheck": needs_recheck,
         });
+        if let Some(quote) = anchor_quote.filter(|quote| *quote != memory.text) {
+            block["source_quote"] = json!(quote);
+        }
         let size = serde_json::to_vec(&block)
             .map_err(|_| "Could not encode memory".to_owned())?
             .len();
@@ -1935,7 +1946,10 @@ mod tests {
         ));
         assert_eq!(finish["is_error"], false);
         let recalled = context(dir.path(), "pnpm", 8192);
-        assert_eq!(recalled["blocks"][0]["text"], rule);
+        let recalled_text = recalled["blocks"][0]["text"].as_str().unwrap();
+        assert!(recalled_text.contains(rule), "{recalled_text}");
+        assert!(recalled_text.contains(quote), "{recalled_text}");
+        assert_eq!(recalled["blocks"][0]["source_quote"], quote);
     }
 
     #[test]

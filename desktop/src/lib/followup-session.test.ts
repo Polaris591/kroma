@@ -27,21 +27,21 @@ describe('queuedForSession', () => {
 
   it('persists and restores a real conversation queue', () => {
     const store = fakeStorage();
-    persistQueued(store, 'p', 's1', [{id: '1', text: 'x'}]);
-    expect(queuedForSession(store, 'p', 's1')).toEqual([{id: '1', text: 'x'}]);
+    persistQueued(store, 'p', 's1', [{id: '1', text: 'x', paths: []}]);
+    expect(queuedForSession(store, 'p', 's1')).toEqual([{id: '1', text: 'x', paths: []}]);
   });
 
   it('does not write for an unsent conversation', () => {
     const store = fakeStorage();
-    persistQueued(store, 'p', undefined, [{id: '1', text: 'x'}]);
+    persistQueued(store, 'p', undefined, [{id: '1', text: 'x', paths: []}]);
     expect(store.data.size).toBe(0);
   });
 });
 
 describe('mergeMigrated', () => {
   it('puts the stored queue first and caps the length', () => {
-    const saved = Array.from({length: 12}, (_, i) => ({id: 's' + i, text: 't'}));
-    const merged = mergeMigrated(saved, [{id: 'live', text: 't'}]);
+    const saved = Array.from({length: 12}, (_, i) => ({id: 's' + i, text: 't', paths: []}));
+    const merged = mergeMigrated(saved, [{id: 'live', text: 't', paths: []}]);
     expect(merged).toHaveLength(12);
     expect(merged[0].id).toBe('s0');
   });

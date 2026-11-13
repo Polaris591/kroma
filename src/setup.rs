@@ -2,7 +2,7 @@
 //! confirms, and optionally verifies a real completion first.
 use crate::{
     app, model_catalog,
-    profiles::{self, Profiles, ProviderProfile},
+    profiles::{self, prompt_value as prompt_default, Profiles, ProviderProfile},
 };
 use anyhow::{bail, Context, Result};
 use std::{
@@ -71,21 +71,6 @@ fn prompt(label: &str) -> Result<String> {
         bail!("setup cancelled (stdin closed)");
     }
     Ok(value.trim().to_owned())
-}
-
-fn prompt_default(label: &str, default: &str) -> Result<String> {
-    crate::cli_print!("{label} [{default}]: ");
-    io::stdout().flush()?;
-    let mut value = String::new();
-    if io::stdin().read_line(&mut value)? == 0 {
-        bail!("setup cancelled (stdin closed)");
-    }
-    let value = value.trim();
-    Ok(if value.is_empty() {
-        default.to_owned()
-    } else {
-        value.to_owned()
-    })
 }
 
 fn yes(label: &str, default_yes: bool) -> Result<bool> {
@@ -231,6 +216,9 @@ pub async fn run() -> Result<()> {
         thinking_levels: original.thinking_levels.clone(),
         catalog_model: original.catalog_model.clone(),
         native_web_search: original.native_web_search,
+        anthropic_cache_ttl: original.anthropic_cache_ttl.clone(),
+        anthropic_stable_breakpoint: original.anthropic_stable_breakpoint,
+        responses_prompt_cache_key: original.responses_prompt_cache_key.clone(),
     };
 
     let mut save = true;

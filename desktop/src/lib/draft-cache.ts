@@ -1,4 +1,4 @@
-import { persistDraftText, readStoredDraft, type DraftStorage } from './drafts';
+import { persistDraft, readStoredDraft, type DraftStorage } from './drafts';
 
 export interface CachedDraft {
   text: string;
@@ -39,7 +39,7 @@ export function browserDraftStorage(): DraftStorage | null {
   catch { return null; }
 }
 
-export { persistDraftText, readStoredDraft };
+export { persistDraft, readStoredDraft };
 
 /** One shared cache for the running app: the shell and the composer must see
  * the same drafts. Tests construct their own DraftCache instead. */

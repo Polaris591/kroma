@@ -23,3 +23,10 @@ pub(crate) fn replace(temp: &Path, target: &Path) -> Result<()> {
         .with_context(|| format!("failed to atomically replace {}", target.display()))?;
     Ok(())
 }
+
+/// Host-facing narrowing of `replace` for a destination the person picked.
+/// A failure must never destroy the existing target, so callers use this
+/// instead of implementing delete-then-rename themselves.
+pub fn replace_file(temp: &Path, target: &Path) -> Result<()> {
+    replace(temp, target)
+}

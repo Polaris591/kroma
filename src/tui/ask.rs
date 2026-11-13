@@ -17,6 +17,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::sync::oneshot;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+const MAX_QUESTION_ROWS: usize = 4;
 
 /// A waiting question and the channel that carries the answer back.
 type Pending = (AskRequest, oneshot::Sender<AskAnswer>);
@@ -161,7 +164,11 @@ impl Overlay {
     /// A pasted block only belongs to the answer being typed.
     pub fn paste(&mut self, text: &str) {
         if let Some(buffer) = self.typed.as_mut() {
-            buffer.push_str(text.trim_matches(['\r', '\n']));
+            let single_line = text
+                .trim_matches(['\r', '\n'])
+                .replace("\r\n", " ")
+                .replace(['\r', '\n'], " ");
+            buffer.push_str(&single_line);
         }
     }
 
@@ -172,10 +179,14 @@ impl Overlay {
                 Key::Taken
             }
             KeyCode::Enter => {
-                let text = self.typed.take().unwrap_or_default();
-                if text.trim().is_empty() {
+                if self
+                    .typed
+                    .as_deref()
+                    .is_none_or(|text| text.trim().is_empty())
+                {
                     return Key::Taken;
                 }
+                let text = self.typed.take().unwrap_or_default();
                 Key::Closed(self.answered(self.picked(), Some(text)))
             }
             KeyCode::Backspace => {
@@ -235,7 +246,9 @@ impl Overlay {
     /// Rows this question needs inside the composer. The input box grows to
     /// fit the question instead of covering the conversation with a popup.
     pub fn height(&self, width: u16) -> u16 {
-        let question = wrap(&self.question, width as usize).len().min(2);
+        let question = wrap(&self.question, (width as usize).saturating_sub(2))
+            .len()
+            .min(MAX_QUESTION_ROWS);
         let options = (self.options.len() + 1).min(6);
         (question + options + 1) as u16
     }
@@ -256,7 +269,7 @@ impl Overlay {
         let mut lines: Vec<Line> = Vec::new();
         for (index, row) in wrap(&self.question, width.saturating_sub(2))
             .into_iter()
-            .take(2)
+            .take(MAX_QUESTION_ROWS)
             .enumerate()
         {
             let prefix = if index == 0 { "? " } else { "  " };
@@ -386,24 +399,60 @@ impl Overlay {
     }
 }
 
-/// Break the question into rows that fit the box: it is the one part a person
-/// must read in full, so it is never clipped to a single line.
+/// Break the question into rows that fit the box by terminal display width
+/// (including spaceless CJK text): it is the one part a person must read in
+/// full, so it is never clipped to a single line.
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(8);
     let mut rows = Vec::new();
     for source in text.lines() {
         let mut row = String::new();
+        let mut row_width = 0usize;
         for word in source.split_whitespace() {
-            let projected = row.chars().count() + 1 + word.chars().count();
-            if projected > width && !row.is_empty() {
-                rows.push(std::mem::take(&mut row));
+            let word_width = word.width();
+            if !row.is_empty() && row_width + 1 + word_width <= width {
+                row.push(' ');
+                row.push_str(word);
+                row_width += 1 + word_width;
+                continue;
+            }
+            if word_width <= width {
+                if !row.is_empty() {
+                    rows.push(std::mem::take(&mut row));
+                    if rows.len() >= 6 {
+                        break;
+                    }
+                }
+                row = word.to_owned();
+                row_width = word_width;
+                continue;
             }
             if !row.is_empty() {
-                row.push(' ');
+                rows.push(std::mem::take(&mut row));
+                row_width = 0;
+                if rows.len() >= 6 {
+                    break;
+                }
             }
-            row.push_str(word);
+            for ch in word.chars() {
+                let ch_width = ch.width().unwrap_or(0);
+                if row_width + ch_width > width && !row.is_empty() {
+                    rows.push(std::mem::take(&mut row));
+                    row_width = 0;
+                    if rows.len() >= 6 {
+                        break;
+                    }
+                }
+                row.push(ch);
+                row_width += ch_width;
+            }
+            if rows.len() >= 6 {
+                break;
+            }
         }
-        rows.push(row);
+        if rows.len() < 6 {
+            rows.push(row);
+        }
         if rows.len() >= 6 {
             break;
         }
@@ -416,17 +465,29 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 fn clip(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
+    if text.width() <= width {
         return text.to_owned();
     }
-    let mut clipped: String = text.chars().take(width.saturating_sub(1)).collect();
+    if width == 0 {
+        return String::new();
+    }
+    let limit = width.saturating_sub(1);
+    let mut clipped = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if used + ch_width > limit {
+            break;
+        }
+        clipped.push(ch);
+        used += ch_width;
+    }
     clipped.push('…');
     clipped
 }
 
 fn clipped_width(text: &str, width: usize) -> u16 {
-    text.chars()
-        .count()
+    text.width()
         .min(width.saturating_sub(2))
         .min(u16::MAX as usize) as u16
 }
@@ -611,5 +672,34 @@ mod tests {
         let result = pending.await;
         assert!(result.is_error);
         assert!(result.content.contains("could not be shown"));
+    }
+
+    #[test]
+    fn cjk_questions_wrap_and_options_clip_by_display_width() {
+        let rows = wrap("请选择这次重构要采用的数据库迁移方案与回滚策略", 16);
+        assert!(
+            rows.len() >= 2,
+            "spaceless Chinese text must wrap: {rows:?}"
+        );
+        assert!(rows.iter().all(|row| row.width() <= 16));
+
+        let trimmed = clip("这是一个非常长的中文选项说明", 12);
+        assert!(trimmed.ends_with('…'));
+        assert!(trimmed.width() <= 12);
+        assert_eq!(clipped_width("中文输入", 20), 8);
+    }
+
+    #[test]
+    fn empty_enter_keeps_typed_mode_and_paste_strips_newlines() {
+        let mut question = overlay(false);
+        for _ in 0..3 {
+            assert!(matches!(question.key(key(KeyCode::Down)), Key::Taken));
+        }
+        assert!(matches!(question.key(key(KeyCode::Enter)), Key::Taken));
+        assert!(question.typed.is_some());
+        assert!(matches!(question.key(key(KeyCode::Enter)), Key::Taken));
+        assert!(question.typed.is_some());
+        question.paste("第一行\r\n第二行\n");
+        assert_eq!(question.typed.as_deref(), Some("第一行 第二行"));
     }
 }

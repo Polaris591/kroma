@@ -11,7 +11,7 @@
 </script>
 
 {#if error}
-  <div class="banner error-banner" role="alert"><AlertCircle size={16}/><span>{error}</span><button onclick={onDismissError} title="关闭"><X size={16}/></button></div>
+  <div class="banner error-banner" role="alert"><AlertCircle size={16}/><span>{error}</span><button onclick={onDismissError} title="关闭错误提示" aria-label="关闭错误提示"><X size={16}/></button></div>
 {:else if notice}
   <div class="banner notice-banner" role="status">
     <span>{notice}</span>

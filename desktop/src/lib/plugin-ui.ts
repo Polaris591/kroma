@@ -3,6 +3,7 @@
 // line, an indicator, widgets, panels, or a sandboxed desktop slot through the
 // generic host contract.
 import { writable } from 'svelte/store';
+import { readableInk, themeDefaults } from './theme';
 import {
   api, type DesktopSurface, type PluginLivePanel, type PluginPresentation,
   type PluginUiEvent, type PluginWidget, type SessionSnapshot,
@@ -24,10 +25,31 @@ export const pluginShortcuts = writable<{key: string; command: string}[]>([]);
 export const pluginPanels = writable<{id: string; title: string; dynamic: boolean}[]>([]);
 export const pluginColors = writable<Record<string, string>>({});
 export const composerMaxRows = writable<number | null>(null);
+/// Desktop layout a plugin declared. Everything is optional and clamped, so a
+/// malformed value falls back to the built-in look instead of breaking it.
+export type PluginLayout = {
+  content_width: number | null;
+  sidebar: 'visible' | 'hidden' | null;
+  density: 'regular' | 'compact' | null;
+};
+export const EMPTY_LAYOUT: PluginLayout = {content_width: null, sidebar: null, density: null};
+export const pluginLayout = writable<PluginLayout>(EMPTY_LAYOUT);
+
+export function normalizeLayout(raw: PluginPresentation['layout']): PluginLayout {
+  const width = typeof raw?.content_width === 'number' && Number.isFinite(raw.content_width)
+    ? Math.min(1400, Math.max(360, Math.round(raw.content_width)))
+    : null;
+  const sidebar = raw?.sidebar === 'visible' || raw?.sidebar === 'hidden' ? raw.sidebar : null;
+  const density = raw?.density === 'compact' || raw?.density === 'regular' ? raw.density : null;
+  return {content_width: width, sidebar, density};
+}
 
 let desktopMessageSeq = 0;
 
+let presentationGeneration = 0;
+
 export function applyPresentation(presentation: PluginPresentation | null) {
+  presentationGeneration += 1;
   const value = presentation ?? EMPTY;
   toolLabels.set(value.tool_labels ?? {});
   activityFrames.set(value.activity_frames ?? []);
@@ -39,10 +61,15 @@ export function applyPresentation(presentation: PluginPresentation | null) {
   pluginPanels.set(value.panels ?? []);
   pluginColors.set(value.colors ?? {});
   composerMaxRows.set(typeof value.composer_max_rows === "number" ? value.composer_max_rows : null);
+  pluginLayout.set(normalizeLayout(value.layout));
 }
 
 export function applySnapshotPluginUi(snapshot: SessionSnapshot | null | undefined) {
   if (!snapshot) return;
+  if (snapshot.capabilities?.plugins === false) {
+    applyPresentation(null);
+    return;
+  }
   if (Array.isArray(snapshot.plugin_status)) pluginStatuses.set(snapshot.plugin_status);
   if (Array.isArray(snapshot.plugin_widgets)) pluginWidgets.set(snapshot.plugin_widgets);
 }
@@ -99,8 +126,13 @@ export function applyPluginUiEvent(event: PluginUiEvent, host?: PluginUiHostCall
 /// A broken or missing plugin must never break the interface, so a failed read
 /// simply clears the presentation.
 export async function loadPresentation() {
-  try { applyPresentation(await api.pluginPresentation()); }
-  catch { applyPresentation(null); }
+  const generation = ++presentationGeneration;
+  try {
+    const presentation = await api.pluginPresentation();
+    if (generation === presentationGeneration) applyPresentation(presentation);
+  } catch {
+    if (generation === presentationGeneration) applyPresentation(null);
+  }
 }
 
 /// The label a plugin declared for a tool, or the tool's own name.
@@ -139,13 +171,28 @@ export function pluginThemeStyle(colors: Record<string, string>): string {
     ['muted', '--muted'],
     ['accent', '--plugin-accent'],
   ];
-  return mapping
-    .map(([slot, cssVar]) => {
-      const hex = slotColor(slot, colors);
-      return hex ? `${cssVar}:${hex}` : '';
-    })
-    .filter(Boolean)
-    .join(';');
+  const declarations = mapping.map(([slot, cssVar]) => {
+    const hex = slotColor(slot, colors);
+    return hex ? `${cssVar}:${hex}` : '';
+  }).filter(Boolean);
+  const background = slotColor('background', colors);
+  if (background) {
+    const fallback = themeDefaults(background);
+    declarations.push(`color-scheme:${fallback.scheme}`);
+    // Explicit plugin slots still win. A background-only light theme must not
+    // inherit white labels or dark native controls from the built-in theme.
+    if (!slotColor('text', colors)) declarations.push(`--text:${fallback.text}`);
+    if (!slotColor('muted', colors)) declarations.push(`--muted:${fallback.muted}`);
+    if (!slotColor('border', colors)) declarations.push(`--line:${fallback.line}`);
+  }
+  const accent = slotColor('accent', colors);
+  if (accent) declarations.push(`--plugin-accent-ink:${readableInk(accent)}`);
+  return declarations.join(';');
+}
+
+/// The reading width a plugin asked for, as a CSS custom property.
+export function layoutStyle(layout: PluginLayout): string {
+  return layout.content_width ? `--content-width:${layout.content_width}px` : '';
 }
 
 /// Composer height cap in pixels: the declared rows, never beyond the built-in

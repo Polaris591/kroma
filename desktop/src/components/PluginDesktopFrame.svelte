@@ -17,6 +17,7 @@
   let loading = false;
   let iframeEl: HTMLIFrameElement | null = null;
   let loadedId = '';
+  let bundleRequest = 0;
 
   $: if (surface.plugin_id !== loadedId) {
     loadedId = surface.plugin_id;
@@ -24,15 +25,17 @@
   }
 
   async function loadBundle(id: string) {
+    const request = ++bundleRequest;
     loading = true;
     loadError = '';
+    bundle = null;
     try {
       const next = await api.pluginDesktopBundle(id);
-      if (loadedId === id) bundle = next;
+      if (request === bundleRequest) bundle = next;
     } catch (failure) {
-      if (loadedId === id) loadError = failure instanceof Error ? failure.message : String(failure);
+      if (request === bundleRequest) loadError = failure instanceof Error ? failure.message : String(failure);
     } finally {
-      if (loadedId === id) loading = false;
+      if (request === bundleRequest) loading = false;
     }
   }
 
@@ -68,10 +71,15 @@
     const msg = event.data;
     if (!msg || msg.__kroma_plugin !== true || msg.plugin_id !== surface.plugin_id) return;
     if (msg.type === 'request') {
+      const request = bundleRequest;
+      const frame = iframeEl;
+      const id = surface.plugin_id;
+      const current = () => request === bundleRequest && frame === iframeEl;
       try {
-        const result = await api.pluginUiMessage(surface.plugin_id, msg.payload ?? null);
-        postToFrame({ type: 'response', id: msg.id, ok: true, result });
+        const result = await api.pluginUiMessage(id, msg.payload ?? null);
+        if (current()) postToFrame({ type: 'response', id: msg.id, ok: true, result });
       } catch (failure) {
+        if (!current()) return;
         const err = failure instanceof Error ? failure.message : String(failure);
         postToFrame({ type: 'response', id: msg.id, ok: false, error: err });
         onError(failure);
@@ -91,6 +99,7 @@
     window.addEventListener('message', onWindowMessage);
   });
   onDestroy(() => {
+    bundleRequest += 1;
     window.removeEventListener('message', onWindowMessage);
   });
 </script>
@@ -98,9 +107,10 @@
 <div class="plugin-desktop-frame" class:full-height={fullHeight}
   style:height={!fullHeight && surface.height ? `${surface.height}px` : undefined}>
   {#if loadError}
-    <div class="plugin-desktop-error">{loadError}</div>
+    <div class="plugin-desktop-error" role="alert"><span>{loadError}</span>
+      <button class="secondary small" onclick={() => void loadBundle(surface.plugin_id)}>重新加载</button></div>
   {:else if loading && !bundle}
-    <div class="plugin-desktop-loading">正在加载 {surface.title}…</div>
+    <div class="plugin-desktop-loading" role="status">正在加载 {surface.title}…</div>
   {:else if bundle}
     <iframe
       bind:this={iframeEl}

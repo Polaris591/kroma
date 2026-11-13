@@ -53,13 +53,7 @@ pub type OutputCallback<'a> = dyn Fn(&str, &str) + Send + Sync + 'a;
 // Every current session owns a disjoint subset of its workdir's captures.
 // Previous Kroma captures without a session prefix are left readable.
 fn capture_prefix(session: &Path) -> String {
-    let hash = session
-        .to_string_lossy()
-        .as_bytes()
-        .iter()
-        .fold(0xcbf29ce484222325u64, |hash, byte| {
-            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-        });
+    let hash = crate::cache_trace::fingerprint(session.to_string_lossy().as_bytes());
     format!("session-{hash:016x}-")
 }
 
@@ -219,6 +213,11 @@ pub(crate) fn clone_session_captures(
         }
         msg.content = Some(value.to_string());
     }
+    paths.extend(crate::tool_archive::clone_references(
+        source_session,
+        destination_session,
+        &mut cloned,
+    )?);
     Ok((cloned, paths))
 }
 
@@ -416,13 +415,7 @@ fn capture_dir(workdir: &Path) -> Result<PathBuf> {
         .or_else(|| env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(env::temp_dir);
-    let hash = workdir
-        .to_string_lossy()
-        .as_bytes()
-        .iter()
-        .fold(0xcbf29ce484222325u64, |hash, byte| {
-            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-        });
+    let hash = crate::cache_trace::fingerprint(workdir.to_string_lossy().as_bytes());
     let base = home.join(".kroma");
     let outputs = base.join("tool-outputs");
     let dir = outputs.join(format!("{hash:016x}"));
@@ -460,7 +453,10 @@ fn capture_file(dir: &Path, kind: &str, session: Option<&Path>) -> Result<(PathB
     Ok((path, file))
 }
 
-fn diagnostic_lines(text: &str, remaining: usize) -> Vec<String> {
+/// Lines that name a concrete failure. Shared with the first-ingestion
+/// projection for large MCP and plugin results so both surfaces find the same
+/// evidence in an omitted middle.
+pub(crate) fn diagnostic_lines(text: &str, remaining: usize) -> Vec<String> {
     let mut evidence = Vec::new();
     for line in text.lines() {
         let lower = line.to_ascii_lowercase();
@@ -638,6 +634,60 @@ fn preview_new_bytes(
     Ok(())
 }
 
+// On the local Git Bash build, the `-c` script is silently cut at about 8 KiB:
+// an 8,186-byte script still ran its final command and 8,191 bytes did not.
+// Treat that exact cutoff as a local observation, not a cross-version
+// guarantee. Keep a conservative margin and run longer commands from a
+// private temporary script, so a here-document terminator and the verification
+// commands after it are never lost.
+#[cfg(windows)]
+const WINDOWS_BASH_SCRIPT_BYTES: usize = 8 * 1024 - 128;
+
+/// A temporary Bash script for a command Git Bash cannot receive through
+/// `-c`. It lives outside the workdir, contains the already-rewritten command,
+/// and is removed when execution (including cancellation) drops it.
+#[cfg(windows)]
+struct BashScript {
+    path: PathBuf,
+}
+
+#[cfg(windows)]
+impl BashScript {
+    fn create(script: &str) -> Result<Self> {
+        use std::io::Write;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = env::temp_dir().join(format!(
+            "kroma-shell-{}-{now}-{}.sh",
+            std::process::id(),
+            CAPTURE_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        // `create_new` proves this path did not exist before. Take ownership
+        // only after that succeeds, so an existing file is never deleted.
+        let mut file = options
+            .open(&path)
+            .context("failed to create shell script")?;
+        let script_file = Self { path };
+        let written = file
+            .write_all(script.as_bytes())
+            .context("failed to write shell script")
+            .and_then(|()| file.flush().context("failed to flush shell script"));
+        // Close the handle before a write/flush error drops the guard; Windows
+        // may refuse the delete while this process still owns the file handle.
+        drop(file);
+        written?;
+        Ok(script_file)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for BashScript {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Dialect {
     Bash,
@@ -709,7 +759,14 @@ impl ShellChoice {
         }
     }
 
+    #[cfg(any(not(windows), test))]
     fn configure(&self, cmd: &mut Command) {
+        self.configure_with_script(cmd, false);
+    }
+
+    /// `script_file` means Bash receives a script path instead of `-c` text.
+    /// Other dialects never use a script file and keep their normal arguments.
+    fn configure_with_script(&self, cmd: &mut Command, script_file: bool) {
         if self.dialect == Dialect::Bash {
             // Bash otherwise reports only the last pipeline command's status:
             // 'cargo test | tail' can appear successful despite failed tests.
@@ -727,7 +784,9 @@ impl ShellChoice {
                 // change directory away from the workdir, so only Unix keeps -l.
                 #[cfg(not(windows))]
                 cmd.arg("-l");
-                cmd.arg("-c");
+                if !script_file {
+                    cmd.arg("-c");
+                }
             }
         }
         #[cfg(windows)]
@@ -908,11 +967,28 @@ async fn execute_internal(
     if command.trim().is_empty() {
         bail!("shell command cannot be empty");
     }
+    // Long commands run from a script file, where a NUL would truncate the
+    // script instead of being rejected by Command::arg. Reject it before any
+    // capture, script, or process is created.
+    if command.contains('\0') {
+        bail!("shell command contains a NUL byte");
+    }
 
     // Coding models commonly use Bash features (pipefail, arrays, PIPESTATUS).
     // Use Bash when it is installed and reachable, and keep the resolved
     // dialect in the tool description so the model knows what it may write.
     let shell = resolve_shell();
+    let command_text = shell.command_text(command);
+    // This Git Bash `-c` path silently cuts long scripts near the locally
+    // measured 8 KiB; a script file keeps the whole command, including heredoc
+    // terminators.
+    #[cfg(windows)]
+    let bash_script =
+        if shell.dialect == Dialect::Bash && command_text.len() >= WINDOWS_BASH_SCRIPT_BYTES {
+            Some(BashScript::create(&command_text)?)
+        } else {
+            None
+        };
 
     let dir = capture_dir(workdir)?;
     let (stdout_path, stdout_file) = capture_file(&dir, "stdout", session)?;
@@ -920,9 +996,19 @@ async fn execute_internal(
     let (stderr_path, stderr_file) = capture_file(&dir, "stderr", session)?;
     let mut cleanup_stderr = CaptureCleanup::new(vec![stderr_path.clone()]);
     let mut cmd = Command::new(&shell.program);
+    #[cfg(windows)]
+    shell.configure_with_script(&mut cmd, bash_script.is_some());
+    #[cfg(not(windows))]
     shell.configure(&mut cmd);
-    cmd.arg(shell.command_text(command))
-        .current_dir(workdir)
+    #[cfg(windows)]
+    if let Some(script) = &bash_script {
+        cmd.arg(&script.path);
+    } else {
+        cmd.arg(&command_text);
+    }
+    #[cfg(not(windows))]
+    cmd.arg(&command_text);
+    cmd.current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
@@ -1515,6 +1601,53 @@ mod tests {
                 String::from_utf8_lossy(&output.stdout)
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_bash_executes_a_long_heredoc_completely() {
+        if resolve_shell().dialect != Dialect::Bash {
+            return;
+        }
+        let dir = env::temp_dir().join(format!(
+            "kroma-shell-long-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let body = "x".repeat(9000);
+        let command = format!(
+            "cat > long-heredoc.txt <<'KROMA_EOF'\n{body}\nKROMA_EOF\nwc -c < long-heredoc.txt\nprintf 'KROMA_COMPLETE\\n'"
+        );
+        let output = execute(&command, &dir).await.unwrap();
+        assert_eq!(output.exit_code, Some(0), "{}", output.stderr);
+        assert!(output.stderr.is_empty(), "{}", output.stderr);
+        assert!(output.stdout.contains("9001"), "{}", output.stdout);
+        assert!(
+            output.stdout.contains("KROMA_COMPLETE"),
+            "{}",
+            output.stdout
+        );
+        assert_eq!(fs::read(dir.join("long-heredoc.txt")).unwrap().len(), 9001);
+
+        // A long script with an actual NUL must fail before Bash can ignore the
+        // NUL and execute the prefix. The leading redirect would create this
+        // file if the command were launched.
+        let protected = dir.join("nul-must-not-exist.txt");
+        let nul_command = format!(
+            "printf before > nul-must-not-exist.txt\n# {}\nprintf 'hidden\0tail'",
+            "x".repeat(9000)
+        );
+        let error = match execute(&nul_command, &dir).await {
+            Ok(_) => panic!("a long command containing a NUL byte must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("NUL byte"), "{error:#}");
+        assert!(
+            !protected.exists(),
+            "NUL rejection happened after a side effect"
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(windows)]

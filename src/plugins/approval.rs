@@ -2,7 +2,6 @@
 use std::{
     collections::BTreeSet,
     fs,
-    io::Read,
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -54,15 +53,6 @@ pub(super) const PLUGIN_SCAN_LIMITS: PluginScanLimits = PluginScanLimits {
 
 fn is_ignored_plugin_directory(name: Option<&str>) -> bool {
     name.is_some_and(|name| PLUGIN_IGNORED_DIRECTORIES.contains(&name))
-}
-
-/// Read at most `limit + 1` bytes, so a file that grew after its metadata was
-/// read cannot turn a bounded approval read into an unbounded allocation.
-fn read_bounded(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
-    let file = fs::File::open(path)?;
-    let mut bytes = Vec::new();
-    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
-    Ok(bytes)
 }
 
 /// Length-prefixed fields keep "ab"+"c" from hashing like "a"+"bc".
@@ -163,7 +153,7 @@ pub(super) fn scan(
                 });
                 break 'walk;
             }
-            match read_bounded(&path, limits.max_file_bytes) {
+            match crate::attachments::read_bounded(&path, limits.max_file_bytes) {
                 // The file grew after its metadata was read.
                 Ok(bytes) if bytes.len() as u64 > limits.max_file_bytes => {
                     error.get_or_insert_with(|| {
@@ -249,7 +239,7 @@ pub(super) fn scan(
             });
             break;
         }
-        match read_bounded(&path, limits.max_explicit_bytes) {
+        match crate::attachments::read_bounded(&path, limits.max_explicit_bytes) {
             Ok(bytes) if bytes.len() as u64 > limits.max_explicit_bytes => {
                 error.get_or_insert_with(|| {
                     format!("{} changed while it was being approved", path.display())

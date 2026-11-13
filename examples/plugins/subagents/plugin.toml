@@ -37,6 +37,9 @@ description = "Optional working directory for the single task."
 [tools.parameters.properties.label]
 type = "string"
 description = "Optional readable label for the single task (1..60 characters)."
+[tools.parameters.properties.resume]
+type = "string"
+description = "Optional resume token for the single task."
 [tools.parameters.properties.tasks]
 type = "array"
 minItems = 1

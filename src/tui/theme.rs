@@ -24,6 +24,7 @@ pub struct ThemeSettings {
     pub accent_text: Option<String>,
     pub success: Option<String>,
     pub warning: Option<String>,
+    pub error: Option<String>,
 }
 
 impl Default for ThemeSettings {
@@ -45,6 +46,7 @@ impl Default for ThemeSettings {
             accent_text: None,
             success: None,
             warning: None,
+            error: None,
         }
     }
 }
@@ -149,6 +151,7 @@ impl Theme {
             (&settings.accent_text, &mut theme.accent_text),
             (&settings.success, &mut theme.success),
             (&settings.warning, &mut theme.warning),
+            (&settings.error, &mut theme.error),
         ] {
             if let Some(value) = value {
                 *target = parse_hex(value)?;

@@ -6,6 +6,7 @@ use crate::{
     context::{BuiltinContextFactory, ContextConfig, ContextFactory},
     events::EventSink,
     file_edit::FileEdit,
+    file_read::FileRead,
     history_tools::{HistoryRead, HistorySearch},
     mcp,
     model::ModelBackend,
@@ -17,20 +18,20 @@ use crate::{
     tools::ToolRegistry,
 };
 use anyhow::Result;
-use std::env;
 use std::sync::Arc;
 
 /// The one startup composition point for CLI and future plugin hosts.
 /// An extension changes components here; it never edits Agent's loop.
+#[derive(Clone)]
 pub struct RuntimeComponents {
     // A model and its context budget must change together. Keep these
     // private so an extension cannot accidentally use the previous model's
     // window after swapping the backend.
-    model: Arc<dyn ModelBackend>,
-    context_budget: ContextConfig,
+    pub(crate) model: Arc<dyn ModelBackend>,
+    pub(crate) context_budget: ContextConfig,
     /// Limits resolved for `model`. Diagnostics never inherit the previous
     /// model report after a replacement of unknown provenance.
-    model_report: Option<ModelReport>,
+    pub(crate) model_report: Option<ModelReport>,
     pub tools: ToolRegistry,
     pub context_factory: Arc<dyn ContextFactory>,
     pub prompt: PromptComposer,
@@ -84,118 +85,371 @@ pub struct DefaultRuntime {
     /// adapters; never reconnect or rebuild Agent Loop.
     pub base_tools: ToolRegistry,
     pub base_prompt: PromptComposer,
+    recipe: RuntimeRecipe,
+    capabilities: crate::capabilities::Capabilities,
+}
+
+type RuntimeModel = (Arc<dyn ModelBackend>, ContextConfig, Option<ModelReport>);
+
+struct RuntimeRecipe {
+    config: Config,
+    host: RuntimeComponents,
+    fallback_model: Option<RuntimeModel>,
+    host_model: Option<RuntimeModel>,
+}
+
+struct PreparedRuntime {
+    components: RuntimeComponents,
+    skills: SkillCatalog,
+    plugins: PluginCatalog,
+    base_tools: ToolRegistry,
+    base_prompt: PromptComposer,
+    startup_warnings: Vec<String>,
+    plugin_warnings: Vec<String>,
+}
+
+pub fn builtin_tool_names() -> Vec<String> {
+    builtin_tools()
+        .expect("unique builtin tool names")
+        .definitions()
+        .into_iter()
+        .filter_map(|definition| definition["function"]["name"].as_str().map(str::to_owned))
+        .collect()
+}
+
+fn builtin_tools() -> Result<ToolRegistry> {
+    let mut tools = ToolRegistry::builtin();
+    tools.register(Arc::new(HistorySearch))?;
+    tools.register(Arc::new(HistoryRead))?;
+    tools.register(Arc::new(FileRead))?;
+    tools.register(Arc::new(FileEdit))?;
+    Ok(tools)
+}
+
+impl RuntimeRecipe {
+    async fn prepare(
+        &mut self,
+        capabilities: crate::capabilities::Capabilities,
+        plugins: PluginCatalog,
+    ) -> Result<PreparedRuntime> {
+        let mut components = self.host.clone();
+        if let Some((model, budget, report)) = self.host_model.clone() {
+            components.model = model;
+            components.context_budget = budget;
+            components.model_report = report;
+        } else if let Some((model, budget, name)) = plugins.checked_model_override()? {
+            components.model_report = Some(model_catalog::plugin_report(
+                &name,
+                budget.window(),
+                budget.output_reserve(),
+                model.accepts_images(),
+                model.thinking_levels(),
+            ));
+            components.model = model;
+            components.context_budget = budget;
+        } else {
+            if self.fallback_model.is_none() {
+                let (model, budget, report) = configured_model(&self.config).await?;
+                self.fallback_model = Some((Arc::new(model), budget, Some(report)));
+            }
+            let (model, budget, report) =
+                self.fallback_model.as_ref().expect("fallback initialized");
+            components.model = model.clone();
+            if self.host_model.is_none() {
+                self.host.model = model.clone();
+            }
+            components.context_budget = *budget;
+            components.model_report = report.clone();
+        }
+        let mut skills = SkillCatalog::discover(&self.config.workdir)?;
+        skills.retain_enabled(&capabilities);
+        if !skills.is_empty() {
+            components
+                .tools
+                .register(Arc::new(LoadSkill(skills.clone())))?;
+            if let Some(metadata) = skills.metadata_prompt() {
+                components.prompt = components.prompt.with_trailing(metadata)?;
+            }
+        }
+        let mut startup_warnings = Vec::new();
+        let status =
+            mcp::register_selected(&mut components.tools, &self.config.workdir, &capabilities)
+                .await?;
+        startup_warnings.extend(status.unavailable);
+        startup_warnings.extend(status.warnings);
+        let base_tools = components.tools.clone();
+        let base_prompt = components.prompt.clone();
+        let mut plugin_warnings = plugins.warnings.clone();
+        plugin_warnings.extend(plugins.contribute(&mut components.tools, &mut components.prompt));
+        components
+            .tools
+            .apply_capabilities(&self.host.tools, &capabilities);
+        if components.context_factory.is_builtin() {
+            components.context_factory = plugins.builtin_context_factory(&capabilities);
+        }
+        plugin_warnings.extend(plugins.replace_context(&mut components.context_factory));
+        if let Some(policy) = ChildPolicy::from_env()? {
+            policy.apply(&mut components.tools, &mut components.prompt)?;
+        }
+        components.model = plugins.model_hooks(components.model, components.context_budget);
+        components.events = plugins.wrap_events(components.events)?;
+        Ok(PreparedRuntime {
+            components,
+            skills,
+            plugins,
+            base_tools,
+            base_prompt,
+            startup_warnings,
+            plugin_warnings,
+        })
+    }
+}
+
+impl DefaultRuntime {
+    pub fn capabilities(&self) -> crate::capabilities::Capabilities {
+        self.capabilities.clone()
+    }
+
+    pub fn capability_tool_definitions(&self) -> Vec<serde_json::Value> {
+        let mut definitions = self.recipe.host.tools.definitions();
+        definitions.extend(self.base_tools.definitions());
+        definitions.extend(self.plugins.capability_tool_inventory());
+        definitions
+    }
+
+    pub fn prepare_plugin_reload(
+        &self,
+        next: &mut PluginCatalog,
+    ) -> Result<(ToolRegistry, PromptComposer)> {
+        let (mut tools, prompt) =
+            self.plugins
+                .prepare_idle_reload_from(next, &self.base_tools, &self.base_prompt)?;
+        tools.apply_capabilities(&self.recipe.host.tools, &self.capabilities);
+        if let Some(policy) = ChildPolicy::from_env()? {
+            let mut prompt = prompt;
+            policy.apply(&mut tools, &mut prompt)?;
+            return Ok((tools, prompt));
+        }
+        Ok((tools, prompt))
+    }
+
+    pub async fn resume_session(&mut self, id: &str) -> Result<()> {
+        let next = crate::capabilities::effective_for(self.agent.workdir(), id)?;
+        let previous = self.capabilities.clone();
+        if next != previous {
+            self.set_capabilities(next.clone()).await?;
+        }
+        if let Err(error) = self.agent.resume_session(id) {
+            if next != previous {
+                self.set_capabilities(previous).await?;
+            }
+            return Err(error);
+        }
+        self.plugins.clear_session_ui();
+        Ok(())
+    }
+
+    pub async fn new_session(&mut self) -> Result<String> {
+        let next = crate::capabilities::load_defaults()?;
+        let previous = self.capabilities.clone();
+        if next != previous {
+            self.set_capabilities(next.clone()).await?;
+        }
+        match self.agent.new_session() {
+            Ok(id) => {
+                self.plugins.clear_session_ui();
+                Ok(id)
+            }
+            Err(error) => {
+                if next != previous {
+                    self.set_capabilities(previous).await?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn set_capabilities(
+        &mut self,
+        capabilities: crate::capabilities::Capabilities,
+    ) -> Result<()> {
+        if self.agent.is_running() {
+            anyhow::bail!("A task is running; capability changes were not applied");
+        }
+        self.set_capabilities_with_plugin_defaults(capabilities, &Default::default())
+            .await
+    }
+
+    pub async fn set_capabilities_with_plugin_defaults(
+        &mut self,
+        capabilities: crate::capabilities::Capabilities,
+        plugin_defaults: &std::collections::BTreeMap<String, bool>,
+    ) -> Result<()> {
+        if self.agent.is_running() {
+            anyhow::bail!("A task is running; capability changes were not applied");
+        }
+        self.update_capabilities(capabilities, plugin_defaults, || Ok(()))
+            .await
+    }
+
+    /// Prepare and validate once, persist, then commit without a fallible step.
+    /// A failed write leaves the original runtime and context untouched.
+    pub async fn update_capabilities(
+        &mut self,
+        capabilities: crate::capabilities::Capabilities,
+        plugin_defaults: &std::collections::BTreeMap<String, bool>,
+        persist: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        if self.agent.is_running() {
+            anyhow::bail!("A task is running; capability changes were not applied");
+        }
+        let mut plugins = PluginCatalog::discover(self.agent.workdir())?;
+        plugins.preview_default_items(plugin_defaults)?;
+        plugins.apply_capabilities(&capabilities);
+        let prepared = self.recipe.prepare(capabilities.clone(), plugins).await?;
+        let context = self.agent.prepare_runtime_context(&prepared.components)?;
+        persist()?;
+        self.install_prepared_context(prepared, capabilities, context);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn install_prepared(
+        &mut self,
+        prepared: PreparedRuntime,
+        capabilities: crate::capabilities::Capabilities,
+    ) -> Result<()> {
+        let context = self.agent.prepare_runtime_context(&prepared.components)?;
+        self.install_prepared_context(prepared, capabilities, context);
+        Ok(())
+    }
+
+    fn install_prepared_context(
+        &mut self,
+        prepared: PreparedRuntime,
+        capabilities: crate::capabilities::Capabilities,
+        context: Box<dyn crate::context::ContextPolicy>,
+    ) {
+        let PreparedRuntime {
+            components,
+            skills,
+            plugins,
+            base_tools,
+            base_prompt,
+            startup_warnings,
+            plugin_warnings,
+        } = prepared;
+        let selected_model_name = components.model_report.as_ref().and_then(|report| {
+            (report.model != self.recipe.config.model).then(|| report.model.clone())
+        });
+        self.agent
+            .replace_runtime(components, capabilities.clone(), context);
+        self.agent
+            .attach_turn_gate(plugins.turn_end_gate().map(Arc::new));
+        self.skills = skills;
+        self.plugins = plugins;
+        self.base_tools = base_tools;
+        self.base_prompt = base_prompt;
+        self.startup_warnings = startup_warnings;
+        self.plugin_warnings = plugin_warnings;
+        self.selected_model_name = selected_model_name;
+        self.capabilities = capabilities;
+    }
 }
 
 pub async fn default_runtime_with(
     config: Config,
     customize: impl FnOnce(&mut RuntimeComponents) -> Result<()>,
 ) -> Result<DefaultRuntime> {
-    let plugins = PluginCatalog::discover(&config.workdir)?;
+    let capabilities = crate::capabilities::effective_for(&config.workdir, "default")?;
+    default_runtime_with_capabilities(config, capabilities, customize).await
+}
+
+pub async fn default_runtime_with_capabilities(
+    config: Config,
+    capabilities: crate::capabilities::Capabilities,
+    customize: impl FnOnce(&mut RuntimeComponents) -> Result<()>,
+) -> Result<DefaultRuntime> {
+    let mut plugins = PluginCatalog::discover(&config.workdir)?;
+    plugins.apply_capabilities(&capabilities);
     let override_model = plugins.checked_model_override()?;
-    let mut plugin_warnings = Vec::new();
-    let (model, budget, selected_model_name, model_report) =
-        if let Some((backend, budget, name)) = override_model {
-            let report = model_catalog::plugin_report(
-                &name,
-                budget.window(),
-                budget.output_reserve(),
-                backend.accepts_images(),
-                backend.thinking_levels(),
-            );
-            (backend, budget, Some(name), report)
-        } else {
-            let (model, budget, report) = configured_model(&config).await?;
-            (
-                Arc::new(model) as Arc<dyn ModelBackend>,
-                budget,
-                None,
-                report,
-            )
-        };
-    let skills = SkillCatalog::discover(&config.workdir)?;
-    let mut tools = ToolRegistry::builtin();
-    tools.register(Arc::new(HistorySearch))?;
-    tools.register(Arc::new(HistoryRead))?;
-    tools.register(Arc::new(FileEdit))?;
-    if !skills.is_empty() {
-        tools.register(Arc::new(LoadSkill(skills.clone())))?;
-    }
-    let mcp_status = if env::var_os("KROMA_MCP_EAGER").is_some() {
-        mcp::register_configured_report(&mut tools, &config.workdir).await?
+    let plugin_model = override_model.is_some();
+    let (model, budget, report) = if let Some((model, budget, name)) = override_model {
+        let report = model_catalog::plugin_report(
+            &name,
+            budget.window(),
+            budget.output_reserve(),
+            model.accepts_images(),
+            model.thinking_levels(),
+        );
+        (model, budget, report)
     } else {
-        mcp::register_configured_lazy(&mut tools, &config.workdir).await?
+        let (model, budget, report) = configured_model(&config).await?;
+        (Arc::new(model) as Arc<dyn ModelBackend>, budget, report)
     };
-    if mcp_status.tools > 0 {
-        crate::runtime_log!("[mcp] registered {} tool(s)", mcp_status.tools);
-    }
-    let mut prompt = PromptComposer::default();
-    if let Some(metadata) = skills.metadata_prompt() {
-        prompt = prompt.with_trailing(metadata)?;
-    }
+    let original_model = model.clone();
+    let fallback_model = (!plugin_model).then(|| (model.clone(), budget, Some(report.clone())));
     let mut components = RuntimeComponents {
         model,
         context_budget: budget,
-        model_report: Some(model_report),
-        tools,
+        model_report: Some(report),
+        tools: builtin_tools()?,
         context_factory: Arc::new(BuiltinContextFactory),
-        prompt,
+        prompt: PromptComposer::default(),
         events: None,
         defer_initial_session: false,
     };
-    // Host customization runs first so its tools and prompt become the reload
-    // base. Plugin overlays apply afterwards to the live components only;
-    // replaying them onto a base that already contains them would duplicate
-    // or conflict on every idle reload.
     customize(&mut components)?;
-    let base_tools = components.tools.clone();
-    let base_prompt = components.prompt.clone();
-    plugin_warnings.splice(0..0, plugins.warnings.clone());
-    plugin_warnings.extend(plugins.contribute(&mut components.tools, &mut components.prompt));
-    plugin_warnings.extend(plugins.replace_context(&mut components.context_factory));
-    // A child Kroma applies its own policy after all plugin/MCP tools have
-    // been registered. The parent/default runtime has no added checks.
-    let child_policy = ChildPolicy::from_env()?;
-    if let Some(policy) = &child_policy {
-        policy.apply(&mut components.tools, &mut components.prompt)?;
-    }
-    components.model = plugins.model_hooks(components.model, components.context_budget);
-    components.events = plugins.wrap_events(components.events)?;
-    let selected_model_name = components.model_report.as_ref().and_then(|report| {
-        (selected_model_name.is_some() || report.model != config.model)
-            .then(|| report.model.clone())
+    let host_model = (!Arc::ptr_eq(&components.model, &original_model)).then(|| {
+        (
+            components.model.clone(),
+            components.context_budget,
+            components.model_report.clone(),
+        )
     });
-    let model_report = components.model_report.take();
-    let agent = Agent::with_runtime_budget_mode(
-        components.model,
-        components.tools,
-        components.context_factory,
-        components.prompt,
-        components.events,
-        config.workdir,
-        components.context_budget,
-        components.defer_initial_session,
+    let mut recipe = RuntimeRecipe {
+        config,
+        host: components,
+        fallback_model,
+        host_model,
+    };
+    let PreparedRuntime {
+        components,
+        skills,
+        plugins,
+        base_tools,
+        base_prompt,
+        startup_warnings,
+        plugin_warnings,
+    } = recipe.prepare(capabilities.clone(), plugins).await?;
+    let selected_model_name = components.model_report.as_ref().and_then(|report| {
+        (plugin_model || report.model != recipe.config.model).then(|| report.model.clone())
+    });
+    let model_report = components.model_report.clone();
+    let mut agent = Agent::with_capability_runtime(
+        components,
+        recipe.config.workdir.clone(),
+        capabilities.clone(),
     )?;
-    let mut agent = agent;
-    if let Some(policy) = &child_policy {
+    if let Some(policy) = ChildPolicy::from_env()? {
         agent.set_execution_limits(policy.limits());
     }
     if let Some(report) = model_report {
         agent.set_model_report(report);
     }
+    agent.attach_turn_gate(plugins.turn_end_gate().map(Arc::new));
     agent.enable_checkpoints();
     Ok(DefaultRuntime {
         agent,
         skills,
         plugins,
-        startup_warnings: mcp_status
-            .unavailable
-            .into_iter()
-            .chain(mcp_status.warnings)
-            .collect(),
+        startup_warnings,
         plugin_warnings,
         selected_model_name,
         base_tools,
         base_prompt,
+        recipe,
+        capabilities,
     })
 }
 
@@ -225,7 +479,9 @@ async fn configured_model(config: &Config) -> Result<(ModelClient, ContextConfig
     .with_output_tokens(config.max_output_tokens)
     .with_thinking_levels(config.thinking_levels.clone())
     // Endpoint capability, never inferred from the model name.
-    .with_native_web_search(config.native_web_search);
+    .with_native_web_search(config.native_web_search)
+    // Explicit, validated profile cache controls; defaults are unchanged.
+    .with_cache_policy(config.cache_policy.clone());
     // Validate an explicit alias before doing any optional network work.
     let catalog = model_catalog::select(
         &config.base_url,
@@ -326,6 +582,158 @@ pub async fn default_agent(config: Config) -> Result<Agent> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn disabling_plugins_removes_model_context_hooks_tools_and_ui() -> Result<()> {
+        use crate::capabilities::Capabilities;
+        use std::{
+            fs,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+        let root = std::env::temp_dir().join(format!(
+            "kroma-runtime-plugin-capabilities-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        let workdir = root.join("project");
+        let plugin_dir = root.join("plugins/probe");
+        fs::create_dir_all(&workdir)?;
+        fs::create_dir_all(&plugin_dir)?;
+        fs::write(
+            plugin_dir.join("plugin.toml"),
+            r#"
+api_version=2
+id='probe'
+name='Probe'
+command='node'
+args=['main.js']
+prompt='CAPABILITY-PLUGIN-PROMPT'
+hooks=['before_model_request']
+[model]
+protocol='plugin'
+model='capability-plugin-model'
+context_window=32768
+output_reserve=2048
+[context]
+version=2
+[ui]
+status='CAPABILITY-PLUGIN-UI'
+[[tools]]
+name='capability_plugin_tool'
+description='Probe'
+[tools.parameters]
+type='object'
+[[tools]]
+name='shell'
+description='Plugin-owned replacement, independent of builtin tools'
+replace=true
+[tools.parameters]
+type='object'
+"#,
+        )?;
+        fs::write(
+            plugin_dir.join("main.js"),
+            "throw new Error('this fixture must remain lazy');\n",
+        )?;
+        let state = root.join("plugins.toml");
+        let catalog = PluginCatalog::discover_at(root.join("plugins"), state.clone(), &workdir)?;
+        catalog.set_enabled("probe", true).map_err(|error| {
+            anyhow::anyhow!("{error}; discovery warnings: {:?}", catalog.warnings)
+        })?;
+        let profile = crate::profiles::ProviderProfile {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "fallback-model".into(),
+            api_key: None,
+            api_key_env: None,
+            deepseek_thinking: None,
+            api_protocol: Some("chat".into()),
+            reasoning_effort: Some("auto".into()),
+            context_window: Some(65536),
+            max_output_tokens: Some(4096),
+            thinking_levels: None,
+            catalog_model: None,
+            native_web_search: None,
+            anthropic_cache_ttl: None,
+            anthropic_stable_breakpoint: None,
+            responses_prompt_cache_key: None,
+        };
+        let config = Config::from_profile(&profile, workdir.clone(), None)?;
+        let disabled = Capabilities {
+            tools: false,
+            mcp: false,
+            skills: false,
+            plugins: false,
+            ..Default::default()
+        };
+        let mut runtime =
+            default_runtime_with_capabilities(config, disabled.clone(), |components| {
+                components.defer_initial_session = true;
+                Ok(())
+            })
+            .await?;
+        let catalog = PluginCatalog::discover_at(root.join("plugins"), state, &workdir)?;
+        let mut enabled = disabled.clone();
+        enabled.items.plugins.insert("probe".into(), true);
+        let mut catalog = catalog;
+        catalog.apply_capabilities(&enabled);
+        let prepared = runtime.recipe.prepare(enabled.clone(), catalog).await?;
+        runtime.install_prepared(prepared, enabled.clone())?;
+        assert_eq!(
+            runtime.agent.model_report().unwrap().model,
+            "capability-plugin-model"
+        );
+        let names = runtime.agent.available_tool_names();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"shell".to_owned()));
+        assert!(names.contains(&"capability_plugin_tool".to_owned()));
+        let mut reloaded =
+            PluginCatalog::discover_at(root.join("plugins"), root.join("plugins.toml"), &workdir)?;
+        let (tools, _) = runtime.prepare_plugin_reload(&mut reloaded)?;
+        assert_eq!(tools.definitions().len(), 2);
+        assert!(!tools
+            .definitions()
+            .iter()
+            .any(|tool| tool["function"]["name"] == "history_read"));
+        assert!(!runtime.plugins.ui_statuses().is_empty());
+        let old = runtime.agent.new_session()?;
+        let old_path = runtime.agent.archive_path().to_path_buf();
+        let snapshot: serde_json::Value = serde_json::from_slice(&fs::read(&old_path)?)?;
+        assert_eq!(snapshot["compression"]["strategy"], "probe");
+        runtime.set_capabilities(disabled.clone()).await?;
+        assert_eq!(
+            runtime.agent.model_report().unwrap().model,
+            "fallback-model"
+        );
+        assert!(runtime.agent.available_tool_names().is_empty());
+        assert!(runtime.plugins.ui_statuses().is_empty());
+        let mut projection = vec![crate::protocol::Message::new("system", "base")];
+        runtime.base_prompt.apply(&mut projection);
+        assert!(!projection[0]
+            .content
+            .as_ref()
+            .unwrap()
+            .contains("CAPABILITY-PLUGIN-PROMPT"));
+        runtime.agent.enter_welcome()?;
+        runtime.agent.resume_session(&old)?;
+        assert_eq!(runtime.agent.session_id(), old);
+        // Old external-context archives reopen with plugins disabled without
+        // changing their persisted strategy or dropping their transcript, and
+        // preserve that metadata across subsequent saves and re-enabling.
+        let snapshot: serde_json::Value = serde_json::from_slice(&fs::read(&old_path)?)?;
+        assert_eq!(snapshot["compression"]["strategy"], "probe");
+        let _ = runtime.agent.compact().await.ok();
+        let snapshot: serde_json::Value = serde_json::from_slice(&fs::read(&old_path)?)?;
+        assert_eq!(snapshot["compression"]["strategy"], "probe");
+        runtime.set_capabilities(enabled).await?;
+        runtime.agent.resume_session(&old)?;
+        assert_eq!(runtime.agent.session_id(), old);
+        let snapshot: serde_json::Value = serde_json::from_slice(&fs::read(&old_path)?)?;
+        assert_eq!(snapshot["compression"]["strategy"], "probe");
+        drop(runtime);
+        fs::remove_file(&old_path)?;
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     fn replacement_model_and_context_budget_are_one_operation() {
         let first: Arc<dyn ModelBackend> =
@@ -373,6 +781,9 @@ mod tests {
             thinking_levels: Some(vec!["medium".into(), "high".into(), "xhigh".into()]),
             catalog_model: None,
             native_web_search: None,
+            anthropic_cache_ttl: None,
+            anthropic_stable_breakpoint: None,
+            responses_prompt_cache_key: None,
         };
         let (model, budget, report) = model_from_profile(&profile).await.unwrap();
         assert_eq!(budget.window(), 500_000);
@@ -405,6 +816,9 @@ mod tests {
                 thinking_levels: Some(vec!["medium".into(), "high".into()]),
                 catalog_model: None,
                 native_web_search: None,
+                anthropic_cache_ttl: None,
+                anthropic_stable_breakpoint: None,
+                responses_prompt_cache_key: None,
             };
             let (_, budget, _) = tokio::time::timeout(
                 std::time::Duration::from_millis(200),
@@ -439,6 +853,9 @@ mod tests {
                 thinking_levels: None,
                 catalog_model: None,
                 native_web_search: None,
+                anthropic_cache_ttl: None,
+                anthropic_stable_breakpoint: None,
+                responses_prompt_cache_key: None,
             };
             let (_, budget, report) = model_from_profile(&profile).await?;
             assert_eq!(budget.output_reserve(), 4096, "{protocol}");
@@ -464,6 +881,9 @@ mod tests {
                 thinking_levels: None,
                 catalog_model: None,
                 native_web_search: None,
+                anthropic_cache_ttl: None,
+                anthropic_stable_breakpoint: None,
+                responses_prompt_cache_key: None,
             };
             let config = Config::from_profile(&profile, Default::default(), None)?;
             let (offline, offline_report) = config.resolved_limits_without_probe()?;
@@ -500,6 +920,9 @@ mod tests {
             thinking_levels: None,
             catalog_model: None,
             native_web_search: None,
+            anthropic_cache_ttl: None,
+            anthropic_stable_breakpoint: None,
+            responses_prompt_cache_key: None,
         };
         let (_, budget, _) = tokio::time::timeout(
             std::time::Duration::from_millis(200),

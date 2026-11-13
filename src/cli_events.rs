@@ -44,10 +44,13 @@ impl EventSink for JsonEvents {
                 output_tokens,
                 reasoning_tokens,
                 cached_tokens,
+                cache_write_tokens,
+                cache_write_1h_tokens,
                 ..
             } => {
                 json!({"type":"model_finished","request":request,"tools":tools,"input":input_tokens,
-                    "output":output_tokens,"cached":cached_tokens,"reasoning_tokens":reasoning_tokens})
+                    "output":output_tokens,"cached":cached_tokens,"reasoning_tokens":reasoning_tokens,
+                    "cache_write":cache_write_tokens,"cache_write_1h":cache_write_1h_tokens})
             }
             RuntimeEvent::ModelFailed => json!({"type":"model_failed"}),
             RuntimeEvent::FailedRequestUsage {
@@ -55,15 +58,19 @@ impl EventSink for JsonEvents {
                 output_tokens,
                 cached_tokens,
                 reasoning_tokens,
+                cache_write_tokens,
+                ..
             } => json!({"type":"failed_request_usage", "input":input_tokens,
-                "output":output_tokens,"cached":cached_tokens,"reasoning_tokens":reasoning_tokens}),
+                "output":output_tokens,"cached":cached_tokens,"reasoning_tokens":reasoning_tokens,
+                "cache_write":cache_write_tokens}),
             RuntimeEvent::CompactionUsage {
                 requests,
                 input_tokens,
                 output_tokens,
                 cached_tokens,
+                cache_write_tokens,
             } => json!({"type":"apec_usage","requests":requests,"input":input_tokens,
-                "output":output_tokens,"cached":cached_tokens}),
+                "output":output_tokens,"cached":cached_tokens,"cache_write":cache_write_tokens}),
             RuntimeEvent::ToolStarted { name, id, .. } => {
                 json!({"type":"tool_started","name":name,"id":id})
             }

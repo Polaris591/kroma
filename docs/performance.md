@@ -83,6 +83,72 @@ comparing separate runs under different system load. See the
 for actual local results and raw logs. A win on this fixture is not an
 end-to-end task speedup claim.
 
+## Cache/context contract regression lane (offline)
+
+`node benchmarks/cache_token_regression.cjs` runs the local Rust groups that
+hold the prompt/cache contract together: admitted reference prefix stability,
+final-projection tracing, cache read/write accounting, Anthropic cache payloads,
+checkpoint prefix parity, compaction defaults, token-estimator boundaries and
+large tool-output projection. It contacts no provider, reads no credentials and
+writes no session; `--list` prints the groups without running them. A pass there
+means the invariants still hold locally, never that a provider cached more or
+that a task got cheaper.
+
+What the lane does *not* establish, by construction:
+
+- no provider cache hit, write-charge or TTL behaviour is observed;
+- the checkpoint prefix relation is checked on payloads produced locally, so a
+gateway that rewrites either request invalidates the assumption;
+- the large-tool-output threshold (64 KiB / 2 000 lines) is a conservative
+  default, not a measured cost optimum, and the extra retrieval round is
+  included in neither latency nor token accounting here;
+- an endpoint that refuses `tool_choice: none` makes its checkpoint tool-free
+  (logged), so those checkpoints may not share the tool prefix.
+
+## Opt-in live cache comparison protocol (not executed here)
+
+Nothing below runs automatically, in CI or during installation. Every variant
+may incur provider charges, so it is documented for a deliberate, separately
+authorized run. Use one endpoint, one model ID, the same reasoning setting and
+the same task text for every arm.
+
+1. **Freeze the comparison.** Record Kroma's revision, the profile name (not the
+   key), `protocol`, model ID and the reasoning level. Set
+   `KROMA_CACHE_TRACE=1` so each foreground request writes a content-free
+   `.cache-trace.jsonl` sidecar with `projection`, `append_only`,
+   `cache_write_tokens`, `payload_fingerprint`, `native_tools` and timing.
+2. **Interleave arms.** For each scenario run `hot`, `cold` and the variant in
+   alternating order, at least three rounds, and keep every sidecar. Do not run
+   all of one arm first: a warm provider cache from the previous arm is the most
+   common way to fake a result.
+3. **Scenarios (minimum set).**
+   - long tool loop with no plugin context;
+   - the same task with a reference/context plugin enabled;
+   - two consecutive user turns in one session;
+   - a long idle pause before the second turn (TTL boundary);
+   - native server-side search enabled;
+   - one very large MCP tool result;
+   - a session reopen mid-task.
+4. **Read only honest fields.** Per request, take `input_tokens`,
+   `cached_tokens`, `cache_write_tokens`, `reasoning_tokens`, `elapsed_ms` and
+   `append_only` from the trace, and the provider's billed line items from its
+   own dashboard. `cache_write_tokens` is a subset of input, so never add it to
+   input again; an absent field is unknown, not zero.
+5. **Accept quality first.** Verify the task actually completed, including any
+   required verification steps, before comparing tokens. A cheaper arm that
+   drops evidence or fails verification is not an improvement.
+6. **Report bounds, not slogans.** State request counts, input/output/read/write
+   totals, cache-hit ratio per arm, latency distribution and the exact provider
+   billing basis. `payload_fingerprint` differences explain a miss; they never
+   prove a hit.
+7. **Settings worth testing once** are the explicit profile controls
+   `anthropic_cache_ttl`, `anthropic_stable_breakpoint` and
+   `responses_prompt_cache_key`. Leave them at their defaults unless the
+   measurements above show the default losing on the same task.
+
+Historical benchmark numbers in this directory cannot prove these properties
+for the current code; only a fresh, interleaved run on one endpoint can.
+
 ## Decisions deliberately deferred
 
 Snapshots are delayed until the first potentially worktree-mutating tool.

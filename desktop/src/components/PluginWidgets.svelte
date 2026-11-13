@@ -15,10 +15,7 @@
     {#each items as widget (`${widget.plugin_id}:${widget.id}`)}
       <section class="plugin-widget-card">
         {#if widget.title}
-          <header class="plugin-widget-head">
-            <strong>{widget.title}</strong>
-            <span>{widget.plugin_id}</span>
-          </header>
+          <header class="plugin-widget-head"><strong>{widget.title}</strong></header>
         {/if}
         <PanelBlocksView
           blocks={widget.blocks}

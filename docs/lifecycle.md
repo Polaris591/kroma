@@ -13,8 +13,8 @@ until it returns, fails, or the host drops the future and calls
 | State | Meaning | Durable work already done |
 | --- | --- | --- |
 | Idle | No `TaskInput` is active. Session/plugin commands may run. | Previous WAL entries and session snapshots |
-| File snapshot | Before task input reaches the model; a cancellable blocking worker owns the private-store transaction. | No new model/tool work yet |
-| Model request | A provider request is streaming. Steering may be accepted. | User input and prior tool results |
+| File snapshot | Deferred until the first potentially mutating tool; a cancellable blocking worker owns the private-store transaction. | User input and any preceding model response |
+| Model request | A provider request is streaming. Steering may be accepted. | User input and prior tool results; newly sent host references are committed before the returned reply |
 | Tool batch | Returned tool calls run strictly in order. | Each prior tool result is written before the next call |
 | Finish/checkpoint | A text-only response reached `finish_task`; foreground compaction is settled. | Assistant response is already in the WAL |
 | Steering drain | Accepted steering is appended as user messages and another model turn starts. | Steering messages are durable before the request |
@@ -79,8 +79,9 @@ append. Tool and model failures are not replayed into the next task.
 
 ## Failure and cancellation checks
 
-- A failed model request attempts to persist one interruption note; any
-  partially streamed assistant text is discarded. Early failures after the
+- A failed model request attempts to persist one interruption note. Incomplete
+  streams are discarded; output-limit fragments are saved separately before a
+  durable host continuation request, so a later failure does not erase them. Early failures after the
   user turn was appended (for example context-budget or attachment errors)
   also attempt one durable failure boundary.
 - `cancel` synthesizes missing tool results for previous calls, preserves their

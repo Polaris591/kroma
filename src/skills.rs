@@ -36,6 +36,10 @@ struct Frontmatter {
 }
 
 fn parse_skill(path: &Path) -> Result<Skill> {
+    parse_skill_with_contents(path).map(|(skill, _)| skill)
+}
+
+fn parse_skill_with_contents(path: &Path) -> Result<(Skill, String)> {
     let metadata =
         fs::metadata(path).with_context(|| format!("cannot inspect skill {}", path.display()))?;
     if metadata.len() > MAX_SKILL_BYTES {
@@ -87,11 +91,14 @@ fn parse_skill(path: &Path) -> Result<Skill> {
             meta.name
         );
     }
-    Ok(Skill {
-        name: meta.name,
-        description: description.to_owned(),
-        path: path.to_owned(),
-    })
+    Ok((
+        Skill {
+            name: meta.name,
+            description: description.to_owned(),
+            path: path.to_owned(),
+        },
+        contents,
+    ))
 }
 
 impl SkillCatalog {
@@ -142,6 +149,12 @@ impl SkillCatalog {
         })
     }
 
+    pub fn retain_enabled(&mut self, settings: &crate::capabilities::Capabilities) {
+        Arc::make_mut(&mut self.skills).retain(|name, _| {
+            settings.enabled(crate::capabilities::CapabilityGroup::Skills, name, true)
+        });
+    }
+
     pub fn list(&self) -> Vec<Skill> {
         self.skills.values().cloned().collect()
     }
@@ -170,11 +183,10 @@ impl SkillCatalog {
             .with_context(|| format!("unknown skill '{name}'"))?;
         // Reload from disk so users can edit skills without restarting the
         // process. Do not accidentally load arbitrary paths from model input.
-        let latest = parse_skill(&skill.path)?;
+        let (latest, contents) = parse_skill_with_contents(&skill.path)?;
         if latest.name != skill.name {
             bail!("skill '{}' has changed identity on disk", skill.name);
         }
-        let contents = fs::read_to_string(&skill.path)?;
         Ok(json!({
             "name": skill.name,
             "skill_directory": skill.path.parent().unwrap().display().to_string(),
@@ -189,6 +201,10 @@ pub struct LoadSkill(pub SkillCatalog);
 impl Tool for LoadSkill {
     fn name(&self) -> &str {
         "load_skill"
+    }
+
+    fn may_mutate_worktree(&self) -> bool {
+        false
     }
 
     fn definition(&self) -> Value {
@@ -324,5 +340,11 @@ mod hardening_tests {
         assert!(catalog.list().is_empty());
         fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn load_skill_declares_itself_read_only() {
+        let tool = LoadSkill(SkillCatalog::default());
+        assert!(!tool.may_mutate_worktree());
     }
 }

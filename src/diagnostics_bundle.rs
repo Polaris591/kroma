@@ -344,6 +344,7 @@ mod tests {
             catalog_model: None,
             catalog_model_source: None,
             native_web_search: false,
+            cache_policy: Default::default(),
             selected_profile: None,
         }
     }

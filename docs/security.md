@@ -13,9 +13,10 @@ goal is an autonomous agent that stays inspectable and recoverable.
   (`api_key_env`) so the secret is not written to `~/.kroma/config.json`.
 - Keeps MCP server stderr out of Kroma's output by default, because third-party logs
   can be noisy or contain secrets. Set `KROMA_MCP_STDERR=inherit` when debugging.
-- Requires explicit trust for a project's `.kroma/mcp.json`. Approval is bound to
-  the file content; editing the file invalidates it. Use
-  `kroma trust-project --revoke` to remove trust.
+- Loads user and project MCP configs directly, without a trust store or approval
+  step. A project's `.kroma/mcp.json` can start local programs or contact remote
+  servers on demand; inspect its configuration before running Kroma in a project.
+  The legacy `kroma trust-project [--revoke]` command has no effect.
 - Keeps diagnostics local. `kroma diagnostics` writes an allowlisted bundle and does
   not upload it, call a model, or start plugins.
 

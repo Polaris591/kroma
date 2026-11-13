@@ -23,6 +23,13 @@ describe('composer gating', () => {
     expect(COMPACTING_TIP).toContain('压缩上下文');
   });
 
+  it('uses a quiet placeholder without changing blocked or running explanations', () => {
+    expect(composerPlaceholder(gate())).toBe('想做什么？');
+    expect(composerPlaceholder(gate({compacting: true}))).toBe(COMPACTING_PLACEHOLDER);
+    expect(composerPlaceholder(gate({running: true}))).toContain('补充指令');
+    expect(composerPlaceholder(gate({ready: false}))).toContain('连接模型');
+  });
+
   it('explains the running, connected and empty states', () => {
     expect(composerAction(gate({running: true}))).toBe('steer');
     expect(composerAction(gate({running: true, hasContent: false}))).toBe('blocked');

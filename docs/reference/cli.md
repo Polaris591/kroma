@@ -13,7 +13,7 @@
 | `kroma plugins ...` | Manage process plugins |
 | `kroma diagnostics ...` | Write a local diagnostics bundle |
 | `kroma update [--check] [--channel CHANNEL]` | Check for, or apply an npm update (`CHANNEL` is `latest` or `next`) |
-| `kroma trust-project [--revoke]` | Approve/revoke this project's MCP file |
+| `kroma trust-project [--revoke]` | Legacy compatibility no-op; MCP configs need no approval |
 | `kroma recover-context [id]` | Reset unavailable custom context memory |
 | `kroma help [COMMAND]` | Help; unknown topics print the main usage |
 | `kroma version` / `--version` / `--build-info` | Version information |

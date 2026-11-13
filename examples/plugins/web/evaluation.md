@@ -14,10 +14,11 @@ record API spend from the provider dashboard (this plugin does not estimate cost
 Summarize hits/20, readable relevant sources/20, median/p95 search latency and
 actual billed spend. Do not count snippets as successfully read source pages.
 
-## Keyless control run (2026-11-09)
+## Historical keyless control run (2026-11-09, Mwmbl-only baseline)
 
-Newer runs must use the current plugin: no credential means the free Mwmbl
-index only, `provider: "free"`. Measured on one network:
+Newer runs must use the current plugin (where keyless `auto` tries `exa_public`,
+`firecrawl`, `searxng` when configured, and `mwmbl`). Historical `provider: "free"`
+Mwmbl-only run measured on one network:
 
 | Query | Provider | Result |
 |---|---|---|

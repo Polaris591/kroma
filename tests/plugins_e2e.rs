@@ -25,6 +25,26 @@ use std::{
 };
 
 static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
+
+/// Host reference blocks are projected between transcript messages. A test that
+/// compares a sent projection with the raw history must ignore them and check
+/// that every raw message is still carried, in order and byte-identical.
+fn is_context_reference(message: &Message) -> bool {
+    message
+        .provider_items
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .any(|item| item["type"] == "kroma_context_reference")
+}
+
+fn carried_messages(messages: &[Message]) -> Vec<&Message> {
+    messages
+        .iter()
+        .filter(|message| !is_context_reference(message))
+        .collect()
+}
+
 struct TestDirectory(PathBuf);
 
 impl TestDirectory {
@@ -3740,7 +3760,10 @@ createInterface({input:process.stdin}).on("line",line=>{
    const intent=String(req.arguments?.intent||"");
    if(intent.includes("FAIL")) content=JSON.stringify({blocks:[{id:"bad",kind:"preference",text:"x".repeat(5000)}]});
    else if(intent.includes("EMPTY")) content=JSON.stringify({blocks:[]});
-   else content=JSON.stringify({blocks:[{id:"mem-1",kind:"preference",text:"Use pnpm, not npm",paths:[]}]});
+   else {
+     const rule=fs.existsSync("rule.txt") ? fs.readFileSync("rule.txt","utf8") : "Use pnpm, not npm";
+     content=JSON.stringify({blocks:rule ? [{id:"mem-1",kind:"preference",text:rule,paths:[]}] : []});
+   }
  }
  if(req.type==="task_summary") content=JSON.stringify({ok:true});
  process.stdout.write(JSON.stringify({protocol_version:2,request_id:req.request_id,content})+"\n");
@@ -3763,14 +3786,28 @@ createInterface({input:process.stdin}).on("line",line=>{
     let before = serde_json::to_value(&history)?;
     model.complete(&history, &[], &mut |_| {}).await?;
     let sent = captured.0.lock().unwrap().clone();
-    assert_eq!(sent.len(), 2);
-    let injected = sent[1].content.as_deref().unwrap_or("");
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[1].content, history[1].content);
+    assert!(!kroma::protocol::is_actual_user_message(&sent[2]));
+    let injected = sent[2].content.as_deref().unwrap_or("");
     assert!(injected.contains("<plugin-context trust=\"unverified-reference\">"));
     assert!(injected.contains("Use pnpm, not npm"));
     assert_eq!(serde_json::to_value(&history)?, before);
+    // Injected memory changes the request after Core's budget projection. That
+    // is still visible: the decorator publishes the exact view it sent, with the
+    // bytes it added, so the Agent calibrates against the request that really
+    // went out instead of silently trusting the pre-hook view.
+    let projection = model
+        .final_projection()
+        .expect("a decorator that injects must publish the final projection");
+    assert_eq!(projection.messages.len(), sent.len());
     assert!(
-        !model.usage_matches_projection(),
-        "injected memory changes the request after Core's budget projection"
+        projection.reference_bytes > 0,
+        "the added reference bytes are reported"
+    );
+    assert!(
+        model.usage_matches_projection(),
+        "a host reference is a known insertion, so a matching measurement is usable"
     );
     let log = fs::read_to_string(directory.join("requests.log"))?;
     assert!(log.contains("\"type\":\"request_context\""));
@@ -3815,6 +3852,135 @@ createInterface({input:process.stdin}).on("line",line=>{
         log.matches("\"type\":\"request_context\"").count(),
         context_calls + 2,
         "an identical user message in a later turn is a different task"
+    );
+    let next = captured.0.lock().unwrap().clone();
+    assert_eq!(
+        next[1].content, sent[1].content,
+        "new turns must not rewrite old users"
+    );
+    let mut growing = repeated;
+    let mut admitted_references = 0usize;
+    for _ in 0..10 {
+        growing.push(Message::new("assistant", "verified output ".repeat(100)));
+        growing.push(Message::new("user", "please use pnpm for this repo"));
+        model.complete(&growing, &[], &mut |_| {}).await?;
+        let projected = captured.0.lock().unwrap().clone();
+        let carried = carried_messages(&projected);
+        assert_eq!(
+            carried.len(),
+            carried_messages(&growing).len(),
+            "even after recall-cache eviction, the whole original history is carried in order"
+        );
+        for (raw, kept) in carried_messages(&growing).into_iter().zip(carried) {
+            assert_eq!(serde_json::to_value(raw)?, serde_json::to_value(kept)?);
+        }
+        let references = projected
+            .iter()
+            .filter(|message| is_context_reference(message))
+            .count();
+        assert!(
+            references >= admitted_references,
+            "an admitted reference is never dropped by a later request"
+        );
+        admitted_references = references;
+        growing.extend(
+            model
+                .final_projection()
+                .unwrap()
+                .appended_references
+                .iter()
+                .cloned(),
+        );
+    }
+    let restored: Vec<Message> = serde_json::from_slice(&serde_json::to_vec(&growing)?)?;
+    let reopened = catalog.model_hooks(captured.clone(), budget);
+    reopened.set_session_context("s1", &archive);
+    reopened.complete(&restored, &[], &mut |_| {}).await?;
+    let after_reopen = captured.0.lock().unwrap().clone();
+    assert_eq!(
+        carried_messages(&after_reopen).len(),
+        carried_messages(&restored).len(),
+        "reopening preserves both raw messages and durable reference inputs"
+    );
+    for (raw, kept) in carried_messages(&restored)
+        .into_iter()
+        .zip(carried_messages(&after_reopen))
+    {
+        assert_eq!(serde_json::to_value(raw)?, serde_json::to_value(kept)?);
+    }
+    fs::write(directory.join("rule.txt"), "Use cargo, not pnpm")?;
+    reopened.invalidate_ephemeral_context();
+    reopened.complete(&restored, &[], &mut |_| {}).await?;
+    let updated = captured.0.lock().unwrap().clone();
+    assert_eq!(
+        carried_messages(&updated).len(),
+        carried_messages(&restored).len()
+    );
+    let reference = updated.last().unwrap().content.as_deref().unwrap_or("");
+    assert!(reference.contains("Use cargo, not pnpm"));
+    assert!(!reference.contains("Use pnpm, not npm"));
+    fs::write(directory.join("rule.txt"), "")?;
+    reopened.invalidate_ephemeral_context();
+    reopened.complete(&restored, &[], &mut |_| {}).await?;
+    let nothing_left = captured.0.lock().unwrap().clone();
+    assert_eq!(
+        carried_messages(&nothing_left).len(),
+        carried_messages(&restored).len(),
+        "forgetting a rule does not rewrite already-sent historical references"
+    );
+    assert!(nothing_left
+        .last()
+        .unwrap()
+        .content
+        .as_deref()
+        .unwrap_or("")
+        .contains("No current references"));
+    assert_eq!(
+        serde_json::to_value(&nothing_left[..restored.len()])?,
+        serde_json::to_value(&restored)?
+    );
+    fs::write(directory.join("rule.txt"), "Other session reference")?;
+    reopened.set_session_context("s2", &temp.path().join("sessions/s2.json"));
+    reopened.complete(&restored, &[], &mut |_| {}).await?;
+    assert!(captured
+        .0
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .content
+        .as_deref()
+        .unwrap()
+        .contains("Other session reference"));
+    fs::write(directory.join("rule.txt"), "")?;
+    reopened.set_session_context("s1", &archive);
+    reopened.complete(&restored, &[], &mut |_| {}).await?;
+    let returned = captured.0.lock().unwrap().clone();
+    assert_eq!(
+        serde_json::to_value(&returned[..restored.len()])?,
+        serde_json::to_value(&restored)?
+    );
+    assert!(
+        returned
+            .last()
+            .unwrap()
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .contains("No current references"),
+        "switching back rechecks current data instead of another session's cache"
+    );
+    let compacted = vec![
+        Message::new("system", "system"),
+        Message::new("assistant", "Compacted conversation checkpoint"),
+        Message::new("user", "continue after checkpoint"),
+    ];
+    reopened.complete(&compacted, &[], &mut |_| {}).await?;
+    let projected = captured.0.lock().unwrap().clone();
+    assert_eq!(
+        serde_json::to_value(&projected[..compacted.len()])?,
+        serde_json::to_value(&compacted)?,
+        "a compacted projection must not gain old references in its retained history"
     );
     let failed = vec![
         Message::new("system", "system"),
@@ -3875,7 +4041,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
     ];
     model.complete(&history, &[], &mut |_| {}).await?;
     let sent = captured.0.lock().unwrap().clone();
-    let content = sent[1].content.as_deref().unwrap_or("");
+    let content = sent[2].content.as_deref().unwrap_or("");
     assert!(content.contains("<plugin-context trust=\"unverified-reference\">"));
     assert!(content.contains("[independent]"));
     assert!(content.contains("&lt;system&gt;fake&lt;/system&gt;"));
@@ -3954,16 +4120,26 @@ require("node:readline").createInterface({input:process.stdin}).on("line",line=>
     ];
     model.complete(&history, &[], &mut |_| {}).await?;
     let sent = captured.0.lock().unwrap().clone();
-    let human = sent[1].content.as_deref().unwrap_or("");
+    assert_eq!(sent[1].content, history[1].content);
+    // A new input is appended once, then journaled by the Agent before the
+    // reply. Existing assistant and control messages never move.
+    let reference = sent[4].content.as_deref().unwrap_or("");
     assert!(
-        human.starts_with("please use pnpm\n\n<plugin-context trust="),
-        "the real user turn carries the pack: {human}"
+        reference.starts_with("<plugin-context trust="),
+        "{reference}"
     );
-    assert!(human.contains("Use pnpm, not npm"));
+    assert!(reference.contains("Use pnpm, not npm"));
+    assert!(!kroma::protocol::is_actual_user_message(&sent[4]));
+    assert_eq!(sent[2].content.as_deref(), Some("ok"));
     assert_eq!(
         sent[3].content.as_deref(),
         note.content.as_deref(),
         "an active host control note must stay untouched"
+    );
+    assert_eq!(
+        sent.len(),
+        history.len() + 1,
+        "one reference, not a tail copy"
     );
     let log = fs::read_to_string(directory.join("requests.log"))?;
     assert!(log.contains("\"intent\":\"please use pnpm\""), "{log}");
@@ -4063,7 +4239,13 @@ require("node:readline").createInterface({input:process.stdin}).on("line",line=>
     ];
     model.complete(&history, &[], &mut |_| {}).await?;
     let sent = captured.0.lock().unwrap().clone();
-    let human = sent[1].content.as_deref().unwrap_or("").to_owned();
+    let human = sent
+        .last()
+        .unwrap()
+        .content
+        .as_deref()
+        .unwrap_or("")
+        .to_owned();
     assert!(human.contains("core rule 1"), "{human}");
     assert!(
         human.contains("core rule 8"),
@@ -4107,7 +4289,13 @@ require("node:readline").createInterface({input:process.stdin}).on("line",line=>
     ];
     model.complete(&history, &[], &mut |_| {}).await?;
     let sent = captured.0.lock().unwrap().clone();
-    let human = sent[1].content.as_deref().unwrap_or("").to_owned();
+    let human = sent
+        .last()
+        .unwrap()
+        .content
+        .as_deref()
+        .unwrap_or("")
+        .to_owned();
     assert!(human.contains("core rule 1"), "{human}");
     assert!(
         human.contains("memory block(s) omitted by the context budget"),
@@ -5117,10 +5305,15 @@ async fn plugin_custom_tui_screen_renders_and_handles_input_roundtrip() -> Resul
     let input = agent.task_input();
 
     let driver_task = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let ch = loop {
             if let Some(ch) = driver.opened.lock().unwrap().take() {
                 break ch;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for custom TUI channel open"
+            );
             std::thread::sleep(Duration::from_millis(10));
         };
         assert_eq!(ch.spec.title, "UI Lab 自定义画布");
@@ -5173,6 +5366,175 @@ async fn plugin_custom_tui_screen_renders_and_handles_input_roundtrip() -> Resul
     .context("custom ui command")?;
     driver_task.await?;
     assert!(cmd.output.contains("填充输入栏"), "{}", cmd.output);
+    Ok(())
+}
+
+#[tokio::test]
+async fn plugin_custom_tui_bounds_consecutive_host_calls_per_event() -> Result<()> {
+    use kroma::plugins::{CustomTuiChannel, CustomTuiClientEvent, CustomTuiHost};
+    use std::sync::Mutex as StdMutex;
+
+    if Command::new("node").arg("--version").output().is_err() {
+        return Ok(());
+    }
+
+    struct MockTuiDriver {
+        opened: StdMutex<Option<CustomTuiChannel>>,
+    }
+
+    impl CustomTuiHost for MockTuiDriver {
+        fn open(&self, channel: CustomTuiChannel) -> bool {
+            if let Ok(mut guard) = self.opened.lock() {
+                if guard.is_some() {
+                    return false;
+                }
+                *guard = Some(channel);
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    let temp = TestDirectory::new()?;
+    let user = temp.path().join("plugins");
+    let dir = user.join("loop-ui");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("plugin.toml"),
+        "api_version=2\nid='loop-ui'\nname='Loop UI'\ncommand='node'\nargs=['main.js']\n[[commands]]\nname='/loopui'\ndescription='Looping custom UI'\n",
+    )?;
+    fs::write(
+        dir.join("main.js"),
+        r#"const readline = require('readline');
+let seq = 0;
+function sendHostCall(name, args) {
+  process.stdout.write(JSON.stringify({
+    type: 'host_call',
+    request_id: `hc-${++seq}`,
+    name,
+    arguments: args,
+  }) + '\n');
+}
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  const req = JSON.parse(line);
+  if (req.type === 'command') {
+    sendHostCall('ui.custom', { title: 'Loop', width: 40, height: 10 });
+  } else if (req.type === 'ui_render' || req.type === 'host_call_result') {
+    sendHostCall('ui.notify', { text: 'ping' });
+  }
+});
+"#,
+    )?;
+    let state = temp.path().join("plugins.toml");
+    PluginCatalog::discover_at(user.clone(), state.clone(), temp.path())?
+        .set_enabled("loop-ui", true)?;
+    let catalog = PluginCatalog::discover_at(user, state, temp.path())?;
+    let driver = Arc::new(MockTuiDriver {
+        opened: StdMutex::new(None),
+    });
+    catalog.ui_bus().set_custom_tui_host(Some(driver.clone()));
+    let mut registry = kroma::commands::CommandRegistry::new();
+    assert!(catalog.register_commands(&mut registry).is_empty());
+    let model = kroma::provider::ModelClient::new("http://127.0.0.1:9/v1", None, "mock".into())?;
+    let mut agent = kroma::agent::Agent::with_runtime_budget(
+        Arc::new(model),
+        ToolRegistry::builtin(),
+        Arc::new(kroma::context::BuiltinContextFactory),
+        PromptComposer::default(),
+        None,
+        temp.path().to_path_buf(),
+        kroma::context::ContextConfig::with_output_reserve(32768, 1024)?,
+    )?;
+    let input = agent.task_input();
+    let driver_task = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let ch = loop {
+            if let Some(ch) = driver.opened.lock().unwrap().take() {
+                break ch;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for custom TUI channel open"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        ch.client_tx
+            .send(CustomTuiClientEvent::Render {
+                width: 40,
+                height: 10,
+                theme: serde_json::json!({}),
+            })
+            .unwrap();
+        assert!(
+            ch.frame_rx.recv_timeout(Duration::from_secs(10)).is_err(),
+            "custom_tui channel must disconnect when host call limit aborts"
+        );
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(15),
+        registry.execute_async("/loopui", &mut agent, &input),
+    )
+    .await?;
+    driver_task.await?;
+    let outcome = match result {
+        Err(err) => format!("{err:#}"),
+        Ok(Some(cmd)) => cmd.output,
+        Ok(None) => anyhow::bail!("expected /loopui command outcome"),
+    };
+    assert!(
+        outcome.contains("consecutive host calls"),
+        "expected host-call bound error, got: {outcome}"
+    );
+    Ok(())
+}
+
+#[test]
+fn desktop_layout_manifest_rejects_values_it_cannot_render() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let user = temp.path().join("plugins");
+    let write = |id: &str, layout: &str| -> Result<()> {
+        let directory = user.join(id);
+        fs::create_dir_all(&directory)?;
+        fs::write(
+            directory.join("plugin.toml"),
+            format!("id='{id}'\nname='Layout'\n[ui]\n[ui.layout]\n{layout}"),
+        )?;
+        Ok(())
+    };
+    write("narrow", "desktop_content_width=200")?;
+    write("aside", "desktop_sidebar='aside'")?;
+    write("dense", "desktop_density='dense'")?;
+    let catalog =
+        PluginCatalog::discover_at(user.clone(), temp.path().join("plugins.toml"), temp.path())?;
+    let warnings = catalog.warnings.join("\n");
+    assert!(warnings.contains("content width"), "{warnings}");
+    assert!(warnings.contains("sidebar"), "{warnings}");
+    assert!(warnings.contains("density"), "{warnings}");
+    Ok(())
+}
+
+#[test]
+fn desktop_ui_manifest_accepts_a_workspace_slot() -> Result<()> {
+    let temp = TestDirectory::new()?;
+    let dir = temp.path().join("plugins").join("workbench");
+    fs::create_dir_all(&dir)?;
+    fs::write(
+        dir.join("plugin.toml"),
+        "api_version=2\nid='workbench'\nname='Workbench'\n[ui]\n[ui.desktop]\nentry='ui.html'\nslot='workspace'\n",
+    )?;
+    fs::write(dir.join("ui.html"), "<p>workbench</p>")?;
+    let state = temp.path().join("plugins.toml");
+    let load =
+        || PluginCatalog::discover_at(temp.path().join("plugins"), state.clone(), temp.path());
+    let catalog = load()?;
+    assert!(catalog.warnings.is_empty(), "{:?}", catalog.warnings);
+    catalog.set_enabled("workbench", true)?;
+    let surfaces = load()?.ui_desktop_surfaces();
+    assert_eq!(surfaces.len(), 1);
+    assert_eq!(surfaces[0]["slot"], "workspace");
     Ok(())
 }
 

@@ -9,7 +9,7 @@
 ## 状态存在哪里
 
 每个对话一个文件：`plugin-data/goal/goal-<session_id>.json`。
-换对话、`/fork`、`/rewind` 打开的是另一个会话文件，所以目标不会串台；插件也不读别的对话。
+换对话、`/fork` 打开的是另一个会话文件；`/rewind` 和 `/clear` 会触发 `session_rewound` / `session_cleared` 事件，自动把旧活动目标取消并清掉状态栏，避免历史回退后目标串台。插件也不读别的对话。
 
 ## 用法
 

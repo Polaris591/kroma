@@ -7,8 +7,15 @@
 //   {"decision":"finish"} or {"decision":"continue","feedback":"..."}
 const { createInterface } = require("node:readline");
 
-createInterface({ input: process.stdin }).on("line", (line) => {
-  const request = JSON.parse(line);
+createInterface({ input: process.stdin, crlfDelay: Infinity }).on("line", (line) => {
+  if (!line.trim()) return;
+  let request;
+  try {
+    request = JSON.parse(line);
+  } catch {
+    process.stdout.write(JSON.stringify({ content: "Invalid turn-gate request", is_error: true }) + "\n");
+    return;
+  }
   const reply = (content) =>
     process.stdout.write(
       JSON.stringify({

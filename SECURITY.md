@@ -36,8 +36,8 @@ fixed on a best-effort basis, and credits are given only with permission.
   path: it must use the official HTTPS npm registry and the npm package manager,
   must not contact the network before an explicit update request, and must not
   overwrite a source/Cargo binary.
-- Trust decisions for project MCP files and project plugins, including approval
-  binding and the documented scan bounds.
+- MCP configuration loading and project plugin enablement. Project MCP files load
+  directly without approval; third-party code is not sandboxed.
 - Leaks of credentials or session data through diagnostics, logs or tool output
   handling.
 

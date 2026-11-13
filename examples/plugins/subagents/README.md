@@ -38,10 +38,10 @@ One tool, `subagent`, with one behaviour: run its children and return their answ
 ]}
 ```
 
-The answer comes back in the same tool result:
+The answer comes back in the same tool result as a readable summary (and the structured run summary saved to `batch.json` uses `"schema_version": 2`):
 
 ```json
-{"schema_version": 3, "run_id": "20261106114357-797e06eb",
+{"schema_version": 2, "run_id": "20261106114357-797e06eb", "status": "completed",
  "results": [{"index": 0, "label": "review", "status": "completed",
               "answer": "…the child's own text…",
               "artifacts": "<plugin-data>/runs/<run-id>/0",
@@ -61,7 +61,9 @@ wait.
   an exported API key.
 - The task text only. **It does not inherit the parent conversation.** A
   resumed task also loads that child's own saved conversation, not yours.
-- The same model as the parent conversation, unless the environment selects one.
+- The configured default model, never the parent's live connection: environment
+  and saved profiles decide, so an in-session `/model` switch stays in the
+  parent and cannot reach the child.
 - The child wraps the task as `Piped input:` and expands `@path` references
   against its working directory, so a short task can point at a large file.
 
@@ -141,8 +143,8 @@ it is being resumed.
 | Task text | 16 KiB |
 | Child JSON line | 2 MiB of UTF-8 (checked per line, before parsing) |
 | Time per task | `task_timeout_secs` (default 1800 seconds; 0 disables the deadline) |
-| Children running at once | `max_parallel` per run (default 3, 1..8), 16 per worker |
-| Delivered text | 12,000 characters per child, 60,000 per message |
+| Children running at once | `max_parallel` per run (default 8, 1..8), 16 per worker |
+| Delivered text | 24,000 characters per child, 60,000 per message |
 | In-memory streamed draft | 64 KiB tail per task (never in `events.ndjson`) |
 | Saved stderr | 256 KiB |
 | Saved events | 2 MiB |

@@ -401,10 +401,9 @@ impl UiState {
             .iter()
             .any(|e| interrupted(e) || super::super::tool_display::has_diagnostic(&e.details));
         let expanded = self.tools_expanded || self.expanded_tool_groups.contains(key);
-        let show = expanded || (running && !self.plain_style) || tools.len() == 1;
+        let show = expanded || running;
         let any_important = tools.iter().any(|entry| {
             entry.failed
-                || (self.plain_style && entry.title.ends_with(" · running"))
                 || interrupted(entry)
                 || super::super::tool_display::has_diagnostic(&entry.details)
                 || entry
@@ -413,7 +412,7 @@ impl UiState {
                     .is_some_and(|id| self.expanded_tool_calls.contains(id))
         });
         let children_visible = show || any_important;
-        if tools.len() > 1 {
+        {
             let (glyph, ink) = if running {
                 ("◌", theme.accent)
             } else if failed {
@@ -425,22 +424,8 @@ impl UiState {
             } else {
                 ("✓", theme.success)
             };
-            let (label, ink) = if self.plain_style {
-                self.semantic_step_label(glyph)
-            } else {
-                ("", ink)
-            };
-            let state_text = if self.plain_style {
-                format!("{glyph} {label} ")
-            } else {
-                format!("{glyph} ")
-            };
-            let extra = if self.plain_style {
-                UnicodeWidthStr::width(label) + 1
-            } else {
-                0
-            };
-            let group_width = width.saturating_sub(extra);
+            let state_text = format!("{glyph} ");
+            let group_width = width;
             let duration = tools.iter().filter_map(|e| e.duration).sum::<Duration>();
             let elapsed = if tools.iter().any(|e| e.duration.is_some()) {
                 format!(" · {:.1}s", duration.as_secs_f64())

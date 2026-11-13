@@ -2,7 +2,7 @@
 const {test,beforeEach,afterEach} = require("node:test");
 const assert = require("node:assert/strict");
 const {dispatch,search,fetchPage,fetchMany,readable,httpUrl} = require("./web");
-const {createStore} = require("./cache");
+const {createStore, SNAPSHOT_IDLE_TTL_MS, SNAPSHOT_HOLD_TTL_MS} = require("./cache");
 const originalFetch = global.fetch;
 const envKeys = ["EXA_API_KEY", "BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY", "YDC_API_KEY", "PARALLEL_API_KEY"];
 const saved = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
@@ -100,7 +100,7 @@ test("auto starts at the best available backend and hands over on failure", asyn
   const result = JSON.parse(await search("docs", {provider: "auto", exa_api_key: "e", brave_api_key: "b"}));
   assert.equal(result.provider, "brave");
   assert.ok(calls.length >= 2, "the chain advanced");
-  assert.equal(result.attempts[0].provider, "exa_public", "the keyless Exa endpoint is tried first");
+  assert.equal(result.attempts[0].provider, "exa", "keyed Exa ranks before keyless fallbacks");
   assert.ok(result.attempts.some(item => item.provider === "exa" && item.code === "HTTP_ERROR"));
 });
 
@@ -169,9 +169,12 @@ test("web_fetch chunks a long document and continues from the cached snapshot", 
   assert.equal(calls, 1);
 });
 
-test("continuation for an unknown or expired URL refuses to refetch", async () => {
+test("continuation for an unknown or expired URL refuses to refetch and names the restart", async () => {
   global.fetch = async () => { throw new Error("must not fetch"); };
-  await assert.rejects(fetchPage("https://example.org/never-read", {}, 1000, 1000), {code: "CACHE_MISS"});
+  await assert.rejects(fetchPage("https://example.org/never-read", {}, 1000, 1000), {
+    code: "CACHE_MISS",
+    message: /start_char = 0.*new next_start/
+  });
 });
 
 test("the continuation window slides while a long document is being read", () => {
@@ -187,6 +190,34 @@ test("the continuation window slides while a long document is being read", () =>
   assert.equal(store.get("a"), null);
   for (const key of ["a", "b", "c", "d"]) store.set([key], {text: key});
   assert.equal(store.size, 3, "only the newest address names are kept");
+});
+
+test("a paging snapshot survives a long tool gap and releases when the page ends", () => {
+  let now = 0;
+  const store = createStore({limit: 3, now: () => now});
+  const page = {text: "x"};
+  store.set(["a"], page);
+  store.retain(["a"], true);
+  now = 129274; // the observed download between the first read and its continuation
+  assert.equal(store.get("a"), page, "a long tool must not expire a page being paged");
+  now += SNAPSHOT_HOLD_TTL_MS + 1;
+  assert.equal(store.get("a"), null, "a held snapshot still has a bounded idle life");
+
+  let shortNow = 0;
+  const short = createStore({limit: 3, now: () => shortNow});
+  short.set(["b"], page);
+  shortNow = SNAPSHOT_IDLE_TTL_MS + 1;
+  assert.equal(short.get("b"), null, "a one-shot page keeps the short idle window");
+
+  let releasedNow = 0;
+  const released = createStore({limit: 3, now: () => releasedNow});
+  released.set(["c"], page);
+  released.retain(["c"], true);
+  releasedNow = 129274;
+  assert.equal(released.get("c"), page);
+  released.retain(["c"], false);
+  releasedNow += SNAPSHOT_IDLE_TTL_MS + 1;
+  assert.equal(released.get("c"), null, "finishing the page releases the long hold");
 });
 
 test("find returns bounded passages without a top-level text or second request", async () => {
@@ -383,8 +414,8 @@ test("quality order is the default, and the owner can replace it", async () => {
     return json({results: [{title: "X", url: "https://example.org/x", content: "snippet"}]});
   };
   const auto = JSON.parse(await search("q", {provider: "auto", exa_api_key: "e", tavily_api_key: "t"}));
-  assert.match(calls[0], /mcp.exa.ai/, "the keyless Exa public endpoint ranks first");
-  assert.equal(auto.provider, "exa", "a failed keyless attempt hands over to the paid Exa key");
+  assert.match(calls[0], /api\.exa\.ai/, "keyed Exa ranks first when configured");
+  assert.equal(auto.provider, "exa", "configured keyed Exa answers directly");
   const custom = JSON.parse(await search("q", {provider: "auto", exa_api_key: "e", tavily_api_key: "t", search_chain: "tavily,exa"}));
   assert.equal(custom.provider, "tavily", "a custom chain wins");
   await assert.rejects(search("q", {provider: "auto", exa_api_key: "e", search_chain: "exa,duckduckgo"}), {code: "CONFIG_ERROR"});
@@ -736,4 +767,33 @@ test("a free search with a date filter starts at the backend that supports it", 
   assert.match(calls[0], /searx\.example\.org/, "SearXNG ranks before the date-blind keyless Exa");
   assert.equal(result.provider, "searxng");
   assert.equal(result.time_range, "day");
+});
+
+test("private or local URLs never leak to external Exa or Firecrawl fallbacks", async () => {
+  const calls = [];
+  global.fetch = async url => {
+    calls.push(String(url));
+    return html("<html><body><div id='app'></div><script src='app.js'></script></body></html>");
+  };
+  for (const target of [
+    "http://localhost:3000/secret?token=1",
+    "http://127.0.0.1:8080/internal",
+    "http://192.168.1.25/admin",
+    "http://intranet/dashboard",
+  ]) {
+    await assert.rejects(fetchPage(target, {firecrawl_api_key: "fc-key"}, 400), {code: "UNREADABLE_PAGE"});
+  }
+  assert.equal(calls.length, 4, "each private URL stops after direct fetch");
+  assert.ok(calls.every(u => !u.includes("mcp.exa.ai") && !u.includes("api.firecrawl.dev")));
+});
+
+test("PDF without a Firecrawl key stops locally instead of calling Exa public", async () => {
+  const calls = [];
+  const pdf = Buffer.concat([Buffer.from("%PDF-1.7\n"), Buffer.from("binary".repeat(100))]);
+  global.fetch = async url => {
+    calls.push(String(url));
+    return new Response(pdf, {headers: {"content-type": "application/pdf"}});
+  };
+  await assert.rejects(fetchPage("https://example.org/doc.pdf", {}, 400), {code: "PDF_DETECTED"});
+  assert.deepEqual(calls, ["https://example.org/doc.pdf"]);
 });

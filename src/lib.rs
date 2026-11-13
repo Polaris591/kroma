@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod app;
 pub(crate) mod attachments;
+pub mod capabilities;
 pub mod checkpoints;
 pub mod child_policy;
 pub mod cli;
@@ -31,6 +32,7 @@ pub mod prompt;
 pub mod protocol;
 pub mod provider;
 pub mod session;
+pub mod session_backup;
 pub mod sessions;
 pub mod sessions_prune;
 pub mod setup;
@@ -43,14 +45,17 @@ pub mod update;
 pub mod usage;
 
 mod atomic_file;
+pub use atomic_file::replace_file as replace_file_atomically;
 mod cache_trace;
 mod catalog_file;
 mod file_edit;
 mod file_lock;
+mod file_read;
 mod history_tools;
 mod path_display;
 mod private_file;
 mod token_estimate;
+mod tool_archive;
 #[cfg(windows)]
 mod winsys;
 

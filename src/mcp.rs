@@ -3,6 +3,7 @@
 //! per-request-metadata versions. Does not implement MCP resources, prompts,
 //! sampling, elicitation, or an in-process plugin runtime.
 use crate::{
+    capabilities::{Capabilities, CapabilityGroup},
     protocol::ToolCall,
     tools::{Tool, ToolContext, ToolFuture, ToolRegistry, ToolResult},
 };
@@ -16,9 +17,8 @@ use reqwest::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     env, fs,
-    io::Read,
     path::{Path, PathBuf},
     process::Stdio,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -27,20 +27,6 @@ use std::{
 };
 
 const MAX_MCP_CONFIG_BYTES: u64 = 1024 * 1024;
-const MAX_TRUST_CODE_FILES: usize = 256;
-const MAX_TRUST_CODE_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_TRUST_TOTAL_CODE_BYTES: u64 = 32 * 1024 * 1024;
-/// Modules that are hashed and scanned for local relative imports.
-const TRUST_JS_EXTENSIONS: [&str; 8] = ["js", "mjs", "cjs", "jsx", "ts", "tsx", "mts", "cts"];
-/// Resolution candidates for a relative import without an extension, and the
-/// `<directory>/index<ext>` form for a directory import.
-const TRUST_MODULE_EXTENSIONS: [&str; 9] = [
-    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts", ".json",
-];
-// One module with more distinct relative imports than this is not a project
-// layout Kroma can hash cheaply; approval fails closed instead of following a
-// partial list.
-const MAX_TRUST_LOCAL_IMPORTS: usize = 256;
 const MAX_MCP_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_MCP_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
@@ -50,7 +36,6 @@ const MCP_CALL_TIMEOUT: Duration = Duration::from_secs(600);
 const MCP_SEARCH_BUDGET: Duration = Duration::from_secs(30);
 const MCP_IDLE_REAP_INTERVAL: Duration = Duration::from_secs(60);
 const MCP_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-const TRUST_PROJECT_ENV: &str = "KROMA_TRUST_PROJECT_MCP";
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
@@ -141,436 +126,30 @@ pub(crate) fn content_digest(bytes: &[u8]) -> String {
     digest
 }
 
-fn is_js_module(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            TRUST_JS_EXTENSIONS
-                .iter()
-                .copied()
-                .any(|known| known.eq_ignore_ascii_case(extension))
-        })
-}
-
-/// Project-local code that a project MCP config can execute: the resolved
-/// command, the resolved `args` paths and, for JavaScript/TypeScript entries,
-/// the project-local modules they import. Count and byte limits keep approval
-/// of a hostile repository bounded; exceeding them fails closed instead of
-/// hashing a partial tree that would hide later edits.
-struct TrustCodeFiles {
-    root: PathBuf,
-    files: BTreeMap<PathBuf, Vec<u8>>,
-    bytes: u64,
-    unscanned: Vec<PathBuf>,
-}
-
-impl TrustCodeFiles {
-    fn new(root: &Path) -> Self {
-        // Compare against a canonical root: on Windows `canonicalize` returns
-        // the `\?\` extended-length form, so an unnormalized root would make
-        // every real project file look like it resolves outside the project.
-        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        Self {
-            root,
-            files: BTreeMap::new(),
-            bytes: 0,
-            unscanned: Vec::new(),
-        }
-    }
-
-    /// Include one project-local file. Direct `command`/`args` paths and
-    /// relative imports are both executable entry points, including a vendored
-    /// `node_modules` file reached through an explicit `./` or `../` specifier.
-    /// Unreferenced dependency directories are never walked, so a bare package
-    /// import cannot pull the whole dependency tree into the approval hash.
-    /// Direct `command`/`args` entry points differ from import specifiers: a
-    /// bare name is a PATH lookup, but a *path* that cannot be resolved is an
-    /// approval for code nobody hashed. Those fail closed instead of silently
-    /// producing a fingerprint that later stops matching the real file.
-    fn include_entry_point(&mut self, raw: &str, candidate: &Path) -> Result<()> {
-        let separator = std::path::MAIN_SEPARATOR;
-        let path_like = raw.starts_with('.') || raw.contains(separator) || raw.contains('/');
-        match candidate.canonicalize() {
-            Ok(path) if path.starts_with(&self.root) && path.is_file() => self.include(&path),
-            // A system executable outside the project: the approval covers its
-            // path, because hashing a package-managed binary would invalidate
-            // every approval on a routine system update.
-            Ok(path) if Path::new(raw).is_absolute() && path.is_file() => Ok(()),
-            Ok(path) if path_like => bail!(
-                "project MCP entry point '{raw}' resolves outside the project: {}",
-                path.display()
-            ),
-            Ok(_) => Ok(()),
-            Err(_) if path_like => {
-                bail!("project MCP entry point '{raw}' does not exist; create it before approving")
-            }
-            Err(_) => Ok(()),
-        }
-    }
-
-    fn include(&mut self, candidate: &Path) -> Result<()> {
-        let Ok(path) = candidate.canonicalize() else {
-            // A missing or unresolvable path cannot run, so nothing to hash.
-            return Ok(());
-        };
-        if !path.starts_with(&self.root) || !path.is_file() || self.files.contains_key(&path) {
-            return Ok(());
-        }
-        if self.files.len() >= MAX_TRUST_CODE_FILES {
-            bail!("project MCP config references more than {MAX_TRUST_CODE_FILES} local files");
-        }
-        let (data, oversized) = read_bounded(&path, MAX_TRUST_CODE_BYTES)?;
-        if oversized {
-            bail!(
-                "project MCP referenced file exceeds 16 MiB: {}",
-                path.display()
-            );
-        }
-        self.bytes += data.len() as u64;
-        if self.bytes > MAX_TRUST_TOTAL_CODE_BYTES {
-            bail!(
-                "project MCP referenced code exceeds 32 MiB at {}",
-                path.display()
-            );
-        }
-        if is_js_module(&path) {
-            self.unscanned.push(path.clone());
-        }
-        self.files.insert(path, data);
-        Ok(())
-    }
-
-    /// Follow local relative imports from every JavaScript/TypeScript file added
-    /// so far. Bare package specifiers and specifiers leaving the project are
-    /// ignored; the walk is bounded by `include`.
-    fn follow_local_imports(&mut self) -> Result<()> {
-        while let Some(path) = self.unscanned.pop() {
-            let specifiers = match self.files.get(&path) {
-                Some(data) => local_module_specifiers(data, &path)?,
-                None => continue,
-            };
-            let Some(directory) = path.parent() else {
-                continue;
-            };
-            for specifier in specifiers {
-                for candidate in module_candidates(directory, &specifier) {
-                    self.include(&candidate)?;
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Conservative local-import discovery. Every simple string literal in a module
-/// that starts with `./` or `../` is treated as a possible local dependency
-/// whatever the surrounding syntax is; string literals over-approximate
-/// `require`/`import` specifiers instead of parsing JavaScript, and the module
-/// itself is hashed either way. Template literals are skipped because a `$`
-/// value is only known at run time. The whole file is scanned: a dependency
-/// mentioned after any prefix limit would otherwise stay outside the approval
-/// that claims to cover it.
-fn local_module_specifiers(data: &[u8], path: &Path) -> Result<Vec<String>> {
-    let scanned = data;
-    let mut specifiers = BTreeSet::new();
-    let mut index = 0;
-    while index < scanned.len() {
-        let quote = scanned[index];
-        if !matches!(quote, b'\'' | b'"' | b'`') {
-            index += 1;
-            continue;
-        }
-        // An apostrophe inside a word ("don't") is not a literal start.
-        if index > 0 && (scanned[index - 1].is_ascii_alphanumeric() || scanned[index - 1] == b'_') {
-            index += 1;
-            continue;
-        }
-        let Some(length) = scanned[index + 1..].iter().position(|byte| *byte == quote) else {
-            break;
-        };
-        let literal = &scanned[index + 1..index + 1 + length];
-        if let Ok(literal) = std::str::from_utf8(literal) {
-            if local_specifier(literal) {
-                if specifiers.len() >= MAX_TRUST_LOCAL_IMPORTS && !specifiers.contains(literal) {
-                    bail!(
-                        "project MCP module {} references more than {MAX_TRUST_LOCAL_IMPORTS} local modules",
-                        path.display()
-                    );
-                }
-                specifiers.insert(literal.to_string());
-            }
-        }
-        index += length + 2;
-    }
-    Ok(specifiers.into_iter().collect())
-}
-
-fn local_specifier(literal: &str) -> bool {
-    (literal.starts_with("./") || literal.starts_with("../"))
-        && literal.len() <= 256
-        && !literal.contains('$')
-        && !literal.contains('\n')
-}
-
-fn module_candidates(directory: &Path, specifier: &str) -> Vec<PathBuf> {
-    let target = directory.join(specifier);
-    let mut candidates = vec![target.clone()];
-    let known_extension = target
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            TRUST_MODULE_EXTENSIONS
-                .iter()
-                .copied()
-                .any(|known| known[1..].eq_ignore_ascii_case(extension))
-        });
-    if !known_extension {
-        for extension in TRUST_MODULE_EXTENSIONS {
-            let mut name = target.clone().into_os_string();
-            name.push(extension);
-            candidates.push(PathBuf::from(name));
-        }
-    }
-    for extension in TRUST_MODULE_EXTENSIONS {
-        candidates.push(target.join(format!("index{extension}")));
-    }
-    candidates
-}
-
-fn push_trust_material(material: &mut Vec<u8>, field: &[u8]) {
-    material.extend_from_slice(&(field.len() as u64).to_be_bytes());
-    material.extend_from_slice(field);
-}
-
-/// Resolve a project MCP server's working directory and keep it inside the
-/// canonical project root. A lexical `sub/../../outside` path must not gain
-/// approval for a command that actually runs outside the project.
-fn project_working_directory(root: &Path, cwd: Option<&Path>) -> Result<PathBuf> {
-    let candidate = match cwd {
-        Some(cwd) if cwd.is_absolute() => cwd.to_path_buf(),
-        Some(cwd) => root.join(cwd),
-        None => root.to_path_buf(),
-    };
-    let resolved = candidate.canonicalize().with_context(|| {
-        format!(
-            "project MCP working directory does not exist: {}",
-            candidate.display()
-        )
-    })?;
-    if !resolved.starts_with(root) || !resolved.is_dir() {
-        bail!(
-            "project MCP working directory escapes the project root: {}",
-            candidate.display()
-        );
-    }
-    Ok(resolved)
-}
-
-/// Project MCP approval covers the config bytes and the project-local code that
-/// entry can execute. `command`/`args` are expanded exactly as
-/// `Connection::connect` expands them, resolved against the same working
-/// directory, and JavaScript/TypeScript entries also contribute the
-/// project-local modules they import. Environment values are hashed as written:
-/// the user approved the configured text, not whatever secret it names, and an
-/// unset variable must not make the approval unreadable.
-fn project_trust_fingerprint(workdir: &Path, config_bytes: &[u8]) -> Result<String> {
-    let root = workdir
-        .canonicalize()
-        .unwrap_or_else(|_| workdir.to_path_buf());
-    let mut code = TrustCodeFiles::new(&root);
-    let mut material = config_bytes.to_vec();
-    material.extend_from_slice(b"\0--kroma-local-mcp-code--\0");
-    if let Ok(config) = serde_json::from_slice::<ConfigFile>(config_bytes) {
-        for (name, server) in &config.mcp_servers {
-            let Some(raw_command) = server.command.as_deref() else {
-                continue;
-            };
-            let base = project_working_directory(&root, server.cwd.as_deref())
-                .with_context(|| format!("project MCP server '{name}' working directory"))?;
-            let command = expand_env(raw_command)
-                .with_context(|| format!("project MCP server '{name}' command"))?;
-            push_trust_material(&mut material, name.as_bytes());
-            push_trust_material(&mut material, command.as_bytes());
-            for (key, value) in &server.env {
-                push_trust_material(&mut material, key.as_bytes());
-                // The raw text is what the user approved. Environment values are
-                // not expanded here, so a secret's contents are never hashed.
-                push_trust_material(&mut material, value.as_bytes());
-            }
-            code.include_entry_point(&command, &base.join(&command))?;
-            for raw_arg in &server.args {
-                let arg = expand_env(raw_arg)
-                    .with_context(|| format!("project MCP server '{name}' argument"))?;
-                push_trust_material(&mut material, arg.as_bytes());
-                if arg.is_empty() || arg.contains('\0') || arg.starts_with('-') {
-                    continue;
-                }
-                let candidate = Path::new(&arg);
-                let candidate = if candidate.is_absolute() {
-                    candidate.to_path_buf()
-                } else {
-                    base.join(candidate)
-                };
-                code.include_entry_point(&arg, &candidate)?;
-            }
-        }
-    }
-    code.follow_local_imports()?;
-    for (path, data) in &code.files {
-        push_trust_material(&mut material, path.to_string_lossy().as_bytes());
-        push_trust_material(&mut material, data);
-    }
-    Ok(content_digest(&material))
-}
-
 /// Read at most `limit + 1` bytes so an untrusted file cannot force a full
 /// allocation before its size is rejected. The extra byte distinguishes an
 /// exactly-at-limit file from an oversized one without a racy metadata pass.
 fn read_bounded(path: &Path, limit: u64) -> std::io::Result<(Vec<u8>, bool)> {
-    let file = fs::File::open(path)?;
-    let mut bytes = Vec::new();
-    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+    let bytes = crate::attachments::read_bounded(path, limit)?;
     let oversized = bytes.len() as u64 > limit;
     Ok((bytes, oversized))
 }
 
-/// A cross-process lock around the trust store read/modify/write. Atomic
-/// replacement prevents torn files but not lost updates when two approvals or
-/// a revoke race. The lock file is intentionally persistent: deleting it could
-/// create two independent locks.
-struct TrustStoreLock {
-    _file: fs::File,
+/// Compatibility API: project MCP configuration no longer requires approval.
+pub fn project_mcp_trusted(_workdir: &Path) -> Result<bool> {
+    Ok(true)
 }
 
-impl TrustStoreLock {
-    fn acquire(path: &Path) -> Result<Self> {
-        let parent = path.parent().context("MCP trust store has no parent")?;
-        fs::create_dir_all(parent)?;
-        let file = crate::file_lock::acquire(
-            &parent.join("trusted-mcp.json.lock"),
-            Duration::from_secs(5),
-        )
-        .context("locking MCP trust store")?;
-        Ok(Self { _file: file })
-    }
-}
-
-fn trust_store_path() -> Result<PathBuf> {
-    let home = env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
-        .context("HOME/USERPROFILE unavailable; cannot store MCP trust decisions")?;
-    Ok(PathBuf::from(home).join(".kroma").join("trusted-mcp.json"))
-}
-
-fn project_key(workdir: &Path) -> String {
-    workdir
-        .canonicalize()
-        .unwrap_or_else(|_| workdir.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn load_trust_store() -> Result<BTreeMap<String, String>> {
-    let path = trust_store_path()?;
-    match read_bounded(&path, MAX_MCP_CONFIG_BYTES) {
-        Ok((_, true)) => bail!("MCP trust store exceeds 1 MiB"),
-        Ok((bytes, false)) => serde_json::from_slice(&bytes)
-            .with_context(|| format!("invalid MCP trust store {}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
-        Err(error) => {
-            Err(error).with_context(|| format!("reading MCP trust store {}", path.display()))
-        }
-    }
-}
-
-fn project_mcp_allowed(workdir: &Path, bytes: &[u8]) -> Result<bool> {
-    if env::var(TRUST_PROJECT_ENV)
-        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-    {
-        return Ok(true);
-    }
-    let store = load_trust_store()?;
-    let current = project_trust_fingerprint(workdir, bytes)?;
-    Ok(store
-        .get(&project_key(workdir))
-        .is_some_and(|approved| approved == &current))
-}
-
-/// True when the project has no MCP config, or its current config and local
-/// referenced code bytes are approved. Hosts use this to show a trust prompt
-/// without executing anything.
-pub fn project_mcp_trusted(workdir: &Path) -> Result<bool> {
-    let config = workdir.join(".kroma").join("mcp.json");
-    if !config.is_file() {
-        return Ok(true);
-    }
-    let bytes = read_bounded(&config, MAX_MCP_CONFIG_BYTES)
-        .with_context(|| format!("reading project MCP config {}", config.display()))?
-        .0;
-    if bytes.len() as u64 > MAX_MCP_CONFIG_BYTES {
-        bail!("project MCP config exceeds 1 MiB");
-    }
-    project_mcp_allowed(workdir, &bytes)
-}
-
-/// Approve the current project's `.kroma/mcp.json` and the local code it can
-/// execute. The approval is bound to the canonical project path, the config
-/// bytes, the expanded `command`/`args` and the bytes of the entry files and
-/// their project-local imports; any later edit asks for approval again.
-/// The trust store is private to the current user.
+/// Compatibility API: returns the config path without recording a trust decision.
 pub fn trust_project_mcp(workdir: &Path) -> Result<PathBuf> {
-    let workdir = workdir
-        .canonicalize()
-        .with_context(|| format!("project path does not exist: {}", workdir.display()))?;
-    let config = workdir.join(".kroma").join("mcp.json");
-    let bytes = read_bounded(&config, MAX_MCP_CONFIG_BYTES)
-        .with_context(|| format!("no project MCP config at {}", config.display()))?
-        .0;
-    if bytes.len() as u64 > MAX_MCP_CONFIG_BYTES {
-        bail!("project MCP config exceeds 1 MiB");
-    }
-    let path = trust_store_path()?;
-    let _lock = TrustStoreLock::acquire(&path)?;
-    let mut store = load_trust_store()?;
-    store.insert(
-        project_key(&workdir),
-        project_trust_fingerprint(&workdir, &bytes)?,
-    );
-    let parent = path.parent().context("MCP trust store has no parent")?;
-    let temp = crate::private_file::save(
-        parent,
-        "trusted-mcp",
-        "json",
-        &serde_json::to_vec_pretty(&store)?,
-    )?;
-    if let Err(error) = crate::atomic_file::replace(&temp, &path) {
-        let _ = fs::remove_file(temp);
-        return Err(error);
-    }
-    Ok(config)
+    Ok(workdir.join(".kroma/mcp.json"))
 }
 
-pub fn revoke_project_mcp(workdir: &Path) -> Result<()> {
-    let workdir = workdir
-        .canonicalize()
-        .with_context(|| format!("project path does not exist: {}", workdir.display()))?;
-    let path = trust_store_path()?;
-    let _lock = TrustStoreLock::acquire(&path)?;
-    let mut store = load_trust_store()?;
-    store.remove(&project_key(&workdir));
-    let parent = path.parent().context("MCP trust store has no parent")?;
-    let temp = crate::private_file::save(
-        parent,
-        "trusted-mcp",
-        "json",
-        &serde_json::to_vec_pretty(&store)?,
-    )?;
-    if let Err(error) = crate::atomic_file::replace(&temp, &path) {
-        let _ = fs::remove_file(temp);
-        return Err(error);
-    }
+/// Compatibility API: revocation no longer changes MCP loading.
+pub fn revoke_project_mcp(_workdir: &Path) -> Result<()> {
     Ok(())
 }
+
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
@@ -701,16 +280,40 @@ struct ConfigFile {
 }
 
 pub fn configured_servers(workdir: &Path) -> Result<BTreeMap<String, ServerConfig>> {
-    let (servers, _warnings) = configured_servers_with(workdir, None)?;
+    let (servers, _warnings) = configured_servers_with(workdir, false)?;
     Ok(servers)
+}
+
+/// Display-safe inventory; never includes commands, URLs, env or headers.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct ServerSummary {
+    pub name: String,
+    pub transport: &'static str,
+    pub source: &'static str,
+}
+
+/// Lists configured servers without connecting or applying session selections.
+pub fn configured_server_summaries(workdir: &Path) -> Result<Vec<ServerSummary>> {
+    Ok(configured_servers(workdir)?
+        .into_iter()
+        .map(|(name, server)| ServerSummary {
+            name,
+            transport: match (&server.command, &server.url) {
+                (Some(_), None) => "stdio",
+                (None, Some(_)) => "http",
+                _ => "invalid",
+            },
+            source: if server.project { "project" } else { "user" },
+        })
+        .collect())
 }
 
 fn configured_servers_with(
     workdir: &Path,
-    trust_project: Option<bool>,
+    project_only: bool,
 ) -> Result<(BTreeMap<String, ServerConfig>, Vec<String>)> {
     let mut warnings = Vec::new();
-    let paths: Vec<(PathBuf, bool)> = if trust_project.is_some() {
+    let paths: Vec<(PathBuf, bool)> = if project_only {
         // Test/host seam: inspect exactly the project file, not the real user's
         // MCP servers.
         vec![(workdir.join(".kroma/mcp.json"), true)]
@@ -727,17 +330,12 @@ fn configured_servers_with(
     };
     let mut servers = BTreeMap::new();
     for (path, project) in paths {
-        // Read the exact bytes once and make the trust decision and parser use
-        // the same snapshot. Reopening the path after approval would allow a
-        // project to swap the file between the hash check and execution. The
-        // read itself is bounded so an oversized untrusted config cannot
-        // allocate its full size before the limit is checked.
+        // Bound allocation before checking the size, then parse the same snapshot.
         let (bytes, oversized) = match read_bounded(&path, MAX_MCP_CONFIG_BYTES) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) if project => {
-                // An untrusted repository must not be able to abort startup
-                // by making its config unreadable or oversized.
+                // A broken project config should not prevent startup.
                 warnings.push(format!(
                     "project MCP config {} skipped: {error}",
                     path.display()
@@ -758,19 +356,6 @@ fn configured_servers_with(
             }
             bail!("MCP config {} exceeds 1 MiB", path.display());
         }
-        if project {
-            let allowed = match trust_project {
-                Some(value) => value,
-                None => project_mcp_allowed(workdir, &bytes).unwrap_or(false),
-            };
-            if !allowed {
-                warnings.push(format!(
-                    "project MCP config {} not loaded: approve it with 'kroma trust-project' or set {TRUST_PROJECT_ENV}=1",
-                    path.display()
-                ));
-                continue;
-            }
-        }
         let parsed: ConfigFile = serde_json::from_slice(&bytes)
             .with_context(|| format!("invalid MCP config {}", path.display()))?;
         for (name, mut server) in parsed.mcp_servers {
@@ -781,7 +366,7 @@ fn configured_servers_with(
     Ok((servers, warnings))
 }
 
-fn expand_env(raw: &str) -> Result<String> {
+fn expand_env_for(raw: &str, project: bool) -> Result<String> {
     let mut output = String::new();
     let mut rest = raw;
     while let Some(start) = rest.find("${") {
@@ -793,6 +378,9 @@ fn expand_env(raw: &str) -> Result<String> {
         let name = &suffix[..end];
         if name.is_empty() {
             bail!("empty environment variable reference");
+        }
+        if project && crate::plugins::is_host_secret_env(name) {
+            bail!("project MCP config cannot reference host secret environment variable {name}");
         }
         output.push_str(
             &env::var(name).with_context(|| format!("environment variable {name} is not set"))?,
@@ -825,6 +413,40 @@ enum Transport {
     Closed,
 }
 
+fn build_stdio_command(
+    command: &str,
+    config: &ServerConfig,
+    workdir: &Path,
+    host_env_keys: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<Command> {
+    let mut process = Command::new(expand_env_for(command, config.project)?);
+    for arg in &config.args {
+        process.arg(expand_env_for(arg, config.project)?);
+    }
+    let cwd = config.cwd.as_deref().map_or_else(
+        || workdir.to_path_buf(),
+        |cwd| {
+            if cwd.is_absolute() {
+                cwd.to_path_buf()
+            } else {
+                workdir.join(cwd)
+            }
+        },
+    );
+    process.current_dir(cwd);
+    if config.project {
+        for key in host_env_keys {
+            if crate::plugins::is_host_secret_env(&key.to_string_lossy()) {
+                process.env_remove(key);
+            }
+        }
+    }
+    for (key, value) in &config.env {
+        process.env(key, expand_env_for(value, config.project)?);
+    }
+    Ok(process)
+}
+
 struct Connection {
     transport: Transport,
     version: String,
@@ -844,31 +466,12 @@ impl Connection {
         }
         let transport = match (&config.command, &config.url) {
             (Some(command), None) => {
-                let mut process = Command::new(expand_env(command)?);
-                for arg in &config.args {
-                    process.arg(expand_env(arg)?);
-                }
-                let cwd = if config.project {
-                    let root = workdir
-                        .canonicalize()
-                        .unwrap_or_else(|_| workdir.to_path_buf());
-                    project_working_directory(&root, config.cwd.as_deref())?
-                } else {
-                    config.cwd.as_deref().map_or_else(
-                        || workdir.to_path_buf(),
-                        |cwd| {
-                            if cwd.is_absolute() {
-                                cwd.to_path_buf()
-                            } else {
-                                workdir.join(cwd)
-                            }
-                        },
-                    )
-                };
-                process.current_dir(cwd);
-                for (key, value) in &config.env {
-                    process.env(key, expand_env(value)?);
-                }
+                let mut process = build_stdio_command(
+                    command,
+                    config,
+                    workdir,
+                    env::vars_os().map(|(key, _)| key),
+                )?;
                 // Third-party server logs are noisy and can contain secrets.
                 // Keep them out of Kroma's output unless explicitly requested.
                 process.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(
@@ -910,7 +513,7 @@ impl Connection {
                 }
             }
             (None, Some(url)) => {
-                let url = expand_env(url)?;
+                let url = expand_env_for(url, config.project)?;
                 let parsed = reqwest::Url::parse(&url).context("invalid MCP HTTP endpoint")?;
                 if !matches!(parsed.scheme(), "http" | "https") {
                     bail!("MCP URL must use HTTP or HTTPS");
@@ -919,7 +522,7 @@ impl Connection {
                 for (name, value) in &config.headers {
                     headers.insert(
                         HeaderName::from_bytes(name.as_bytes())?,
-                        HeaderValue::from_str(&expand_env(value)?)?,
+                        HeaderValue::from_str(&expand_env_for(value, config.project)?)?,
                     );
                 }
                 let client = Client::builder()
@@ -1549,7 +1152,7 @@ impl Tool for McpTool {
 pub struct Registration {
     pub tools: usize,
     pub unavailable: Vec<String>,
-    /// Non-fatal notices, such as a project config that needs approval.
+    /// Non-fatal notices, such as an oversized project config.
     pub warnings: Vec<String>,
 }
 
@@ -1557,13 +1160,12 @@ pub async fn register_configured(registry: &mut ToolRegistry, workdir: &Path) ->
     Ok(register_configured_report(registry, workdir).await?.tools)
 }
 
-/// Test/integration seam: force-enable project MCP without touching the user's
-/// trust store. Production hosts must use the normal trusted path.
+/// Test/host seam: load only the project's MCP config.
 pub async fn register_configured_project_only_report(
     registry: &mut ToolRegistry,
     workdir: &Path,
 ) -> Result<Registration> {
-    register_configured_report_with(registry, workdir, Some(false)).await
+    register_configured_report_with(registry, workdir, true, &Capabilities::default()).await
 }
 
 pub async fn register_configured_allow_project(
@@ -1571,7 +1173,7 @@ pub async fn register_configured_allow_project(
     workdir: &Path,
 ) -> Result<usize> {
     Ok(
-        register_configured_report_with(registry, workdir, Some(true))
+        register_configured_report_with(registry, workdir, true, &Capabilities::default())
             .await?
             .tools,
     )
@@ -1581,18 +1183,20 @@ pub async fn register_configured_report(
     registry: &mut ToolRegistry,
     workdir: &Path,
 ) -> Result<Registration> {
-    register_configured_report_with(registry, workdir, None).await
+    register_configured_report_with(registry, workdir, false, &Capabilities::default()).await
 }
 
 async fn register_configured_report_with(
     registry: &mut ToolRegistry,
     workdir: &Path,
-    trust_project: Option<bool>,
+    project_only: bool,
+    settings: &Capabilities,
 ) -> Result<Registration> {
-    if env::var_os("KROMA_NO_MCP").is_some() {
+    if env::var_os("KROMA_NO_MCP").is_some() || !settings.any_enabled(CapabilityGroup::Mcp) {
         return Ok(Registration::default());
     }
-    let (mut config, mut warnings) = configured_servers_with(workdir, trust_project)?;
+    let (mut config, mut warnings) = configured_servers_with(workdir, project_only)?;
+    config.retain(|name, _| settings.enabled(CapabilityGroup::Mcp, name, true));
     filter_servers(&mut config, &mut warnings);
     let mut report = Registration {
         warnings,
@@ -1666,36 +1270,136 @@ async fn register_configured_report_with(
 mod tests {
     use super::*;
 
-    #[test]
-    fn project_entry_points_fail_closed_instead_of_hashing_nothing() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("kroma-mcp-trust-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("scripts"))?;
-        fs::write(root.join("scripts/server.js"), "console.log(1)")?;
-        let mut files = TrustCodeFiles::new(&root);
-        files.include_entry_point("scripts/server.js", &root.join("scripts/server.js"))?;
+    fn capability_call(name: &str, arguments: Value) -> ToolCall {
+        ToolCall {
+            id: "capability-call".into(),
+            kind: "function".into(),
+            function: crate::provider::FunctionCall {
+                name: name.into(),
+                arguments: arguments.to_string(),
+            },
+        }
+    }
+
+    fn capability_context<'a>(dir: &'a Path, archive: &'a Path) -> ToolContext<'a> {
+        ToolContext {
+            model_connection: None,
+            user_message: None,
+            user_turn: None,
+            user_images: None,
+            previous_user_images: None,
+            workdir: dir,
+            archive,
+            on_output: None,
+            ask: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn capability_filters_block_servers_and_lazy_call_alias_bypasses() -> Result<()> {
+        let dir = scratch("capability-filter");
+        fs::create_dir_all(dir.join(".kroma"))?;
+        let script = dir.join("server.cjs");
+        fs::write(
+            &script,
+            r#"
+const fs = require('fs');
+const tag = process.argv[2];
+fs.writeFileSync(tag + '.started', 'yes');
+require('readline').createInterface({input:process.stdin}).on('line', line => {
+  const r = JSON.parse(line);
+  if (r.id === undefined) return;
+  let result = {};
+  if (r.method === 'initialize') result = {protocolVersion:'2024-11-05',capabilities:{tools:{}},serverInfo:{name:'probe',version:'1'}};
+  if (r.method === 'tools/list') result = {tools:['allowed','secret'].map(name => ({name,description:name,inputSchema:{type:'object',properties:{}}}))};
+  if (r.method === 'tools/call') {
+    fs.appendFileSync(tag + '.calls', r.params.name + '\n');
+    result = {content:[{type:'text',text:r.params.name}],isError:false};
+  }
+  console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result}));
+});
+"#,
+        )?;
+        fs::write(
+            dir.join(".kroma/mcp.json"),
+            json!({"mcpServers": {
+                "active": {"command":"node","args":[script,"active"]},
+                "blocked": {"command":"node","args":[script,"blocked"]}
+            }})
+            .to_string(),
+        )?;
+        let mut settings = Capabilities {
+            mcp: false,
+            ..Default::default()
+        };
+        settings.items.mcp.insert("active".into(), true);
+        settings.items.mcp.insert("blocked".into(), false);
+        settings
+            .items
+            .tools
+            .insert("mcp__active__secret".into(), false);
+        let archive = dir.join("session.json");
+        let ctx = capability_context(&dir, &archive);
+        let mut lazy = ToolRegistry::new();
+        register_configured_lazy_with(&mut lazy, &dir, true, &settings).await?;
         assert!(
-            files.files.keys().any(|path| path.ends_with("server.js")),
-            "a project entry point is part of the approval hash"
+            !dir.join("active.started").exists(),
+            "lazy registration connected eagerly"
         );
-        // A bare name is a PATH lookup, so it is not a project file.
-        files.include_entry_point("node", &root.join("node"))?;
-        let missing = files
-            .include_entry_point("./scripts/later.sh", &root.join("scripts/later.sh"))
-            .expect_err("a missing path entry point must not be approved");
-        assert!(format!("{missing:#}").contains("does not exist"));
-        let outside_name = format!("kroma-mcp-outside-{}.sh", std::process::id());
-        let outside = std::env::temp_dir().join(&outside_name);
-        fs::write(&outside, "echo hi")?;
-        let escaping = files
-            .include_entry_point(
-                &format!("../{outside_name}"),
-                &root.join("..").join(&outside_name),
+        let search = lazy
+            .execute(&capability_call("mcp_search", json!({})), ctx)
+            .await;
+        assert!(!search.is_error, "{}", search.content);
+        let found: Value = serde_json::from_str(&search.content)?;
+        assert!(found["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["tool"] == "allowed"));
+        assert!(!search.content.contains("secret"));
+        assert!(dir.join("active.started").exists());
+        assert!(!dir.join("blocked.started").exists());
+        for call in [
+            capability_call("mcp_call", json!({"server":"active","tool":"secret"})),
+            capability_call("mcp_call", json!({"server":"blocked","tool":"allowed"})),
+            capability_call("mcp__active__secret", json!({})),
+        ] {
+            assert!(lazy.execute(&call, ctx).await.is_error);
+        }
+        assert!(!dir.join("active.calls").exists());
+        assert!(!dir.join("blocked.started").exists());
+        let allowed = lazy
+            .execute(
+                &capability_call("mcp_call", json!({"server":"active","tool":"allowed"})),
+                ctx,
             )
-            .expect_err("an escaping entry point must not be approved");
-        assert!(format!("{escaping:#}").contains("outside the project"));
-        let _ = fs::remove_file(&outside);
-        fs::remove_dir_all(&root)?;
+            .await;
+        assert!(!allowed.is_error, "{}", allowed.content);
+        assert_eq!(fs::read_to_string(dir.join("active.calls"))?, "allowed\n");
+        drop(lazy);
+        let mut eager = ToolRegistry::new();
+        register_configured_report_with(&mut eager, &dir, true, &settings).await?;
+        eager.retain_enabled(&settings);
+        let definitions = serde_json::to_string(&eager.definitions())?;
+        assert!(definitions.contains("mcp__active__allowed"));
+        assert!(!definitions.contains("secret"));
+        assert!(!definitions.contains("blocked"));
+        assert!(
+            eager
+                .execute(&capability_call("mcp__active__secret", json!({})), ctx)
+                .await
+                .is_error
+        );
+        assert!(
+            !eager
+                .execute(&capability_call("mcp__active__allowed", json!({})), ctx)
+                .await
+                .is_error
+        );
+        assert!(!dir.join("blocked.started").exists());
+        drop(eager);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        fs::remove_dir_all(dir)?;
         Ok(())
     }
 
@@ -1970,6 +1674,27 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(20), future)
             .await
             .context("mock MCP test exceeded its hard timeout")?
+    }
+
+    #[tokio::test]
+    async fn project_stdio_cwd_can_be_outside_the_project() -> Result<()> {
+        let dir = scratch("project-cwd");
+        let project = dir.join("project");
+        let server = dir.join("server");
+        fs::create_dir_all(&project)?;
+        fs::create_dir_all(&server)?;
+        let mut config = mock_config(&server, MockMode::Normal);
+        config.project = true;
+        for cwd in [PathBuf::from("../server"), server.clone()] {
+            config.cwd = Some(cwd);
+            let mut connection = with_test_timeout(Connection::connect(&config, &project)).await?;
+            let result = with_test_timeout(connection.rpc("first", json!({}))).await?;
+            assert_eq!(result["ok"], 1);
+            let result = with_test_timeout(connection.rpc("second", json!({}))).await?;
+            assert_eq!(result["ok"], 2);
+        }
+        let _ = fs::remove_dir_all(dir);
+        Ok(())
     }
 
     #[tokio::test]
@@ -2369,6 +2094,7 @@ mod tests {
         let dir = scratch("lazy-idle");
         let connection = with_test_timeout(connect_mock(&dir, MockMode::Normal)).await?;
         let manager = LazyMcp {
+            settings: Capabilities::default(),
             servers: BTreeMap::new(),
             workdir: dir.clone(),
             connections: tokio::sync::Mutex::new(HashMap::from([(
@@ -2378,6 +2104,7 @@ mod tests {
                     last_used: Instant::now() - MCP_IDLE_TIMEOUT - Duration::from_secs(1),
                 },
             )])),
+            connect_locks: tokio::sync::Mutex::new(HashMap::new()),
         };
         manager.prune_idle(MCP_IDLE_TIMEOUT).await;
         assert!(manager.connections.lock().await.is_empty());
@@ -2388,13 +2115,13 @@ mod tests {
 }
 
 #[cfg(test)]
-mod trust_hardening_tests {
+mod config_tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn scratch(name: &str) -> Result<PathBuf> {
         let dir = std::env::temp_dir().join(format!(
-            "kroma-mcp-trust-{name}-{}-{}",
+            "kroma-mcp-config-{name}-{}-{}",
             std::process::id(),
             SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
         ));
@@ -2402,232 +2129,163 @@ mod trust_hardening_tests {
         Ok(dir)
     }
 
-    /// A relative import written after any prefix limit is still executed code,
-    /// so it belongs to the approval that claims to cover local modules.
     #[test]
-    fn project_trust_covers_imports_after_a_large_module_prefix() -> Result<()> {
-        let dir = scratch("late-import")?;
-        let config = br#"{"mcpServers":{"local":{"command":"node","args":["entry.js"]}}}"#;
-        fs::write(dir.join(".kroma/mcp.json"), config)?;
-        let mut entry = String::from("/*");
-        entry.push_str(&" ".repeat(3 * 1024 * 1024));
-        entry.push_str("*/\nrequire('./helper.js');\n");
-        fs::write(dir.join("entry.js"), entry)?;
-        fs::write(dir.join("helper.js"), "module.exports = 1;\n")?;
-        let approved = project_trust_fingerprint(&dir, config)?;
-        fs::write(dir.join("helper.js"), "module.exports = 2;\n")?;
-        assert_ne!(approved, project_trust_fingerprint(&dir, config)?);
-        fs::remove_dir_all(dir)?;
-        Ok(())
-    }
-
-    /// Literal-entry control: the directly named entry file is hashed.
-    #[test]
-    fn project_trust_includes_referenced_local_script_bytes() -> Result<()> {
-        let dir = scratch("code")?;
-        fs::create_dir_all(dir.join("scripts"))?;
-        let config = br#"{"mcpServers":{"local":{"command":"node","args":["scripts/server.js"]}}}"#;
-        fs::write(dir.join(".kroma/mcp.json"), config)?;
-        fs::write(dir.join("scripts/server.js"), "export const version = 1;\n")?;
-        let first = project_trust_fingerprint(&dir, config)?;
-        fs::write(dir.join("scripts/server.js"), "export const version = 2;\n")?;
-        let second = project_trust_fingerprint(&dir, config)?;
-        assert_ne!(first, second);
-        fs::remove_dir_all(dir)?;
-        Ok(())
-    }
-
-    /// A literal entry path is not enough: the modules it loads from the project
-    /// execute under the same approval.
-    #[test]
-    fn project_trust_covers_modules_imported_by_the_entry() -> Result<()> {
-        let dir = scratch("local-imports")?;
-        fs::create_dir_all(dir.join("lib"))?;
-        fs::create_dir_all(dir.join("node_modules/vendor"))?;
-        let config = br#"{"mcpServers":{"local":{"command":"node","args":["server.js"]}}}"#;
-        fs::write(dir.join(".kroma/mcp.json"), config)?;
+    fn project_config_loads_and_reloads_without_approval() -> Result<()> {
+        let dir = scratch("reload")?;
+        let path = dir.join(".kroma/mcp.json");
+        // No entry-file scanning or env expansion is required to load config.
         fs::write(
-            dir.join("server.js"),
-            "const helper = require('./lib/helper');\nimport './extra.js';\n",
+            &path,
+            br#"{"mcpServers":{"local":{"command":"${UNSET_MCP_ENTRY}","args":["missing.js"]}}}"#,
         )?;
-        // Extension-less specifier resolved through `helper.js`.
-        fs::write(dir.join("lib/helper.js"), "module.exports = 1;\n")?;
-        fs::write(dir.join("extra.js"), "export const extra = 1;\n")?;
-        fs::write(
-            dir.join("node_modules/vendor/index.js"),
-            "module.exports = 1;\n",
-        )?;
-        let approved = project_trust_fingerprint(&dir, config)?;
-        assert_eq!(approved, project_trust_fingerprint(&dir, config)?);
-        fs::write(
-            dir.join("node_modules/vendor/index.js"),
-            "module.exports = 2;\n",
-        )?;
+        let (servers, warnings) = configured_servers_with(&dir, true)?;
+        assert!(warnings.is_empty());
+        assert!(servers["local"].project);
         assert_eq!(
-            approved,
-            project_trust_fingerprint(&dir, config)?,
-            "an unreferenced dependency must not change a project approval"
+            servers["local"].command.as_deref(),
+            Some("${UNSET_MCP_ENTRY}")
         );
-        fs::write(dir.join("lib/helper.js"), "module.exports = 2;\n")?;
-        let changed_helper = project_trust_fingerprint(&dir, config)?;
-        assert_ne!(approved, changed_helper);
-        fs::write(dir.join("extra.js"), "export const extra = 2;\n")?;
-        assert_ne!(changed_helper, project_trust_fingerprint(&dir, config)?);
-        // An explicit relative import is executable project code even when it
-        // happens to live under node_modules.
         fs::write(
-            dir.join("server.js"),
-            "require('./node_modules/vendor/index.js');\n",
+            &path,
+            br#"{"mcpServers":{"changed":{"url":"https://example.com/mcp"}}}"#,
         )?;
-        let vendor = project_trust_fingerprint(&dir, config)?;
-        fs::write(
-            dir.join("node_modules/vendor/index.js"),
-            "module.exports = 3;\n",
-        )?;
-        assert_ne!(vendor, project_trust_fingerprint(&dir, config)?);
+        let (servers, warnings) = configured_servers_with(&dir, true)?;
+        assert!(warnings.is_empty());
+        assert!(servers.contains_key("changed"));
+        assert!(!servers.contains_key("local"));
         fs::remove_dir_all(dir)?;
         Ok(())
     }
 
-    /// The launch path expands `${ENV}` in `command`/`args`, so approval must
-    /// expand it too, and an unresolvable variable must fail closed.
     #[test]
-    fn project_trust_expands_env_entry_like_the_launch_path() -> Result<()> {
-        let dir = scratch("env-entry")?;
-        let variable = format!(
-            "MCP_TRUST_TEST_ENTRY_{}_{}",
-            std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-        );
-        let config = format!(
-            "{{\"mcpServers\":{{\"local\":{{\"command\":\"node\",\"args\":[\"${{{variable}}}\"]}}}}}}"
-        );
-        fs::write(dir.join(".kroma/mcp.json"), &config)?;
-        fs::write(dir.join("server.js"), "export const version = 1;\n")?;
+    fn legacy_trust_apis_do_not_change_loading_or_write_a_store() -> Result<()> {
+        let dir = scratch("compat")?;
+        let store = dir.join(".kroma/trusted-mcp.json");
+        fs::write(&store, "not a trust store")?;
+        assert!(project_mcp_trusted(&dir)?);
+        assert_eq!(trust_project_mcp(&dir)?, dir.join(".kroma/mcp.json"));
+        revoke_project_mcp(&dir)?;
+        assert!(project_mcp_trusted(&dir)?);
+        assert_eq!(fs::read_to_string(store)?, "not a trust store");
+        assert!(!dir.join(".kroma/trusted-mcp.json.lock").exists());
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn missing_project_config_is_empty() -> Result<()> {
+        let dir = scratch("missing")?;
+        let (servers, warnings) = configured_servers_with(&dir, true)?;
+        assert!(servers.is_empty());
+        assert!(warnings.is_empty());
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_project_config_is_reported() -> Result<()> {
+        let dir = scratch("invalid")?;
+        let path = dir.join(".kroma/mcp.json");
+        for content in ["{", r#"{"mcpServers":{"local":{"args":42}}}"#] {
+            fs::write(&path, content)?;
+            let error = configured_servers_with(&dir, true).unwrap_err();
+            assert!(format!("{error:#}").contains("invalid MCP config"));
+        }
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn config_size_limit_is_bounded_and_keeps_exact_limit_valid() -> Result<()> {
+        let dir = scratch("size")?;
+        let path = dir.join(".kroma/mcp.json");
+        let mut content = b"{\"mcpServers\":{}}".to_vec();
+        content.resize(MAX_MCP_CONFIG_BYTES as usize, b' ');
+        fs::write(&path, &content)?;
+        let (servers, warnings) = configured_servers_with(&dir, true)?;
+        assert!(servers.is_empty());
+        assert!(warnings.is_empty());
+        content.extend_from_slice(b"  ");
+        fs::write(&path, content)?;
+        let (bytes, oversized) = read_bounded(&path, MAX_MCP_CONFIG_BYTES)?;
+        assert!(oversized);
+        assert_eq!(bytes.len() as u64, MAX_MCP_CONFIG_BYTES + 1);
+        let (servers, warnings) = configured_servers_with(&dir, true)?;
+        assert!(servers.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("exceeds 1 MiB"));
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn project_stdio_server_strips_host_secrets_and_blocks_secret_expansion() -> Result<()> {
+        let dir = scratch("project-secret-strip")?;
+        let host_keys = [
+            std::ffi::OsString::from("KROMA_API_KEY"),
+            std::ffi::OsString::from("OPENAI_API_KEY"),
+            std::ffi::OsString::from("AWS_SECRET_ACCESS_KEY"),
+            std::ffi::OsString::from("PUBLIC_MCP_SETTING"),
+        ];
+        let project_server = ServerConfig {
+            command: Some("node".into()),
+            args: vec!["server.js".into()],
+            env: BTreeMap::from([("SAFE_VAR".into(), "ok".into())]),
+            cwd: None,
+            url: None,
+            headers: BTreeMap::new(),
+            protocol_version: None,
+            project: true,
+        };
+        let cmd = build_stdio_command("node", &project_server, &dir, host_keys.clone())?;
+        let envs: BTreeMap<String, Option<String>> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|val| val.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(envs.get("KROMA_API_KEY"), Some(&None));
+        assert_eq!(envs.get("OPENAI_API_KEY"), Some(&None));
+        assert_eq!(envs.get("AWS_SECRET_ACCESS_KEY"), Some(&None));
+        assert!(!envs.contains_key("PUBLIC_MCP_SETTING"));
+        assert_eq!(envs.get("SAFE_VAR").and_then(|v| v.as_deref()), Some("ok"));
+
+        let user_server = ServerConfig {
+            project: false,
+            ..project_server.clone()
+        };
+        let user_cmd = build_stdio_command("node", &user_server, &dir, host_keys)?;
+        let user_envs: BTreeMap<String, Option<String>> = user_cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|val| val.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert!(!user_envs.contains_key("KROMA_API_KEY"));
+        assert!(!user_envs.contains_key("OPENAI_API_KEY"));
+
+        let secret_ref = ServerConfig {
+            env: BTreeMap::from([("LEAK".into(), "${OPENAI_API_KEY}".into())]),
+            ..project_server.clone()
+        };
+        let error = build_stdio_command("node", &secret_ref, &dir, [])
+            .expect_err("project MCP must refuse ${OPENAI_API_KEY}");
         assert!(
-            project_trust_fingerprint(&dir, config.as_bytes()).is_err(),
-            "an unset entry variable must not produce an approvable fingerprint"
+            error.to_string().contains("host secret"),
+            "unexpected error: {error}"
         );
-        std::env::set_var(&variable, "server.js");
-        let approved = project_trust_fingerprint(&dir, config.as_bytes())?;
-        assert_eq!(
-            approved,
-            project_trust_fingerprint(&dir, config.as_bytes())?
-        );
-        fs::write(dir.join("server.js"), "export const version = 2;\n")?;
-        let changed_entry = project_trust_fingerprint(&dir, config.as_bytes())?;
-        assert_ne!(approved, changed_entry);
-        std::env::set_var(&variable, "other.js");
-        fs::write(dir.join("other.js"), "export const version = 2;\n")?;
-        assert_ne!(
-            changed_entry,
-            project_trust_fingerprint(&dir, config.as_bytes())?
-        );
-        // An approved project entry may name any variable, even one whose name
-        // looks like a credential: approving the config is the decision.
-        let secret = format!("KROMA_TRUST_TEST_SECRET_{}", std::process::id());
-        std::env::set_var(&secret, "server.js");
-        let secret_config = format!(
-            "{{\"mcpServers\":{{\"local\":{{\"command\":\"node\",\"args\":[\"${{{secret}}}\"],\"env\":{{\"MCP_TOKEN\":\"${{{secret}}}\"}}}}}}}}"
-        );
-        assert!(project_trust_fingerprint(&dir, secret_config.as_bytes()).is_ok());
-        std::env::remove_var(&secret);
-        std::env::remove_var(&variable);
-        assert!(project_trust_fingerprint(&dir, config.as_bytes()).is_err());
-        fs::remove_dir_all(dir)?;
-        Ok(())
-    }
+        let unset_err = expand_env_for("${UNSET_MCP_ENTRY}", true)
+            .expect_err("non-secret missing env still reports missing env");
+        assert!(unset_err.to_string().contains("UNSET_MCP_ENTRY"));
 
-    /// A directly named entry and the relative imports it reaches are hashed,
-    /// including code in build output and vendored dependencies.
-    #[test]
-    fn project_trust_hashes_explicit_entries_in_build_output() -> Result<()> {
-        let dir = scratch("explicit-build-entry")?;
-        fs::create_dir_all(dir.join("dist"))?;
-        fs::create_dir_all(dir.join("node_modules/vendor"))?;
-        fs::write(
-            dir.join("node_modules/vendor/index.js"),
-            "module.exports = 1;\n",
-        )?;
-        let config = br#"{"mcpServers":{"local":{"command":"node","args":["dist/server.js"]}}}"#;
-        fs::write(dir.join(".kroma/mcp.json"), config)?;
-        fs::write(
-            dir.join("dist/server.js"),
-            "const chunk = require('./chunk.js');\nconst vendor = require('../node_modules/vendor/index.js');\n",
-        )?;
-        fs::write(dir.join("dist/chunk.js"), "module.exports = 1;\n")?;
-        let approved = project_trust_fingerprint(&dir, config)?;
-        fs::write(
-            dir.join("dist/server.js"),
-            "const chunk = require('./chunk.js');\nconst vendor = require('../node_modules/vendor/index.js');\n// v2\n",
-        )?;
-        let changed_entry = project_trust_fingerprint(&dir, config)?;
-        assert_ne!(approved, changed_entry);
-        fs::write(dir.join("dist/chunk.js"), "module.exports = 2;\n")?;
-        assert_ne!(changed_entry, project_trust_fingerprint(&dir, config)?);
-        let changed_chunk = project_trust_fingerprint(&dir, config)?;
-        fs::write(
-            dir.join("node_modules/vendor/index.js"),
-            "module.exports = 2;\n",
-        )?;
-        assert_ne!(changed_chunk, project_trust_fingerprint(&dir, config)?);
-        fs::remove_dir_all(dir)?;
-        Ok(())
-    }
-
-    /// A lexical path that starts with the project root but resolves outside it
-    /// must not be approved or launched as a project server.
-    #[test]
-    fn project_trust_rejects_a_working_directory_that_escapes_the_root() -> Result<()> {
-        let dir = scratch("cwd-escape")?;
-        let outside = dir.parent().unwrap().join(format!(
-            "kroma-mcp-outside-{}-{}",
-            std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-        ));
-        fs::create_dir_all(dir.join("sub"))?;
-        fs::create_dir_all(&outside)?;
-        let config = format!(
-            "{{\"mcpServers\":{{\"local\":{{\"command\":\"node\",\"args\":[\"server.js\"],\"cwd\":\"sub/../../{}\"}}}}}}",
-            outside.file_name().unwrap().to_string_lossy()
-        );
-        fs::write(dir.join(".kroma/mcp.json"), &config)?;
-        assert!(project_trust_fingerprint(&dir, config.as_bytes()).is_err());
-        fs::remove_dir_all(&outside)?;
-        fs::remove_dir_all(dir)?;
-        Ok(())
-    }
-
-    /// Environment values are expanded at launch, so approval must bind the
-    /// expanded value rather than only the literal `${NAME}` text.
-    #[test]
-    fn project_trust_keeps_environment_values_as_written() -> Result<()> {
-        let dir = scratch("env-values")?;
-        let variable = format!(
-            "MCP_TRUST_VALUE_{}_{}",
-            std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-        );
-        let config = format!(
-            "{{\"mcpServers\":{{\"local\":{{\"command\":\"node\",\"args\":[\"server.js\"],\"env\":{{\"MCP_TRUST_VALUE\":\"${{{variable}}}\"}}}}}}}}"
-        );
-        fs::write(dir.join(".kroma/mcp.json"), &config)?;
-        fs::write(dir.join("server.js"), "export const version = 1;\n")?;
-        std::env::set_var(&variable, "one");
-        let approved = project_trust_fingerprint(&dir, config.as_bytes())?;
-        // The approval covers the configured text, so changing the secret it
-        // names must not silently invalidate an approval the user already gave.
-        std::env::set_var(&variable, "two");
-        assert_eq!(
-            approved,
-            project_trust_fingerprint(&dir, config.as_bytes())?
-        );
-        std::env::remove_var(&variable);
-        assert_eq!(
-            approved,
-            project_trust_fingerprint(&dir, config.as_bytes())?,
-            "an unset variable keeps the same approval"
-        );
         fs::remove_dir_all(dir)?;
         Ok(())
     }
@@ -2664,13 +2322,50 @@ struct CachedConnection {
 /// Lazily connected MCP servers, shared by the two discovery tools. No child
 /// process starts until the model actually searches or calls a tool.
 struct LazyMcp {
+    settings: Capabilities,
     servers: BTreeMap<String, ServerConfig>,
     workdir: PathBuf,
     connections: tokio::sync::Mutex<HashMap<String, CachedConnection>>,
+    connect_locks: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl LazyMcp {
+    fn tool_enabled(&self, server: &str, remote: &str) -> bool {
+        tool_name(server, remote).is_some_and(|name| {
+            self.settings
+                .items
+                .tools
+                .get(&name)
+                .copied()
+                .unwrap_or(true)
+        })
+    }
+    async fn server_connect_lock(&self, name: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.connect_locks.lock().await;
+        Arc::clone(
+            locks
+                .entry(name.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
     async fn connection(&self, name: &str) -> Result<Arc<tokio::sync::Mutex<Connection>>> {
+        let existing = {
+            let mut connections = self.connections.lock().await;
+            connections.get_mut(name).map(|cached| {
+                cached.last_used = Instant::now();
+                Arc::clone(&cached.connection)
+            })
+        };
+        if let Some(connection) = existing {
+            if !connection.lock().await.is_invalid() {
+                return Ok(connection);
+            }
+            self.connections.lock().await.remove(name);
+        }
+        // Serialize cold-starts per server so concurrent calls never spawn
+        // duplicate child processes while leaving other servers unblocked.
+        let connect_lock = self.server_connect_lock(name).await;
+        let _connect_guard = connect_lock.lock().await;
         let existing = {
             let mut connections = self.connections.lock().await;
             connections.get_mut(name).map(|cached| {
@@ -2696,10 +2391,6 @@ impl LazyMcp {
         .with_context(|| format!("MCP server '{name}' startup timed out"))??;
         let connection = Arc::new(tokio::sync::Mutex::new(connection));
         let mut connections = self.connections.lock().await;
-        if let Some(cached) = connections.get_mut(name) {
-            cached.last_used = Instant::now();
-            return Ok(Arc::clone(&cached.connection));
-        }
         connections.insert(
             name.to_owned(),
             CachedConnection {
@@ -2857,6 +2548,9 @@ impl Tool for McpSearch {
                             let Some(remote) = metadata["name"].as_str() else {
                                 continue;
                             };
+                            if !self.manager.tool_enabled(name, remote) {
+                                continue;
+                            }
                             let description =
                                 metadata["description"].as_str().unwrap_or("MCP tool");
                             if !query.is_empty()
@@ -2936,6 +2630,9 @@ impl Tool for McpCall {
             let Some(tool) = parsed.get("tool").and_then(Value::as_str) else {
                 return ToolResult::error(json!({"error":"tool is required"}).to_string());
             };
+            if !self.manager.tool_enabled(server, tool) {
+                return ToolResult::error("MCP tool is disabled");
+            }
             let arguments = parsed
                 .get("arguments")
                 .cloned()
@@ -2987,32 +2684,46 @@ impl Tool for McpCall {
     }
 }
 
+pub async fn register_selected(
+    registry: &mut ToolRegistry,
+    workdir: &Path,
+    settings: &Capabilities,
+) -> Result<Registration> {
+    if env::var_os("KROMA_MCP_EAGER").is_some() {
+        register_configured_report_with(registry, workdir, false, settings).await
+    } else {
+        register_configured_lazy_with(registry, workdir, false, settings).await
+    }
+}
+
 /// Register two small discovery tools instead of every remote schema. Server
 /// processes start on the first `mcp_search` or `mcp_call`.
 pub async fn register_configured_lazy(
     registry: &mut ToolRegistry,
     workdir: &Path,
 ) -> Result<Registration> {
-    register_configured_lazy_with(registry, workdir, None).await
+    register_configured_lazy_with(registry, workdir, false, &Capabilities::default()).await
 }
 
-/// Test/host seam for an explicitly trusted project config.
+/// Compatibility test/host seam: load only the project config; no approval is needed.
 pub async fn register_configured_lazy_allow_project(
     registry: &mut ToolRegistry,
     workdir: &Path,
 ) -> Result<Registration> {
-    register_configured_lazy_with(registry, workdir, Some(true)).await
+    register_configured_lazy_with(registry, workdir, true, &Capabilities::default()).await
 }
 
 async fn register_configured_lazy_with(
     registry: &mut ToolRegistry,
     workdir: &Path,
-    trust_project: Option<bool>,
+    project_only: bool,
+    settings: &Capabilities,
 ) -> Result<Registration> {
-    if env::var_os("KROMA_NO_MCP").is_some() {
+    if env::var_os("KROMA_NO_MCP").is_some() || !settings.any_enabled(CapabilityGroup::Mcp) {
         return Ok(Registration::default());
     }
-    let (mut config, mut warnings) = configured_servers_with(workdir, trust_project)?;
+    let (mut config, mut warnings) = configured_servers_with(workdir, project_only)?;
+    config.retain(|name, _| settings.enabled(CapabilityGroup::Mcp, name, true));
     filter_servers(&mut config, &mut warnings);
     let mut report = Registration {
         warnings,
@@ -3023,9 +2734,11 @@ async fn register_configured_lazy_with(
     }
     let names = config.keys().cloned().collect::<Vec<_>>().join(", ");
     let manager = Arc::new(LazyMcp {
+        settings: settings.clone(),
         servers: config,
         workdir: workdir.to_path_buf(),
         connections: tokio::sync::Mutex::new(HashMap::new()),
+        connect_locks: tokio::sync::Mutex::new(HashMap::new()),
     });
     let weak = Arc::downgrade(&manager);
     tokio::spawn(async move {

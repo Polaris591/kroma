@@ -1153,6 +1153,9 @@ impl UiState {
         // result matching linear instead of rescanning older UI entries.
         let mut tool_entries = HashMap::<String, usize>::new();
         for message in messages {
+            if crate::protocol::is_host_input(message) {
+                continue;
+            }
             match message.role.as_str() {
                 "user" => {
                     let display = super::attachments::display_message(
@@ -1202,7 +1205,7 @@ impl UiState {
                         .as_ref()
                         .and_then(|id| tool_entries.get(id))
                         .and_then(|index| self.entries.get_mut(*index));
-                    let result = message.content.as_deref().unwrap_or("");
+                    let result = crate::tool_archive::model_content(message);
                     if let Some(entry) = found {
                         entry.details = tool_result_details(result);
                         if let Some(effective) = message
@@ -1358,6 +1361,7 @@ impl UiState {
                 output,
                 cached,
                 reasoning,
+                cache_write,
             } => {
                 self.usage.record(Some(&crate::model::Usage {
                     input,
@@ -1366,6 +1370,8 @@ impl UiState {
                     reasoning,
                     total: None,
                     web_searches: None,
+                    cache_write,
+                    cache_write_1h: None,
                 }));
             }
             UiEvent::TitleUsage {
@@ -1383,6 +1389,8 @@ impl UiState {
                     reasoning,
                     total: None,
                     web_searches: None,
+                    cache_write: None,
+                    cache_write_1h: None,
                 };
                 if let Some(catalog) = &self.model_catalog {
                     if let Err(error) =
@@ -1403,6 +1411,8 @@ impl UiState {
                         reasoning,
                         total: None,
                         web_searches: None,
+                        cache_write: None,
+                        cache_write_1h: None,
                     }),
                 );
             }
@@ -1411,6 +1421,7 @@ impl UiState {
                 input,
                 output,
                 cached,
+                cache_write,
             } => {
                 self.apec_usage.record_batch(
                     requests,
@@ -1421,6 +1432,8 @@ impl UiState {
                         reasoning: None,
                         total: None,
                         web_searches: None,
+                        cache_write,
+                        cache_write_1h: None,
                     }),
                 );
             }

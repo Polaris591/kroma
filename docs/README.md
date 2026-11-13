@@ -32,6 +32,9 @@ Start at the [English README](../README.md) or [中文说明](../README.zh-CN.md
 These documents are retained for context, and some record proposals, experiments or superseded decisions. They are **not** a replacement for current source, tests or user-facing guides.
 
 - [Design notes](design-notes.md)
+- [Desktop frontend refactor plan](desktop-refactor-plan.md) — current-worktree investigation, staged implementation and verification limits
+- [Desktop design review](desktop-design-review.md) — component coverage, interaction fixes and regression boundaries
+- [Desktop visual system](desktop-visual-system.md) — neutral primary actions, colour roles, responsive settings and accessibility checks
 - [Model catalog](model-catalog.md)
 - [Project Memory](project-memory.md) — current behavior, original-wording rules, user controls and storage
 - [Subagents](subagents.md) — execution-kernel design reference and the archived 1.0 contract

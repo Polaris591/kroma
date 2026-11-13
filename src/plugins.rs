@@ -26,7 +26,7 @@ pub use ui::{
 /// tool/hook timeout, so a slow plugin cannot stall the model request.
 const PLUGIN_MEMORY_CALL_TIMEOUT: Duration = Duration::from_secs(2);
 /// Bound on the verified user turn handed to a plugin that asks for it.
-const TRUSTED_USER_CHARS: usize = 4096;
+const TRUSTED_USER_CHARS: usize = 16_384;
 const MAX_INSTALL_ENTRIES: usize = 20_000;
 const MAX_INSTALL_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -140,6 +140,10 @@ fn plugin_env_isolation() -> bool {
         .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
+pub(crate) fn is_host_secret_env(name: &str) -> bool {
+    plugin_env_secret(name)
+}
+
 fn plugin_env_secret(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     matches!(
@@ -226,6 +230,7 @@ impl PluginState {
 
 #[derive(Clone)]
 pub struct PluginCatalog {
+    capability_filter: Option<crate::capabilities::Capabilities>,
     directory: PathBuf,
     bundled: Option<PathBuf>,
     state_path: PathBuf,
@@ -235,7 +240,7 @@ pub struct PluginCatalog {
     transient: Option<PathBuf>,
     pub warnings: Vec<String>,
     /// Enabled plugins with unreadable manifests cannot be silently omitted.
-    invalid_enabled: Vec<String>,
+    invalid_enabled: Vec<(String, String)>,
     /// Per-catalog live UI state & broadcast bus (isolated across projects/tests).
     ui_bus: Arc<PluginUiBus>,
 }
@@ -598,6 +603,21 @@ impl PluginCatalog {
         Ok(PathBuf::from(home).join(".kroma").join("plugins"))
     }
 
+    pub fn empty(workdir: &Path) -> Self {
+        Self {
+            capability_filter: None,
+            directory: PathBuf::new(),
+            bundled: None,
+            state_path: PathBuf::new(),
+            workdir: workdir.to_path_buf(),
+            plugins: Vec::new(),
+            transient: None,
+            warnings: Vec::new(),
+            invalid_enabled: Vec::new(),
+            ui_bus: Arc::new(PluginUiBus::new()),
+        }
+    }
+
     pub fn discover(workdir: &Path) -> Result<Self> {
         let directory = Self::directory()?;
         let state_path = directory
@@ -666,6 +686,7 @@ impl PluginCatalog {
             // A subagent child starts with no plugins: it pays no plugin
             // prompt, starts no plugin process and inherits no plugin state.
             return Ok(Self {
+                capability_filter: None,
                 directory,
                 bundled,
                 state_path,
@@ -823,7 +844,7 @@ impl PluginCatalog {
                         {
                             let critical_key = project_key.as_deref().unwrap_or(&id);
                             if state.critical_plugins.contains(critical_key) {
-                                invalid_enabled.push(label.clone());
+                                invalid_enabled.push((id.clone(), label.clone()));
                             }
                         }
                         warnings.push(label);
@@ -874,6 +895,7 @@ impl PluginCatalog {
         }
         sync_ui_bus(&plugins, &ui_bus);
         Ok(Self {
+            capability_filter: None,
             directory,
             bundled,
             state_path,
@@ -889,11 +911,18 @@ impl PluginCatalog {
     /// Fail running a broken enabled plugin, while keeping discovery and
     /// disable/uninstall commands usable to repair the manifest.
     pub fn ensure_loadable(&self) -> Result<()> {
-        if !self.invalid_enabled.is_empty() {
-            bail!(
-                "enabled plugin cannot load: {}",
-                self.invalid_enabled.join("; ")
-            );
+        let failures = self
+            .invalid_enabled
+            .iter()
+            .filter(|(id, _)| {
+                self.capability_filter.as_ref().is_none_or(|settings| {
+                    settings.enabled(crate::capabilities::CapabilityGroup::Plugins, id, true)
+                })
+            })
+            .map(|(_, error)| error.as_str())
+            .collect::<Vec<_>>();
+        if !failures.is_empty() {
+            bail!("enabled plugin cannot load: {}", failures.join("; "));
         }
         Ok(())
     }
@@ -1015,6 +1044,83 @@ impl PluginCatalog {
             lines.push(format!("Warnings:\n{}", self.warnings.join("\n")));
         }
         Ok(lines.join("\n"))
+    }
+
+    pub fn apply_capabilities(&mut self, settings: &crate::capabilities::Capabilities) {
+        use crate::capabilities::CapabilityGroup::Plugins;
+        for plugin in &mut self.plugins {
+            let enabled = settings.enabled(Plugins, &plugin.manifest.id, plugin.requested);
+            if enabled && !plugin.enabled {
+                let worker = Arc::new(PluginWorker::new(
+                    &plugin.worker.directory,
+                    &self.workdir,
+                    &plugin.manifest,
+                    plugin.worker.settings.clone(),
+                    plugin.worker.data_dir.clone(),
+                    self.ui_bus.clone(),
+                ));
+                plugin.event_worker =
+                    (!plugin.manifest.events.is_empty()).then(|| Arc::new(worker.isolated()));
+                plugin.ui_worker = Arc::new(worker.isolated());
+                plugin.worker = worker;
+            }
+            plugin.enabled = enabled;
+        }
+        self.capability_filter = Some(settings.clone());
+        sync_ui_bus(&self.plugins, &self.ui_bus);
+    }
+
+    pub fn preview_default_items(&mut self, items: &BTreeMap<String, bool>) -> Result<()> {
+        for (id, enabled) in items {
+            let plugin = self
+                .plugins
+                .iter_mut()
+                .find(|plugin| &plugin.manifest.id == id)
+                .ok_or_else(|| anyhow!("unknown plugin '{id}'"))?;
+            if plugin.transient {
+                bail!("install transient plugin '{id}' before changing activation");
+            }
+            plugin.requested = *enabled;
+        }
+        Ok(())
+    }
+
+    pub fn capability_tool_inventory(&self) -> Vec<Value> {
+        self.plugins.iter().flat_map(|plugin| plugin.manifest.tools.iter().map(|tool| {
+            json!({"type":"function", "function":{"name":tool.name,"description":tool.description}, "source":plugin.manifest.id})
+        })).collect()
+    }
+
+    pub fn set_enabled_items(&self, items: &BTreeMap<String, bool>) -> Result<()> {
+        let _lock = PluginStateLock::acquire(&self.state_path)?;
+        let fresh = self.refresh()?;
+        let mut state = PluginState::load(&self.state_path)?;
+        for (id, enabled) in items {
+            let plugin = fresh
+                .plugins
+                .iter()
+                .find(|plugin| &plugin.manifest.id == id)
+                .ok_or_else(|| anyhow!("unknown plugin '{id}'"))?;
+            if plugin.transient {
+                bail!("install transient plugin '{id}' before changing activation");
+            }
+            let key = plugin.project_key.as_deref().unwrap_or(id).to_owned();
+            if *enabled {
+                if plugin.project_key.is_some() {
+                    state.enabled_projects.insert(key.clone());
+                } else {
+                    state.enabled.insert(key.clone());
+                }
+                if plugin.binds_runtime_backend() {
+                    state.critical_plugins.insert(key);
+                }
+            } else {
+                state.enabled.remove(&key);
+                state.enabled_projects.remove(&key);
+                state.critical_plugins.remove(&key);
+            }
+        }
+        state.save(&self.state_path)
     }
 
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<String> {
@@ -1185,12 +1291,28 @@ impl PluginCatalog {
     }
 
     pub fn install(&self, directory: &Path) -> Result<String> {
+        self.install_directory(directory, None)
+    }
+
+    fn install_directory(
+        &self,
+        directory: &Path,
+        symlink_boundary: Option<&Path>,
+    ) -> Result<String> {
         let _lock = PluginStateLock::acquire(&self.state_path)?;
         let source = directory
             .canonicalize()
             .with_context(|| format!("opening {}", directory.display()))?;
         if !source.is_dir() {
             bail!("plugin source must be a directory");
+        }
+        if let Some(boundary) = symlink_boundary {
+            if crate::path_display::strip_prefix_equivalent(&source, boundary).is_none() {
+                bail!(
+                    "plugin directory symlink escapes checkout root: {}",
+                    directory.display()
+                );
+            }
         }
         let manifest = PluginManifest::read(&source)?;
         // Installing a user override of an official bundled plugin is valid.
@@ -1212,7 +1334,7 @@ impl PluginCatalog {
             bail!("cannot install a plugin into itself");
         }
         fs::create_dir_all(&self.directory)?;
-        copy_directory(&source, &target)
+        copy_directory(&source, &target, symlink_boundary)
             .with_context(|| format!("installing '{}'", manifest.id))?;
         // Reinstalling an ID must not inherit stale activation or settings.
         let result = (|| -> Result<()> {
@@ -1248,14 +1370,19 @@ impl PluginCatalog {
             .as_nanos();
         let checkout =
             env::temp_dir().join(format!("kroma-plugin-clone-{}-{nonce}", std::process::id()));
-        let output = Command::new("git")
+        let mut git_clone = Command::new("git");
+        git_clone
             .args(["clone", "--depth", "1"])
             .arg(&url)
-            .arg(&checkout)
-            .output()
-            .with_context(|| {
-                format!("running git for {url}; install git or pass a local plugin directory")
-            })?;
+            .arg(&checkout);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            git_clone.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let output = git_clone.output().with_context(|| {
+            format!("running git for {url}; install git or pass a local plugin directory")
+        })?;
         if !output.status.success() {
             let _ = fs::remove_dir_all(&checkout);
             let reason = String::from_utf8_lossy(&output.stderr);
@@ -1264,10 +1391,13 @@ impl PluginCatalog {
                 reason.trim().lines().last().unwrap_or("no diagnostic")
             );
         }
+        let checkout_root = checkout.canonicalize().inspect_err(|_| {
+            let _ = fs::remove_dir_all(&checkout);
+        })?;
         let manifest_dir = find_manifest_directory(&checkout).inspect_err(|_| {
             let _ = fs::remove_dir_all(&checkout);
         })?;
-        let result = self.install(&manifest_dir);
+        let result = self.install_directory(&manifest_dir, Some(&checkout_root));
         let _ = fs::remove_dir_all(&checkout);
         result
     }
@@ -1369,6 +1499,9 @@ impl PluginCatalog {
         base_tools: &ToolRegistry,
         base_prompt: &PromptComposer,
     ) -> Result<(ToolRegistry, PromptComposer)> {
+        if let Some(settings) = &self.capability_filter {
+            next.apply_capabilities(settings);
+        }
         next.ensure_loadable()?;
         let desired = PluginState::load(&next.state_path)?;
         for old in self.plugins.iter().filter(|plugin| plugin.enabled) {
@@ -1545,6 +1678,7 @@ impl PluginCatalog {
                     invalidates_context: tool.invalidates_context,
                     requires_user_context: tool.requires_user_context,
                     requires_user_attachments: tool.requires_user_attachments,
+                    may_mutate_worktree: tool.may_mutate_worktree,
                     timeout: effective_tool_timeout(tool.timeout_secs, plugin_tool_timeout()),
                     data_dir: plugin.worker.data_dir.clone(),
                     worker: plugin.worker.clone(),
@@ -1769,6 +1903,35 @@ impl PluginCatalog {
             }
         }
         warnings
+    }
+
+    pub fn builtin_context_factory(
+        &self,
+        capabilities: &crate::capabilities::Capabilities,
+    ) -> Arc<dyn ContextFactory> {
+        let plugins_disabled =
+            !capabilities.any_enabled(crate::capabilities::CapabilityGroup::Plugins);
+        let mut disabled_strategies = BTreeSet::new();
+        let mut enabled_strategies = BTreeSet::new();
+        for plugin in &self.plugins {
+            if plugin.enabled {
+                enabled_strategies.insert(plugin.manifest.id.clone());
+            } else {
+                disabled_strategies.insert(plugin.manifest.id.clone());
+            }
+        }
+        for (id, allowed) in &capabilities.items.plugins {
+            if *allowed {
+                enabled_strategies.insert(id.clone());
+            } else {
+                disabled_strategies.insert(id.clone());
+            }
+        }
+        Arc::new(crate::context::DisabledExternalContextFactory::new(
+            plugins_disabled,
+            disabled_strategies,
+            enabled_strategies,
+        ))
     }
 
     pub fn wrap_events(
@@ -2379,10 +2542,11 @@ fn find_manifest_directory(root: &Path) -> Result<PathBuf> {
     }
 }
 
-fn copy_directory(source: &Path, target: &Path) -> Result<()> {
+fn copy_directory(source: &Path, target: &Path, boundary: Option<&Path>) -> Result<()> {
     // Copy symlink *targets* so plugin bundles from pnpm or local workspaces
     // are installable without elevated link-creation privileges on Windows.
-    // Only detect actual recursive cycles; ordinary symlinks are allowed.
+    // Remote git installs enforce `boundary` so links cannot read host files
+    // outside the cloned repository; local installs still guard against cycles.
     struct Budget {
         entries: usize,
         bytes: u64,
@@ -2390,10 +2554,19 @@ fn copy_directory(source: &Path, target: &Path) -> Result<()> {
     fn copy_tree(
         source: &Path,
         target: &Path,
+        boundary: Option<&Path>,
         parents: &mut Vec<PathBuf>,
         budget: &mut Budget,
     ) -> Result<()> {
         let resolved = source.canonicalize()?;
+        if let Some(boundary) = boundary {
+            if crate::path_display::strip_prefix_equivalent(&resolved, boundary).is_none() {
+                bail!(
+                    "plugin directory symlink escapes checkout root: {}",
+                    source.display()
+                );
+            }
+        }
         if parents.contains(&resolved) {
             bail!("cyclic plugin directory link: {}", source.display());
         }
@@ -2409,8 +2582,19 @@ fn copy_directory(source: &Path, target: &Path) -> Result<()> {
                 let from = entry.path();
                 let to = target.join(entry.file_name());
                 if from.is_dir() {
-                    copy_tree(&from, &to, parents, budget)?;
+                    copy_tree(&from, &to, boundary, parents, budget)?;
                 } else if from.is_file() {
+                    if let Some(boundary) = boundary {
+                        let resolved_file = from.canonicalize()?;
+                        if crate::path_display::strip_prefix_equivalent(&resolved_file, boundary)
+                            .is_none()
+                        {
+                            bail!(
+                                "plugin file symlink escapes checkout root: {}",
+                                from.display()
+                            );
+                        }
+                    }
                     let size = from.metadata()?.len();
                     budget.bytes = budget.bytes.saturating_add(size);
                     if budget.bytes > MAX_INSTALL_BYTES {
@@ -2435,6 +2619,7 @@ fn copy_directory(source: &Path, target: &Path) -> Result<()> {
     copy_tree(
         source,
         target,
+        boundary,
         &mut Vec::new(),
         &mut Budget {
             entries: 0,
@@ -2451,6 +2636,7 @@ struct PluginToolAdapter {
     invalidates_context: bool,
     requires_user_context: bool,
     requires_user_attachments: bool,
+    may_mutate_worktree: bool,
     timeout: Option<Duration>,
     data_dir: PathBuf,
     worker: Arc<PluginWorker>,
@@ -2462,6 +2648,14 @@ impl Tool for PluginToolAdapter {
     }
     fn requires_user_attachments(&self) -> bool {
         self.requires_user_attachments
+    }
+    fn may_mutate_worktree(&self) -> bool {
+        self.may_mutate_worktree
+    }
+    fn manages_timeout(&self) -> bool {
+        // Plugin tools enforce their declared/admin deadline or follow the
+        // documented unlimited policy; cancellation drops PluginCallGuard.
+        true
     }
     fn name(&self) -> &str {
         &self.name
@@ -2600,8 +2794,10 @@ impl Tool for PluginToolAdapter {
                         ToolResult::error(format!("plugin stream failed: {error:#}"))
                     }
                     Ok(()) => match completed {
-                        Some(Ok(reply)) if !reply.is_error => ToolResult::ok(reply.content),
-                        Some(Ok(reply)) => ToolResult::error(reply.content),
+                        Some(Ok(reply)) if !reply.is_error => {
+                            plugin_tool_projection(&archive, &reply.content, false)
+                        }
+                        Some(Ok(reply)) => plugin_tool_projection(&archive, &reply.content, true),
                         Some(Err(error)) => {
                             worker.discard_process();
                             ToolResult::error(format!("invalid tool completion: {error:#}"))
@@ -2626,11 +2822,23 @@ impl Tool for PluginToolAdapter {
                 }
             };
             match reply {
-                Ok(response) if !response.is_error => ToolResult::ok(response.content),
-                Ok(response) => ToolResult::error(response.content),
+                Ok(response) if !response.is_error => {
+                    plugin_tool_projection(&archive, &response.content, false)
+                }
+                Ok(response) => plugin_tool_projection(&archive, &response.content, true),
                 Err(error) => ToolResult::error(format!("plugin execution failed: {error:#}")),
             }
         })
+    }
+}
+
+/// Adapters return facts, not previews. The Agent archives the final post-hook
+/// result, retaining its raw content in the WAL.
+fn plugin_tool_projection(_archive: &Path, content: &str, is_error: bool) -> ToolResult {
+    if is_error {
+        ToolResult::error(content)
+    } else {
+        ToolResult::ok(content)
     }
 }
 
@@ -2937,18 +3145,23 @@ fn plugin_event_fields(event: &RuntimeEvent<'_>) -> Value {
             output_tokens,
             reasoning_tokens,
             cached_tokens,
+            cache_write_tokens,
+            cache_write_1h_tokens,
         } => json!({
             "request":request, "tools":tools, "reasoning":reasoning, "input_tokens":input_tokens,
-            "output_tokens":output_tokens, "reasoning_tokens":reasoning_tokens, "cached_tokens":cached_tokens
+            "output_tokens":output_tokens, "reasoning_tokens":reasoning_tokens, "cached_tokens":cached_tokens,
+            "cache_write_tokens":cache_write_tokens, "cache_write_1h_tokens":cache_write_1h_tokens
         }),
         RuntimeEvent::CompactionUsage {
             requests,
             input_tokens,
             output_tokens,
             cached_tokens,
+            cache_write_tokens,
         } => json!({
             "requests":requests, "input_tokens":input_tokens,
-            "output_tokens":output_tokens, "cached_tokens":cached_tokens
+            "output_tokens":output_tokens, "cached_tokens":cached_tokens,
+            "cache_write_tokens":cache_write_tokens
         }),
         RuntimeEvent::TurnGateContinued { plugin, feedback } => {
             json!({"plugin":plugin, "feedback":feedback})
@@ -3020,14 +3233,18 @@ enum PluginDataVisibility {
 }
 
 fn git_output(workdir: &Path, args: &[&str]) -> Option<std::process::Output> {
-    std::process::Command::new("git")
-        .arg("-C")
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
         .arg(workdir)
         .args(args)
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd.output().ok()
 }
 
 fn plugin_data_visibility(workdir: &Path, data_dir: &Path) -> PluginDataVisibility {
@@ -3536,9 +3753,11 @@ impl Drop for PluginCallGuard {
 fn terminate_plugin(pid: u32) {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         // Kill descendants, too (notably subagents launched by a Node worker).
         let _ = Command::new("taskkill.exe")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
@@ -3819,9 +4038,16 @@ impl PluginProcess {
                 return Ok(json!({"ok": true, "cancelled": true, "result": Value::Null}));
             }
             self.write_request(&event.to_request())?;
+            let mut host_calls = 0usize;
             loop {
                 let parsed = self.read_frame()?;
                 if parsed.get("type").and_then(Value::as_str) == Some("host_call") {
+                    host_calls += 1;
+                    if host_calls > MAX_HOST_CALLS_PER_REQUEST {
+                        bail!(
+                            "plugin exceeded {MAX_HOST_CALLS_PER_REQUEST} consecutive host calls during custom TUI event"
+                        );
+                    }
                     self.answer_host_call_inner(&parsed, false)?;
                     continue;
                 }
@@ -3847,7 +4073,9 @@ impl PluginProcess {
     /// plugin's own process is blocked while it waits, so this must never hold
     /// a lock the interface needs; `ask` only parks this worker thread.
     fn ask_the_person(&self, parsed: &Value) -> Value {
-        let Some(asker) = crate::tools::host_asker() else {
+        // A catalog may be bound to one conversation's interactive surface.
+        // Fall back to the process-wide host only for the terminal interfaces.
+        let Some(asker) = self.ui_bus.asker().or_else(crate::tools::host_asker) else {
             return json!({
                 "ok": false,
                 "error": "this interface cannot show a question; decide from what you know and say what you chose"
@@ -4369,6 +4597,7 @@ base_url = "https://example.com""#,
             invalidates_context: false,
             requires_user_context: false,
             requires_user_attachments: false,
+            may_mutate_worktree: true,
             timeout_secs: None,
             replace: false,
             host: None,
@@ -4407,6 +4636,234 @@ base_url = "https://example.com""#,
             Some(Duration::from_secs(10)),
             "a shorter manifest declaration still wins"
         );
+    }
+
+    #[test]
+    fn remote_copy_directory_blocks_symlink_escape_and_cycles() -> Result<()> {
+        let root = test_root("symlink-boundary");
+        let checkout = root.join("checkout");
+        let plugin_src = checkout.join("plugin");
+        let outside = root.join("outside");
+        fs::create_dir_all(&plugin_src)?;
+        fs::create_dir_all(&outside)?;
+        fs::write(plugin_src.join("plugin.toml"), "id='demo'\nname='Demo'\n")?;
+        fs::write(outside.join("secret.txt"), "top-secret")?;
+        #[cfg(unix)]
+        let (file_ok, dir_ok, cycle_ok) = {
+            use std::os::unix::fs::symlink;
+            (
+                symlink(outside.join("secret.txt"), plugin_src.join("leak.txt")).is_ok(),
+                symlink(&outside, plugin_src.join("escape_dir")).is_ok(),
+                symlink(&plugin_src, plugin_src.join("loop")).is_ok(),
+            )
+        };
+        #[cfg(windows)]
+        let (file_ok, dir_ok, cycle_ok) = {
+            use std::os::windows::fs::{symlink_dir, symlink_file};
+            (
+                symlink_file(outside.join("secret.txt"), plugin_src.join("leak.txt")).is_ok(),
+                symlink_dir(&outside, plugin_src.join("escape_dir")).is_ok(),
+                symlink_dir(&plugin_src, plugin_src.join("loop")).is_ok(),
+            )
+        };
+
+        let checkout_canon = checkout.canonicalize()?;
+        if file_ok {
+            let err = copy_directory(&plugin_src, &root.join("dest1"), Some(&checkout_canon))
+                .expect_err("remote checkout must reject file symlink outside root");
+            assert!(err.to_string().contains("escapes checkout root"), "{err}");
+            let _ = fs::remove_file(plugin_src.join("leak.txt"));
+        }
+        if dir_ok {
+            let err = copy_directory(&plugin_src, &root.join("dest2"), Some(&checkout_canon))
+                .expect_err("remote checkout must reject dir symlink outside root");
+            assert!(err.to_string().contains("escapes checkout root"), "{err}");
+            let _ = fs::remove_dir(plugin_src.join("escape_dir"));
+        }
+        if cycle_ok {
+            let err = copy_directory(&plugin_src, &root.join("dest3"), None)
+                .expect_err("cyclic directory symlink must be rejected");
+            assert!(
+                err.to_string().contains("cyclic plugin directory link"),
+                "{err}"
+            );
+            let _ = fs::remove_dir(plugin_src.join("loop"));
+        }
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn plugin_tool_adapter_manages_timeout_with_or_without_deadline() -> Result<()> {
+        let ui_bus = Arc::new(PluginUiBus::new());
+        let manifest: PluginManifest = toml::from_str(
+            "id='demo'
+name='Demo'
+command='node'
+",
+        )?;
+        let worker = Arc::new(PluginWorker::unscanned(
+            Path::new("."),
+            Path::new("."),
+            &manifest,
+            json!({}),
+            PathBuf::new(),
+            ui_bus,
+        ));
+        for timeout in [None, Some(Duration::from_secs(900))] {
+            let adapter = PluginToolAdapter {
+                name: "demo_tool".into(),
+                description: "demo".into(),
+                parameters: empty_parameters(),
+                streaming: false,
+                invalidates_context: false,
+                requires_user_context: false,
+                requires_user_attachments: false,
+                may_mutate_worktree: true,
+                timeout,
+                data_dir: PathBuf::new(),
+                worker: Arc::clone(&worker),
+            };
+            assert!(adapter.manages_timeout());
+            assert!(adapter.may_mutate_worktree());
+        }
+        let manifest_ro: PluginManifest = toml::from_str(
+            "id='demo'
+name='Demo'
+command='node'
+[[tools]]
+name='ro_tool'
+description='read only'
+may_mutate_worktree=false
+",
+        )?;
+        let ro = PluginToolAdapter {
+            name: manifest_ro.tools[0].name.clone(),
+            description: manifest_ro.tools[0].description.clone(),
+            parameters: manifest_ro.tools[0].parameters.clone(),
+            streaming: false,
+            invalidates_context: false,
+            requires_user_context: false,
+            requires_user_attachments: false,
+            may_mutate_worktree: manifest_ro.tools[0].may_mutate_worktree,
+            timeout: None,
+            data_dir: PathBuf::new(),
+            worker,
+        };
+        assert!(!ro.may_mutate_worktree());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capability_items_filter_plugins_without_changing_defaults_and_survive_reload(
+    ) -> Result<()> {
+        use crate::capabilities::Capabilities;
+        let root = test_root("capability-items");
+        for id in ["one", "two"] {
+            let directory = root.join("plugins").join(id);
+            fs::create_dir_all(&directory)?;
+            fs::write(directory.join("plugin.toml"), format!("id='{id}'\nname='{id}'\ncommand='node'\nargs=['main.js']\nprompt='PROMPT-{id}'\n[ui]\nstatus='STATUS-{id}'\n[[tools]]\nname='tool_{id}'\ndescription='probe'\n[tools.parameters]\ntype='object'\n"))?;
+            fs::write(
+                directory.join("main.js"),
+                "throw new Error('must remain lazy');\n",
+            )?;
+        }
+        let state = root.join("plugins.toml");
+        let discover = || PluginCatalog::discover_at(root.join("plugins"), state.clone(), &root);
+        let catalog = discover()?;
+        catalog.set_enabled_items(&BTreeMap::from([
+            ("one".into(), true),
+            ("two".into(), false),
+        ]))?;
+        let saved = fs::read(&state)?;
+        let mut selected = discover()?;
+        let mut settings = Capabilities::default();
+        settings.items.plugins.insert("one".into(), false);
+        settings.items.plugins.insert("two".into(), true);
+        selected.apply_capabilities(&settings);
+        assert!(
+            !selected
+                .plugins
+                .iter()
+                .find(|plugin| plugin.manifest.id == "one")
+                .unwrap()
+                .enabled
+        );
+        let two = selected
+            .plugins
+            .iter()
+            .find(|plugin| plugin.manifest.id == "two")
+            .unwrap();
+        assert!(two.enabled && !two.requested);
+        assert!(!two
+            .worker
+            .scan
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("not enabled")));
+        let mut tools = ToolRegistry::new();
+        let mut prompt = PromptComposer::default();
+        assert!(selected.contribute(&mut tools, &mut prompt).is_empty());
+        let names = serde_json::to_string(&tools.definitions())?;
+        assert!(names.contains("tool_two"));
+        assert!(!names.contains("tool_one"));
+        let mut projection = vec![crate::protocol::Message::new("system", "base")];
+        prompt.apply(&mut projection);
+        assert!(projection[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("PROMPT-two"));
+        assert!(!projection[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("PROMPT-one"));
+        let statuses = selected.ui_statuses().join(" ");
+        assert!(statuses.contains("STATUS-two") && !statuses.contains("STATUS-one"));
+        let mut reloaded = discover()?;
+        let (tools, _) = selected.prepare_idle_reload_from(
+            &mut reloaded,
+            &ToolRegistry::new(),
+            &PromptComposer::default(),
+        )?;
+        let names = serde_json::to_string(&tools.definitions())?;
+        assert!(names.contains("tool_two") && !names.contains("tool_one"));
+        assert_eq!(
+            fs::read(&state)?,
+            saved,
+            "session selection rewrote global defaults"
+        );
+        let invalid = BTreeMap::from([("one".into(), false), ("unknown".into(), true)]);
+        assert!(catalog.set_enabled_items(&invalid).is_err());
+        assert_eq!(
+            fs::read(&state)?,
+            saved,
+            "invalid batch partially persisted"
+        );
+        catalog.set_enabled_items(&BTreeMap::from([
+            ("one".into(), false),
+            ("two".into(), true),
+        ]))?;
+        let global = discover()?;
+        assert!(
+            !global
+                .plugins
+                .iter()
+                .find(|plugin| plugin.manifest.id == "one")
+                .unwrap()
+                .requested
+        );
+        assert!(
+            global
+                .plugins
+                .iter()
+                .find(|plugin| plugin.manifest.id == "two")
+                .unwrap()
+                .requested
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     fn settings_catalog(label: &str) -> Result<(PathBuf, PluginCatalog)> {

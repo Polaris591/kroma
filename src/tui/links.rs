@@ -223,46 +223,7 @@ pub fn open_target(value: &str, workdir: &Path) -> Result<()> {
         return crate::external::open_http_url(&normalized);
     }
     let destination = local_path(value, workdir)?.into_os_string();
-    open_with_system(&destination)
-}
-
-#[cfg(windows)]
-fn open_with_system(value: &std::ffi::OsStr) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::UI::Shell::ShellExecuteW;
-
-    let wide: Vec<u16> = value.encode_wide().chain(std::iter::once(0)).collect();
-    let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
-    // ShellExecute receives an argument, not interpolated PowerShell/cmd
-    // source. Paths with quotes, spaces, ampersands remain data.
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            verb.as_ptr(),
-            wide.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            1,
-        )
-    } as isize;
-    if result <= 32 {
-        anyhow::bail!("Windows could not open this target (ShellExecute code {result})");
-    }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn open_with_system(value: &std::ffi::OsStr) -> Result<()> {
-    let program = if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    std::process::Command::new(program)
-        .arg(value)
-        .spawn()
-        .with_context(|| format!("starting {program}"))?;
-    Ok(())
+    crate::external::open_with_system(&destination)
 }
 
 #[cfg(test)]

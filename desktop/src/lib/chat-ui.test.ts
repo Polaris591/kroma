@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createLatestNavigation, filterSessions, isWorkspaceExpanded, workspaceDisplayName, scrollTopAfterPrepend, sessionLabel, sessionActivityLabel, visibleSessionsForGroup } from './chat-ui';
+import { createLatestNavigation, filterSessions, isWorkspaceExpanded, sidebarIsVisible, workspaceDisplayName, workspaceLabels, scrollTopAfterPrepend, sessionLabel, sessionActivityLabel, visibleSessionsForGroup } from './chat-ui';
 
 const sessions = [
   {id: 'first', name: 'Rust Refactor', recent: true},
@@ -103,6 +103,29 @@ describe('Workspace display labels', () => {
   });
 });
 
+describe('Sidebar visibility', () => {
+  it('defaults to a docked sidebar on wide windows and a closed drawer on narrow ones', () => {
+    expect(sidebarIsVisible(false, null, null)).toBe(true);
+    expect(sidebarIsVisible(true, null, null)).toBe(false);
+  });
+
+  it('keeps an explicit user choice across resizing and plugin default changes', () => {
+    for (const narrow of [false, true]) {
+      for (const declared of [null, 'visible', 'hidden'] as const) {
+        expect(sidebarIsVisible(narrow, false, declared)).toBe(false);
+        expect(sidebarIsVisible(narrow, true, declared)).toBe(true);
+      }
+    }
+  });
+
+  it('honours either plugin default until the person chooses otherwise', () => {
+    for (const narrow of [false, true]) {
+      expect(sidebarIsVisible(narrow, null, 'hidden')).toBe(false);
+      expect(sidebarIsVisible(narrow, null, 'visible')).toBe(true);
+    }
+  });
+});
+
 describe('Workspace folder collapse', () => {
   it('allows the current workspace to collapse even when automatically expanded', () => {
     const project = 'D:/Kroma';
@@ -144,6 +167,23 @@ describe('Legacy session activity labels', () => {
     expect(sessionActivityLabel(lastYear.getTime()/1000, today)).toBe('2025/6/3');
     expect(sessionActivityLabel(null, today)).toBe('');
     expect(sessionActivityLabel(Number.NaN, today)).toBe('');
+  });
+});
+
+describe('Workspace labels', () => {
+  it('keeps a plain name when it is unique', () => {
+    expect(workspaceLabels(['D:/Kroma', 'D:/other'], null)).toEqual({
+      'D:/Kroma': 'Kroma',
+      'D:/other': 'other',
+    });
+  });
+
+  it('adds the parent folder only when two workspaces collide', () => {
+    expect(workspaceLabels(['D:/work/kroma', 'E:/games/kroma', 'D:/Kroma'], null)).toEqual({
+      'D:/work/kroma': 'work/kroma',
+      'E:/games/kroma': 'games/kroma',
+      'D:/Kroma': 'Kroma',
+    });
   });
 });
 

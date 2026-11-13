@@ -172,14 +172,21 @@ fn width_of(text: &str) -> usize {
 }
 
 fn truncate(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
     if width_of(text) <= width {
         return text.to_owned();
     }
+    let limit = width.saturating_sub(1);
+    let mut used = 0;
     let mut truncated = String::new();
     for character in text.chars() {
-        if width_of(&truncated) + width_of(&character.to_string()) > width.saturating_sub(1) {
+        let char_width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        if used + char_width > limit {
             break;
         }
+        used += char_width;
         truncated.push(character);
     }
     truncated.push('…');

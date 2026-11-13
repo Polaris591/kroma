@@ -62,19 +62,9 @@ credential-shaped variables from plugin children when a plugin should use saved
 settings instead. `KROMA_PLUGIN_TOOL_TIMEOUT_SECS` optionally caps any plugin
 tool call, and a manifest `timeout_secs` adds a per-tool deadline; the smaller
 of the two wins. Unset preserves the unlimited default for non-streaming tools.
-Without a credential, `auto` and `free` use the free Mwmbl index: about a second,
-decent for English technical queries, weak for Chinese and niche topics. There
-is no chain of scraped search pages, so no blocked engine can stall a search.
-Configure a key or a SearXNG instance for dependable coverage; the web plugin
-guide records one measured run.
+Without a credential, `auto` uses the free Mwmbl index only, while `free` searches Mwmbl (and may use public Exa highlights when external fallback is enabled for public URLs). See `examples/plugins/web/README.md` for provider setup and current fallback rules.
 
-The fetcher uses HTTP(S) only; no headless browser, JS rendering or PDF parsing.
-It selects static main/article content, removes navigation, preserves code and
-links, decodes declared character sets (including Chinese GBK/GB2312) and
-reports an unreadable page (for example a JavaScript application shell) instead
-of returning navigation links as content. Compression, HTTP/2 and connection
-reuse come from the system fetch; proxy variables in the launch environment are
-honoured on Node 22.21+ / 24.5+. Webpage text is untrusted data, not instructions.
+`web_fetch` supports HTTP(S) downloads up to 1.5 MB, extracts structured main content and tables, handles HTML/charsets locally, and for **public external URLs** (blocking localhost, private/LAN IPs, `.local`/`.internal`, and private DNS results) can fall back to Firecrawl (when configured) or public Exa extraction, or Firecrawl for PDFs. Webpage text is untrusted data, not instructions.
 
 Long pages return `next_start`; pass it as `start_char` on the same URL.
 Continuation reuses a bounded, process-local snapshot for two idle minutes, and
@@ -109,9 +99,9 @@ checked separately using the [live acceptance set](web/evaluation.md).
 | `model-stream` | Enable in a test-only project | Provider in a separate executable, streaming contract: correlated `model_stream` frames, text/reasoning/tool-argument deltas, thinking levels, usage and cancellation |
 | `model-hook` | Enable and send a message | `before_model_request` Hook: rewrites the outgoing request projection while the configured provider still serves it; no model traffic of its own |
 | `subagents` | Let the model call `subagent` | Delegated tasks in separate sessions and working directories, up to 8 parallel children, per-task evidence and a 1800s default child deadline. The call waits for its children and returns their answers in one result, with `▶ [i/n]` progress lines while they run; cancelling the tool call stops the child process tree |
-| `goal` | `/goal <task>`, then `/goal` for status | One host-owned goal per session: acceptance points, check plan, pause/resume/cancel, no early finish |
+| `goal` | `/goal <task>`, then `/goal` for status | Session-scoped tracked goal & acceptance checklist via `goal_checkpoint`, soft finish/continue reminders (does not hard-block completion or override session lifetime) |
 | `ask` | Enable, then ask Kroma for something with a real fork in it | Declarative plugin with no process: `host = "ask_user"` names a tool the host itself runs, so the model can offer 2+ options (single or multiple choice, free text always available) and wait for the pick |
-| `memory` | `/remember text`, `/memories`, `/forgetnote 1` | Optional cross-session local notes, injected into model request projection; human-driven, superseded by `project-memory` |
+| `memory` | `/remember text`, `/memories`, `/forgetnote 1` | Minimal `before_model_request` hook example storing local notes (requires a leading system message in requests; superseded by `project-memory`) |
 | `project-memory` | Build the Rust binary, install `plugin/`, then use normally | Local SQLite memory: automatic recall, verified original user wording, optional review history and explicit user controls; no automatic eviction |
 | `status` | `/plugins view status` | Declarative TUI footer label and an information panel |
 

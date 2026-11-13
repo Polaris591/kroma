@@ -74,6 +74,9 @@ fn profile(
         thinking_levels: None,
         catalog_model: catalog_model.map(str::to_owned),
         native_web_search: None,
+        anthropic_cache_ttl: None,
+        anthropic_stable_breakpoint: None,
+        responses_prompt_cache_key: None,
     }
 }
 

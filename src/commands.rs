@@ -207,21 +207,6 @@ impl CommandRegistry {
     }
 
     /// External commands are asynchronous so a stalled plugin cannot freeze
-    /// the terminal UI. The callback receives only owned arguments/workdir.
-    pub fn register_async<F, Fut>(&mut self, name: &str, handler: F) -> Result<()>
-    where
-        F: Fn(String, PathBuf) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<CommandReply>> + Send + 'static,
-    {
-        if !name.starts_with('/') || name.len() < 2 || name.chars().any(char::is_whitespace) {
-            bail!("command must start with / and contain no spaces");
-        }
-        if self.commands.contains_key(name) {
-            bail!("duplicate command '{name}'");
-        }
-        self.register_async_context(name, move |args, context| handler(args, context.workdir))
-    }
-
     pub fn register_async_context<F, Fut>(&mut self, name: &str, handler: F) -> Result<()>
     where
         F: Fn(String, CommandSession) -> Fut + Send + Sync + 'static,
@@ -289,8 +274,8 @@ impl CommandRegistry {
     pub fn builtin_with_warnings(skills: Vec<Skill>, warnings: Vec<String>) -> Result<Self> {
         let mut registry = Self::new();
         for cmd in ["/exit", "/quit"] {
-            registry.register(cmd, |_, _, args| {
-                require_no_args(args, "/exit")?;
+            registry.register(cmd, move |_, _, args| {
+                require_no_args(args, cmd)?;
                 Ok(CommandReply::action(CommandAction::Exit))
             })?;
         }

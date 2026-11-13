@@ -4,9 +4,9 @@
 //! IMMEDIATE transaction so writers serialise on an early reserved lock.
 //!
 //! There is one write path for a durable memory: a write is accepted
-//! immediately, and the stored rule text is the user's verbatim quote. Nothing
-//! in this module archives, expires or promotes a record on a timer, and no
-//! storage quota silently drops a user rule.
+//! immediately, keeping the clear rule text alongside the user's verbatim quote
+//! when provided. Nothing in this module archives, expires or promotes a record
+//! on a timer, and no storage quota silently drops a user rule.
 
 use std::io::Read;
 #[cfg(unix)]
@@ -300,6 +300,7 @@ impl Store {
 
     pub fn correct(&mut self, id: &str, text: &str) -> Result<Memory> {
         validate_text(text)?;
+        reject_secret_text(text)?;
         let text = text.trim().to_string();
         let tx = self
             .conn

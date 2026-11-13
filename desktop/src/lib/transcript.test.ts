@@ -10,6 +10,27 @@ const tool = (id: string, content: string): Message =>
   ({role:'tool',tool_call_id:id,content});
 const call = (id:string,name:string) => ({id,function:{name,arguments:'{}'}});
 
+describe('foundation durable inputs', () => {
+  it('keeps reference and continuation inputs out of user turns and joins display fragments', () => {
+    const history: Message[] = [user('write'),
+      {...assistant('A'), provider_items:[{type:'kroma_output_fragment'}]},
+      {...user('reference'), provider_items:[{type:'kroma_context_reference'}]},
+      {...user('continue'), provider_items:[{type:'kroma_continuation'}]}, assistant('B')];
+    const turns = groupTranscript(history);
+    expect(turns).toHaveLength(1);
+    expect(summarizeTurn(turns[0]).answer?.text).toBe('AB');
+    expect(visibleTranscriptStart(history,2)).toBe(0);
+    expect(history[4].content).toBe('B');
+  });
+  it('renders a preview while retaining the full post-hook tool result', () => {
+    const result: Message = {...tool('t','complete evidence'), provider_items:[
+      {type:'kroma_tool_projection',preview:'bounded preview'}]};
+    const [turn] = groupTranscript([user('run'),assistant('',[call('t','tool')]),result]);
+    expect(turn.activities[0]).toMatchObject({kind:'tool',output:'bounded preview'});
+    expect(result.content).toBe('complete evidence');
+  });
+});
+
 describe('Live Markdown', () => {
   it('retains streamed markdown text while later tool events arrive', () => {
     const incoming = '## 进度更新\n\n**关键结果**\n\n- 文件一\n- 文件二';

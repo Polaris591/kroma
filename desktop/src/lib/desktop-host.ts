@@ -34,8 +34,6 @@ export interface DesktopHost {
   get sessionName(): string;
   get taskGeneration(): number;
   set taskGeneration(value: number);
-  get mcpDismissed(): boolean;
-  set mcpDismissed(value: boolean);
   readonly guard: OperationGuard;
   clearError(): void;
   clearNotice(): void;

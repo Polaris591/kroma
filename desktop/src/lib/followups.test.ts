@@ -33,7 +33,7 @@ describe('follow-up tasks', () => {
     const storage = store();
     const key = followupKey('D:/Kroma','session');
     const first = enqueueFollowup([],'  add tests  ','task-1');
-    expect(first).toEqual([{id:'task-1',text:'add tests'}]);
+    expect(first).toEqual([{id:'task-1',text:'add tests',paths:[]}]);
     saveFollowups(storage,key,first!);
     expect(loadFollowups(storage,key)).toEqual(first);
     saveFollowups(storage,key,[]);
@@ -49,7 +49,7 @@ describe('follow-up tasks', () => {
   });
 
   it('supports reordering without mutating or duplicating jobs', () => {
-    const a = [{id:'1',text:'one'},{id:'2',text:'two'},{id:'3',text:'three'}];
+    const a = [{id:'1',text:'one',paths:[]},{id:'2',text:'two',paths:[]},{id:'3',text:'three',paths:[]}];
     expect(moveFollowup(a,'3',-1).map(item=>item.id)).toEqual(['1','3','2']);
     expect(moveFollowup(a,'1',-1)).toEqual(a);
     expect(moveFollowup(a,'1',1).map(item=>item.id)).toEqual(['2','1','3']);
@@ -63,8 +63,25 @@ describe('follow-up tasks', () => {
     expect(parseFollowups('a'.repeat(250000))).toEqual([]);
     expect(enqueueFollowup([], ' ', 'id')).toBeNull();
     expect(enqueueFollowup([], 'x'.repeat(12001), 'id')).toBeNull();
-    const queue = Array.from({length:MAX_FOLLOWUPS},(_,i)=>({id:String(i),text:'do'}));
+    const queue = Array.from({length:MAX_FOLLOWUPS},(_,i)=>({id:String(i),text:'do',paths:[]}));
     expect(enqueueFollowup(queue,'overflow','next')).toBeNull();
+  });
+
+  it('keeps attachments in the queue and accepts attachment-only tasks', () => {
+    const storage = store();
+    const key = followupKey('D:/Kroma','session');
+    const queued = enqueueFollowup([], '', 'task-2', ['/private/a.png', '/private/b.pdf']);
+    expect(queued).toEqual([{id:'task-2',text:'',paths:['/private/a.png','/private/b.pdf']}]);
+    saveFollowups(storage, key, queued!);
+    expect(loadFollowups(storage, key)).toEqual(queued);
+    expect(enqueueFollowup([], '', 'empty')).toBeNull();
+    const many = Array.from({length:12}, (_,i) => `/private/${i}.bin`);
+    expect(enqueueFollowup([], 'go', 'task-3', many)![0].paths).toHaveLength(8);
+  });
+
+  it('reads tasks saved by the text-only version', () => {
+    const raw = JSON.stringify([{id:'old',text:'keep the old task'}]);
+    expect(parseFollowups(raw)).toEqual([{id:'old',text:'keep the old task',paths:[]}]);
   });
 
   it('tolerates private-mode storage errors', () => {
@@ -74,7 +91,7 @@ describe('follow-up tasks', () => {
       removeItem: (_key:string):void => {throw new Error('blocked');},
     };
     expect(loadFollowups(blocked,'queue')).toEqual([]);
-    expect(() => saveFollowups(blocked,'queue',[{id:'a',text:'job'}])).not.toThrow();
+    expect(() => saveFollowups(blocked,'queue',[{id:'a',text:'job',paths:[]}])).not.toThrow();
     expect(() => saveFollowups(blocked,'queue',[])).not.toThrow();
   });
 });

@@ -21,6 +21,7 @@ const CANCELLED = "cancelled";
 const CLAIMS = ["working", "done", "blocked"];
 const SUMMARY_CHARS = 2000;
 const NEXT_STEP_CHARS = 1000;
+const MAX_PUSHED_SESSIONS = 128;
 const USAGE = [
   "用法：",
   "/goal <目标正文>     开始目标并直接开干",
@@ -28,10 +29,19 @@ const USAGE = [
   "/goal cancel         放弃当前目标（不删除已完成的工作）",
 ].join("\n");
 
-/** A reply held back until the host acknowledges one `ui.status` call. */
-let pending = null;
-/** Last status line pushed per session, so an unchanged line is not re-sent. */
+/** Replies held until the host acknowledges each `ui.status` call, keyed by host_call request_id. */
+const pendingCalls = new Map();
+let nextHostCall = 0;
+/** Last acknowledged status line per session, so an unchanged line is not re-sent. */
 const pushed = new Map();
+
+function rememberPushed(key, status) {
+  if (pushed.has(key)) pushed.delete(key);
+  pushed.set(key, status);
+  while (pushed.size > MAX_PUSHED_SESSIONS) {
+    pushed.delete(pushed.keys().next().value);
+  }
+}
 
 const clip = (value, max) => {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
@@ -55,8 +65,12 @@ function readState(request) {
 }
 
 function writeState(request, state) {
-  fs.mkdirSync(path.dirname(stateFile(request)), { recursive: true });
-  fs.writeFileSync(stateFile(request), JSON.stringify(state, null, 2));
+  const target = stateFile(request);
+  const dir = path.dirname(target);
+  fs.mkdirSync(dir, { recursive: true });
+  const temp = path.join(dir, `.goal-${process.pid}-${Date.now()}.tmp`);
+  fs.writeFileSync(temp, JSON.stringify(state, null, 2));
+  fs.renameSync(temp, target);
 }
 
 function statusLine(state) {
@@ -106,6 +120,7 @@ function command(request) {
 
   // A new goal. The text becomes the user turn, so the model starts at once.
   const text = clip(args, SUMMARY_CHARS);
+  const replaced = (state.status === RUNNING || state.status === PAUSED) && state.text ? state.text : "";
   const next = {
     status: RUNNING,
     text,
@@ -116,7 +131,8 @@ function command(request) {
     updated_at: new Date().toISOString(),
   };
   writeState(request, next);
-  return { content: `开始目标：${text}`, task: text, status: statusLine(next) };
+  const notice = replaced ? `（已替换原目标：${clip(replaced, 60)}）` : "";
+  return { content: `开始目标：${text}${notice}`, task: text, status: statusLine(next) };
 }
 
 /** `goal_checkpoint`: the only way to end or block a goal. */
@@ -169,6 +185,25 @@ function gate(request) {
   return { content: JSON.stringify({ decision: "continue", feedback }), status: statusLine(state) };
 }
 
+function handleEvent(request) {
+  if (request.name !== "session_rewound" && request.name !== "session_cleared") {
+    return { content: "{}" };
+  }
+  const state = readState(request);
+  if (state.status !== RUNNING && state.status !== PAUSED) {
+    return { content: "{}", status: statusLine(state) };
+  }
+  state.status = CANCELLED;
+  state.block_reason = "";
+  state.next_step = "";
+  state.updated_at = new Date().toISOString();
+  if (!state.summary) {
+    state.summary = request.name === "session_rewound" ? "会话已回退（/rewind），目标已取消" : "会话已清空，目标已取消";
+  }
+  writeState(request, state);
+  return { content: "{}", status: "" };
+}
+
 function handle(request) {
   switch (request.type) {
     case "ping":
@@ -177,13 +212,15 @@ function handle(request) {
       return command(request);
     case "tool": {
       if (request.name && request.name !== "goal_checkpoint") {
-        return { content: `未知工具 ${request.name}` };
+        return { content: `未知工具 ${request.name}`, is_error: true };
       }
       return checkpoint(request);
     }
     case "hook":
       if (request.name === "before_turn_end") return gate(request);
       return { content: "{}" };
+    case "event":
+      return handleEvent(request);
     default:
       return { content: "{}" };
   }
@@ -193,21 +230,44 @@ function send(reply) {
   process.stdout.write(`${JSON.stringify(reply)}\n`);
 }
 
-createInterface({ input: process.stdin }).on("line", (line) => {
-  const request = JSON.parse(line);
-  if (request.type === "host_call_result") {
-    const held = pending;
-    pending = null;
-    if (held) send(held);
+createInterface({ input: process.stdin, crlfDelay: Infinity }).on("line", (line) => {
+  if (!line.trim()) return;
+  let request;
+  try {
+    request = JSON.parse(line);
+  } catch {
+    send({ content: "Invalid goal plugin request", is_error: true });
     return;
   }
-  const out = handle(request);
+  if (request.type === "host_call_result") {
+    const held = pendingCalls.get(request.request_id);
+    pendingCalls.delete(request.request_id);
+    if (held) {
+      const ok = !request.is_error && request.result?.ok !== false;
+      if (ok) rememberPushed(held.key, held.status);
+      send(held.reply);
+    }
+    return;
+  }
+  let out;
+  try {
+    out = handle(request);
+  } catch (error) {
+    send({
+      protocol_version: request.protocol_version,
+      request_id: request.request_id,
+      content: error?.message || "Goal plugin failed",
+      is_error: true,
+    });
+    return;
+  }
   const reply = {
     protocol_version: request.protocol_version,
     request_id: request.request_id,
     content: out.content,
   };
   if (out.task) reply.task = out.task;
+  if (out.is_error) reply.is_error = true;
   const live = request.config?.live_status !== false;
   const key = String(request.session_id || "default");
   const status = typeof out.status === "string" ? out.status : "";
@@ -215,11 +275,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     send(reply);
     return;
   }
-  pushed.set(key, status);
-  pending = reply;
+  const callId = `goal-hc-${++nextHostCall}`;
+  pendingCalls.set(callId, { reply, key, status });
   send({
     type: "host_call",
-    request_id: request.request_id,
+    request_id: callId,
     name: "ui.status",
     arguments: { text: status },
   });

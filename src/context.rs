@@ -198,6 +198,10 @@ pub trait ContextPolicy: Send {
 /// A factory is retained by Agent across session switches; the session's
 /// persisted identifier/version determines whether it can restore the state.
 pub trait ContextFactory: Send + Sync {
+    /// True when this factory uses Kroma's built-in context compaction.
+    fn is_builtin(&self) -> bool {
+        false
+    }
     /// Process-backed factories should use the asynchronous branch method.
     fn requires_async_branch(&self) -> bool {
         false
@@ -277,6 +281,10 @@ fn rewound_builtin_state(state: &CompactionState, retained: &[Message]) -> Compa
 pub struct BuiltinContextFactory;
 
 impl ContextFactory for BuiltinContextFactory {
+    fn is_builtin(&self) -> bool {
+        true
+    }
+
     fn initial(&self) -> PersistedContext {
         PersistedContext::default()
     }
@@ -295,6 +303,266 @@ impl ContextFactory for BuiltinContextFactory {
                 bail!("context strategy '{}' v{} is not available; select the matching context implementation", external.strategy, external.version)
             }
         }
+    }
+}
+
+/// Built-in context factory aware of which external plugin strategies were
+/// explicitly disabled by capabilities or plugin toggles. Disabled strategies
+/// reopen using a runtime-only built-in projection while keeping the stored
+/// external strategy metadata intact; broken or missing enabled plugins still
+/// fail loudly.
+pub struct DisabledExternalContextFactory {
+    plugins_disabled: bool,
+    disabled_strategies: std::collections::BTreeSet<String>,
+    enabled_strategies: std::collections::BTreeSet<String>,
+}
+
+impl DisabledExternalContextFactory {
+    pub fn new(
+        plugins_disabled: bool,
+        disabled_strategies: std::collections::BTreeSet<String>,
+        enabled_strategies: std::collections::BTreeSet<String>,
+    ) -> Self {
+        Self {
+            plugins_disabled,
+            disabled_strategies,
+            enabled_strategies,
+        }
+    }
+
+    fn allows_degraded_restore(&self, strategy: &str) -> bool {
+        self.disabled_strategies.contains(strategy)
+            || (self.plugins_disabled && !self.enabled_strategies.contains(strategy))
+    }
+}
+
+impl ContextFactory for DisabledExternalContextFactory {
+    fn is_builtin(&self) -> bool {
+        true
+    }
+
+    fn initial(&self) -> PersistedContext {
+        BuiltinContextFactory.initial()
+    }
+
+    fn restore(
+        &self,
+        state: PersistedContext,
+        config: ContextConfig,
+        archive: &Path,
+    ) -> Result<Box<dyn ContextPolicy>> {
+        match state {
+            PersistedContext::Builtin(_) => BuiltinContextFactory.restore(state, config, archive),
+            PersistedContext::External(external)
+                if self.allows_degraded_restore(&external.strategy) =>
+            {
+                crate::runtime_log!(
+                    "[context] strategy '{}' v{} is disabled; reopening with degraded built-in projection and preserving external state",
+                    external.strategy,
+                    external.version
+                );
+                Ok(Box::new(PreservedExternalCompression {
+                    external,
+                    fallback: Compression::new(CompactionState::default(), config, archive),
+                }))
+            }
+            PersistedContext::External(external) => {
+                BuiltinContextFactory.restore(PersistedContext::External(external), config, archive)
+            }
+        }
+    }
+
+    fn branch_state(
+        &self,
+        state: &PersistedContext,
+        source: &[Message],
+        retained: &[Message],
+        source_archive: &Path,
+        destination_archive: &Path,
+    ) -> Result<PersistedContext> {
+        BuiltinContextFactory.branch_state(
+            state,
+            source,
+            retained,
+            source_archive,
+            destination_archive,
+        )
+    }
+}
+
+struct PreservingCommit<'a> {
+    inner: &'a dyn ContextCommit,
+    external: &'a crate::context_state::ExternalContextState,
+}
+
+impl ContextCommit for PreservingCommit<'_> {
+    fn commit(&self, _state: &PersistedContext) -> Result<()> {
+        self.inner
+            .commit(&PersistedContext::External(self.external.clone()))
+    }
+}
+
+struct PreservedExternalCompression {
+    external: crate::context_state::ExternalContextState,
+    fallback: Compression,
+}
+
+impl ContextPolicy for PreservedExternalCompression {
+    fn set_event_sink(&mut self, events: Option<Arc<dyn crate::events::EventSink>>) {
+        self.fallback.set_event_sink(events);
+    }
+
+    fn state(&self) -> PersistedContext {
+        PersistedContext::External(self.external.clone())
+    }
+
+    fn abort(&mut self) {
+        self.fallback.abort();
+    }
+
+    fn task_failed(&mut self) {
+        self.fallback.task_failed();
+    }
+
+    fn new_user_turn(&mut self) {
+        self.fallback.new_user_turn();
+    }
+
+    fn mark_consumed(&mut self, message_count: usize) {
+        self.fallback.mark_consumed(message_count);
+    }
+
+    fn observe(&mut self, sent: &[Message], input: Option<u64>, cached: Option<u64>) {
+        self.fallback.observe(sent, input, cached);
+    }
+
+    fn calibrated_input_tokens(&self, messages: &[Message], view: &[Message]) -> Option<usize> {
+        self.fallback.calibrated_input_tokens(messages, view)
+    }
+
+    fn pending_input_estimate(
+        &self,
+        messages: &[Message],
+        model: &Arc<dyn ModelBackend>,
+    ) -> Option<usize> {
+        self.fallback.pending_input_estimate(messages, model)
+    }
+
+    fn observe_with_bytes(
+        &mut self,
+        sent: &[Message],
+        serialized_bytes: usize,
+        input: Option<u64>,
+        cached: Option<u64>,
+    ) {
+        ContextPolicy::observe_with_bytes(
+            &mut self.fallback,
+            sent,
+            serialized_bytes,
+            input,
+            cached,
+        );
+    }
+
+    fn set_request_context(&mut self, model: &Arc<dyn ModelBackend>, tools: &[Value]) {
+        self.fallback.set_request_context(model, tools);
+    }
+
+    fn set_prompt_context(&mut self, system: Option<&Message>) {
+        self.fallback.set_prompt_context(system);
+    }
+
+    fn composes_prompt_context(&self) -> bool {
+        self.fallback.composes_prompt_context()
+    }
+
+    fn take_usage(&mut self) -> CompactionUsage {
+        self.fallback.take_usage()
+    }
+
+    fn recover_overflow<'a>(
+        &'a mut self,
+        messages: &'a [Message],
+        model: &'a Arc<dyn ModelBackend>,
+        store: &'a dyn ContextCommit,
+    ) -> StreamFuture<'a, bool> {
+        Box::pin(async move {
+            let preserving = PreservingCommit {
+                inner: store,
+                external: &self.external,
+            };
+            self.fallback
+                .recover_overflow(messages, model, &preserving)
+                .await
+        })
+    }
+
+    fn compact<'a>(
+        &'a mut self,
+        messages: &'a [Message],
+        model: &'a Arc<dyn ModelBackend>,
+        store: &'a dyn ContextCommit,
+        extra_tokens: usize,
+    ) -> StreamFuture<'a, CompactionReport> {
+        Box::pin(async move {
+            let preserving = PreservingCommit {
+                inner: store,
+                external: &self.external,
+            };
+            self.fallback
+                .compact(messages, model, &preserving, extra_tokens)
+                .await
+        })
+    }
+
+    fn compact_with_instructions<'a>(
+        &'a mut self,
+        messages: &'a [Message],
+        model: &'a Arc<dyn ModelBackend>,
+        store: &'a dyn ContextCommit,
+        extra_tokens: usize,
+        instructions: &'a str,
+    ) -> StreamFuture<'a, CompactionReport> {
+        Box::pin(async move {
+            let preserving = PreservingCommit {
+                inner: store,
+                external: &self.external,
+            };
+            self.fallback
+                .compact_with_instructions(messages, model, &preserving, extra_tokens, instructions)
+                .await
+        })
+    }
+
+    fn prepare<'a>(
+        &'a mut self,
+        messages: &'a [Message],
+        model: &'a Arc<dyn ModelBackend>,
+        store: &'a dyn ContextCommit,
+        extra_tokens: usize,
+    ) -> StreamFuture<'a, Vec<Message>> {
+        Box::pin(async move {
+            let preserving = PreservingCommit {
+                inner: store,
+                external: &self.external,
+            };
+            ContextPolicy::prepare(
+                &mut self.fallback,
+                messages,
+                model,
+                &preserving,
+                extra_tokens,
+            )
+            .await
+        })
+    }
+
+    fn finish_task<'a>(
+        &'a mut self,
+        _messages: &'a [Message],
+        _store: &'a dyn ContextCommit,
+    ) -> StreamFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -533,6 +801,8 @@ pub struct CompactionUsage {
     pub input: Option<u64>,
     pub output: Option<u64>,
     pub cached: Option<u64>,
+    /// Subset of input the endpoint reported as written into its cache.
+    pub cache_write: Option<u64>,
 }
 
 impl CompactionUsage {
@@ -544,6 +814,7 @@ impl CompactionUsage {
         self.input = sum_known(self.input, usage.input, old);
         self.output = sum_known(self.output, usage.output, old);
         self.cached = sum_known(self.cached, usage.cached, old);
+        self.cache_write = sum_known(self.cache_write, usage.cache_write, old);
     }
 
     fn record_failed_unmeasured(&mut self, requests: usize) {
@@ -571,6 +842,11 @@ impl CompactionUsage {
         self.cached = sum_known(
             self.cached,
             summary.usage.as_ref().and_then(|v| v.cached),
+            old,
+        );
+        self.cache_write = sum_known(
+            self.cache_write,
+            summary.usage.as_ref().and_then(|v| v.cache_write),
             old,
         );
     }
@@ -646,7 +922,9 @@ impl Compression {
             request_extra_tokens: 0,
             request_tools: Vec::new(),
             request_tool_bytes: 0,
-            request_tools_hash: hash_bytes(b"[]"),
+            request_tools_hash: measured
+                .as_ref()
+                .map_or_else(|| hash_bytes(b"[]"), |base| base.tools_hash),
             request_model_ptr: 0,
             request_model_id: None,
             request_prompt_fingerprint: 0,
@@ -699,8 +977,13 @@ impl Compression {
     fn model_identity(model: &Arc<dyn ModelBackend>) -> Option<String> {
         let info = model.connection_info()?;
         Some(format!(
-            "{}|{}|{}",
-            info.api_protocol, info.base_url, info.model
+            "{}|{}|{}|{:?}|{:?}|{}",
+            info.api_protocol,
+            info.base_url,
+            info.model,
+            model.reasoning_level(),
+            info.deepseek_thinking,
+            model.native_web_search()
         ))
     }
 
@@ -789,8 +1072,17 @@ impl Compression {
     fn overflow_tool_preview(&self, msg: &Message, index: usize) -> String {
         let raw = msg.content.as_deref().unwrap_or_default();
         let value: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+        let has_stdout_file = value
+            .get("stdout_file")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        let notice = if has_stdout_file {
+            "PREVIEW ONLY: the original shell output was too large for the model context; do not assume omitted content is unimportant. Read stdout_file/stderr_file in smaller slices with shell before making conclusions."
+        } else {
+            "PREVIEW ONLY: the original tool output was too large for the model context; do not assume omitted content is unimportant. Inspect the full output at archive_message_index with history_read before making conclusions."
+        };
         json!({
-            "kroma_context_overflow": "PREVIEW ONLY: the original tool output was too large for the model context; do not assume omitted content is unimportant. Read the complete output in smaller slices with shell before making conclusions.",
+            "kroma_context_overflow": notice,
             "archive_file": self.archive,
             "archive_journal": format!("{}.wal", self.archive),
             "archive_message_index": index,
@@ -836,12 +1128,17 @@ impl Compression {
         let logs = crate::attachments::inline_log_extra_bytes(source)
             .map(bytes_to_tokens)
             .unwrap_or(0);
+        // Host additions the model decorator inserts into this checkpoint
+        // prefix (and into the coding request it mirrors). Without them the
+        // admission check would undercount the request it is admitting.
+        let injected = model.checkpoint_projection_tokens(&budget_view);
         budget_view.push(Message::new("user", prompt));
         let bytes = serde_json::to_vec(&budget_view).unwrap_or_default();
         serialized_content_tokens(&bytes)
             .saturating_add(bytes_to_tokens(self.request_tool_bytes))
             .saturating_add(images)
             .saturating_add(logs)
+            .saturating_add(injected)
     }
 
     /// Compute the projected request size once; replacing a tool result only
@@ -958,6 +1255,8 @@ impl Compression {
             self.state.measurement = None;
             return;
         };
+        // Host references are committed input messages, just like the rest of
+        // the transcript. Their raw positions survive reopen and compaction.
         let message_count = self
             .state
             .covered_until
@@ -1160,6 +1459,8 @@ impl Compression {
             let mut item = msg.clone();
             if state.cleared_tools.contains(&index) {
                 item.content = Some(self.tool_preview(msg, index));
+            } else {
+                crate::tool_archive::project_message(&mut item);
             }
             Self::clear_stale_signed_thinking(&mut item, state.revision);
             view.push(item);
@@ -1211,6 +1512,7 @@ impl Compression {
         // as normal requests, while retaining original tool evidence.
         for message in messages.iter().skip(state.covered_until) {
             let mut item = message.clone();
+            crate::tool_archive::project_message(&mut item);
             Self::clear_stale_signed_thinking(&mut item, state.revision);
             view.push(item);
         }
@@ -1565,6 +1867,9 @@ impl Compression {
         let mut planning_view = self.request_view(messages);
         crate::attachments::project_history(&mut planning_view, model.accepts_images());
         model.project_for_budget(&mut planning_view);
+        let planning_view = model
+            .admitted_projection(&planning_view)
+            .unwrap_or(planning_view);
         let conservative = self.tokens(&planning_view);
         let mut watermark = self
             .measured_watermark(messages, &planning_view, extra_tokens)
@@ -1591,6 +1896,7 @@ impl Compression {
                     let mut planning = view.clone();
                     crate::attachments::project_history(&mut planning, model.accepts_images());
                     model.project_for_budget(&mut planning);
+                    let planning = model.admitted_projection(&planning).unwrap_or(planning);
                     watermark = self
                         .measured_watermark(messages, &planning, extra_tokens)
                         .unwrap_or_else(|| self.tokens(&planning));
@@ -2098,6 +2404,34 @@ mod tests {
         );
         assert!(tokens <= 1800);
         assert!(Compression::is_safe_boundary(&messages, boundary));
+    }
+
+    #[test]
+    fn lazy_compaction_defaults_stay_capacity_conservative_not_cost_optimal() {
+        // F7: the default trigger is a capacity strategy. It is deliberately
+        // not an economic decision, and it must not start compacting earlier
+        // without controlled same-task evidence.
+        let budget = ContextConfig::with_output_reserve(128_000, 8_192).unwrap();
+        assert_eq!(
+            budget.soft_limit(),
+            (128_000 * 90 / 100).min(budget.hard_limit()),
+            "the trigger is the 90% capacity mark, bounded by the safety margin"
+        );
+        assert!(
+            budget.soft_limit() < budget.hard_limit(),
+            "a failed checkpoint must still have room to continue"
+        );
+        assert_eq!(
+            budget.window(),
+            128_000,
+            "the trigger never shrinks the model window the user configured"
+        );
+        // Retained raw history after a checkpoint, in tokens, stays generous so
+        // a hot cached prefix is not rewritten after every summary.
+        assert_eq!(super::RETAIN_RECENT_TOKENS, 32_000);
+        // No economic policy is derived from this capacity trigger. Settings that
+        // would change it are configuration concerns, tested where configuration
+        // is parsed, not by reading the ambient environment here.
     }
 
     #[test]
@@ -4190,5 +4524,78 @@ mod tests {
         drop(store);
         std::fs::remove_dir_all(&dir).ok();
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn disabled_external_context_degrades_preserving_external_state_while_missing_enabled_fails(
+    ) -> Result<()> {
+        let external = PersistedContext::External(crate::context_state::ExternalContextState {
+            strategy: "probe".into(),
+            version: 2,
+            data: json!({"cursor": 7}),
+        });
+        let strict = DisabledExternalContextFactory::new(
+            false,
+            std::collections::BTreeSet::new(),
+            std::collections::BTreeSet::from(["probe".into()]),
+        );
+        assert!(
+            strict
+                .restore(external.clone(), budget(), Path::new("/tmp/missing.json"))
+                .is_err(),
+            "missing/broken enabled context plugins must not silently fall back"
+        );
+
+        let disabled = DisabledExternalContextFactory::new(
+            true,
+            std::collections::BTreeSet::from(["probe".into()]),
+            std::collections::BTreeSet::new(),
+        );
+        let mut policy = disabled.restore(external, budget(), Path::new("/tmp/disabled.json"))?;
+        let expected = json!({
+            "strategy": "probe",
+            "version": 2,
+            "data": {"cursor": 7}
+        });
+        assert_eq!(serde_json::to_value(policy.state())?, expected);
+        let commit = RecordingCommit::default();
+        let model: Arc<dyn ModelBackend> = Arc::new(TestModel::new([Ok("ok".into())]));
+        let history = vec![
+            Message::new("system", "system"),
+            Message::new("user", "hello"),
+        ];
+        let view = policy.prepare(&history, &model, &commit, 0).await?;
+        assert_eq!(view.len(), 2);
+        assert_eq!(serde_json::to_value(policy.state())?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn overflow_tool_preview_tailors_guidance_for_shell_vs_other_tools() {
+        let compression = Compression::new(
+            CompactionState::default(),
+            budget(),
+            Path::new("/tmp/session.json"),
+        );
+        let shell_msg = Message::tool(
+            "call-shell".into(),
+            json!({
+                "exit_code": 0,
+                "stdout_file": "/tmp/out.log",
+                "stdout": "line1",
+            })
+            .to_string(),
+        );
+        let shell_preview: Value =
+            serde_json::from_str(&compression.overflow_tool_preview(&shell_msg, 3)).unwrap();
+        let shell_notice = shell_preview["kroma_context_overflow"].as_str().unwrap();
+        assert!(shell_notice.contains("stdout_file"));
+
+        let other_msg = Message::tool("call-other".into(), "raw non-shell payload".into());
+        let other_preview: Value =
+            serde_json::from_str(&compression.overflow_tool_preview(&other_msg, 4)).unwrap();
+        let other_notice = other_preview["kroma_context_overflow"].as_str().unwrap();
+        assert!(other_notice.contains("history_read"));
+        assert!(!other_notice.contains("with shell before"));
     }
 }

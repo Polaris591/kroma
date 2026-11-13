@@ -153,7 +153,7 @@ impl PromptComposer {
                         self.nested_paths.insert(nested.clone());
                         self.instruction_files.push(format!(
                             "\n\nNested instructions ({}):\n{contents}",
-                            nested.display()
+                            crate::path_display::for_shell(&nested)
                         ));
                         changed = true;
                     }
@@ -634,6 +634,33 @@ mod tests {
         let mut next = original;
         composer.apply(&mut next);
         assert!(!next[0].content.as_deref().unwrap().contains("DEEP_RULE"));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn nested_instructions_do_not_expose_windows_verbatim_prefix() -> Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "kroma-nested-prefix-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        fs::create_dir_all(root.join("pkg/sub"))?;
+        fs::write(root.join("AGENTS.md"), "ROOT")?;
+        fs::write(root.join("pkg/AGENTS.md"), "PKG_RULE")?;
+        fs::write(root.join("pkg/sub/lib.rs"), "pub fn f() {}")?;
+        let canonical_root = root.canonicalize()?;
+        let mut composer = PromptComposer::default();
+        composer.refresh_for_task(&canonical_root, "Inspect pkg")?;
+        assert!(composer.include_discovered_paths(&canonical_root, "pkg/sub/lib.rs")?);
+        let mut history = composer.initial_history(&canonical_root);
+        composer.apply(&mut history);
+        let text = history[0].content.as_deref().unwrap();
+        assert!(text.contains("PKG_RULE"));
+        assert!(
+            !text.contains(r"\\?\"),
+            "unexpected verbatim prefix in prompt: {text}"
+        );
         fs::remove_dir_all(root)?;
         Ok(())
     }

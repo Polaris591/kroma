@@ -377,7 +377,7 @@ async fn zero_maintenance_flow_is_automatic_persistent_and_isolated() -> Result<
     let beyond = format!(
         "{}
 {beyond_rule}",
-        "附加说明。".repeat(1200),
+        "附加说明。".repeat(3500),
         beyond_rule = "另一条规则"
     );
     let (content, error) = call_tool_with_user(
@@ -437,6 +437,10 @@ async fn zero_maintenance_flow_is_automatic_persistent_and_isolated() -> Result<
     assert!(
         injected.contains("Use pnpm for this project, not npm"),
         "recall hands the model the stored rule: {injected}"
+    );
+    assert!(
+        injected.contains(quote),
+        "recall retains the anchored user quote alongside the rule: {injected}"
     );
 
     drop(model);

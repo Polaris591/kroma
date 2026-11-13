@@ -1,0 +1,55 @@
+api_version = 2
+id = "todo"
+name = "Todo"
+version = "0.1.0"
+description = "Per-conversation task checklist: one model-facing tool, /todo commands, live status, widget and panel"
+command = "node"
+args = ["main.js"]
+hooks = ["before_turn_end"]
+events = ["session_cleared", "session_rewound"]
+prompt = """
+用 todo_write 维护当前对话的任务清单：多步骤或需要跟踪的工作先写计划（每项一个动词开头的具体动作），推进时更新状态，做完标 done。
+清单只属于当前对话；用户也能用 /todo 直接查看和修改。一步就能答完的事不要建清单。
+"""
+
+[settings]
+live_status = true
+widget = true
+finish_guard = false
+
+[[commands]]
+name = "/todo"
+description = "查看或修改当前对话的任务清单"
+
+[[tools]]
+name = "todo_write"
+may_mutate_worktree = false
+description = "整体写入当前对话的任务清单：传完整的 items 数组（按执行顺序），旧清单被替换；状态 pending/doing/done。多步骤工作先列计划，推进时更新，全部完成后标 done；传空数组清空。"
+
+[tools.parameters]
+type = "object"
+additionalProperties = false
+required = ["items"]
+
+[tools.parameters.properties.items]
+type = "array"
+maxItems = 50
+description = "完整的清单，按执行顺序；空数组表示清空"
+
+[tools.parameters.properties.items.items]
+type = "object"
+additionalProperties = false
+required = ["text"]
+
+[tools.parameters.properties.items.items.properties.text]
+type = "string"
+description = "一项具体动作，动词开头，一句话"
+
+[tools.parameters.properties.items.items.properties.status]
+type = "string"
+enum = ["pending", "doing", "done"]
+description = "默认 pending；同一时间最多一项 doing"
+
+[ui]
+panel_title = "任务清单"
+dynamic_panel = true

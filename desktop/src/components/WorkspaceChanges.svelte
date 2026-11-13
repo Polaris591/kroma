@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy } from 'svelte';
+  import { modal } from '../lib/modal';
   import { Copy, FileDiff, GitBranch, LoaderCircle, RefreshCw, X } from '@lucide/svelte';
   import { api, type WorkspaceFileDiff, type WorkspaceReview, type WorkspaceChange } from '../lib/api';
 
@@ -10,27 +11,40 @@
   export let onClose: () => void;
   export let onRefresh: () => void;
 
-  let closeButton: HTMLButtonElement;
   let chosenPath = '';
   let detail: WorkspaceFileDiff | null = null;
   let detailBusy = false;
   let detailError = '';
   let request = 0;
   let copied = false;
+  let copyError = false;
+  let currentProject = project;
+  // The report whose selection has already been applied; a refresh delivers a new one.
+  let syncedReview: WorkspaceReview | null | undefined;
 
   const captions: Record<WorkspaceChange['status'], string> = {
     modified:'修改', added:'新增', deleted:'删除',
     renamed:'重命名', conflict:'冲突', untracked:'未跟踪',
   };
 
-  onMount(() => closeButton?.focus());
+  /** Drops the shown diff and any answer still in flight for it. */
+  function resetDetail() {
+    request += 1;
+    detail = null;
+    detailBusy = false;
+    detailError = '';
+    copied = false;
+    copyError = false;
+  }
 
   async function selectFile(path: string) {
+    if (busy) return;
     const current = ++request;
     chosenPath = path;
     detail = null;
     detailError = '';
     copied = false;
+    copyError = false;
     detailBusy = true;
     try {
       const next = await api.workspaceFileDiff(path);
@@ -43,25 +57,48 @@
   }
 
   async function copyDiff() {
-    if (!detail?.diff) return;
+    if (busy || !detail?.diff) return;
+    const current = request;
     try {
       await navigator.clipboard.writeText(detail.diff);
-      copied = true;
+      if (current === request) { copied = true; copyError = false; }
     } catch {
-      copied = false;
+      if (current === request) { copied = false; copyError = true; }
     }
   }
 
-  $: if (review && !busy && review.entries.length && !chosenPath) {
-    void selectFile(review.entries[0].path);
+  /** The refreshed report decides which path the diff pane shows. */
+  function syncSelection() {
+    if (!review?.is_repo || !review.entries.length) {
+      chosenPath = '';
+      resetDetail();
+      return;
+    }
+    const kept = review.entries.some(file => file.path === chosenPath);
+    void selectFile(kept ? chosenPath : review.entries[0].path);
   }
+
+  $: if (project !== currentProject) {
+    currentProject = project;
+    chosenPath = '';
+    resetDetail();
+  }
+
+  // A refresh invalidates the diff shown before it; the report that replaces it
+  // decides the selection once the refresh has finished.
+  $: if (busy) resetDetail();
+  $: if (!busy && review !== syncedReview) {
+    syncedReview = review;
+    syncSelection();
+  }
+
+  onDestroy(() => { request += 1; });
 </script>
 
-<svelte:window onkeydown={e=>{ if (e.key === 'Escape') {e.preventDefault();onClose();} }}/>
-
-<div class="review-overlay">
-  <button class="review-scrim" aria-label="关闭工作区变更" onclick={onClose}></button>
-  <div class="review-panel" role="dialog" aria-modal="true" aria-label="查看工作区变更">
+<dialog class="review-overlay" aria-label="查看工作区变更"
+  use:modal={{ onClose, initialFocus: '[aria-label="关闭变更查看"]' }}>
+  <button class="review-scrim" tabindex="-1" aria-label="关闭工作区变更" onclick={onClose}></button>
+  <div class="review-panel">
     <header class="review-header">
       <div class="review-heading">
         <span class="review-emblem"><FileDiff size={19}/></span>
@@ -71,7 +108,7 @@
         <button title="刷新工作区变更" aria-label="刷新工作区变更" disabled={busy} onclick={onRefresh}>
           {#if busy}<LoaderCircle class="spin" size={16}/>{:else}<RefreshCw size={16}/>{/if}
         </button>
-        <button bind:this={closeButton} title="关闭" aria-label="关闭变更查看" onclick={onClose}><X size={18}/></button>
+        <button title="关闭" aria-label="关闭变更查看" onclick={onClose}><X size={18}/></button>
       </div>
     </header>
     <p class="review-disclaimer">这里显示的是 <strong>Git 工作区的所有未提交变更</strong>，可能包含你之前或其他程序的修改，不代表全部由本次 Kroma 任务产生。</p>
@@ -91,7 +128,7 @@
           {:else}
             {#each review.entries as file (file.path)}
               <button class="review-file-row" class:active={chosenPath === file.path}
-                title={file.path} onclick={() => void selectFile(file.path)}>
+                title={file.path} aria-pressed={chosenPath === file.path} disabled={busy} onclick={() => void selectFile(file.path)}>
                 <span class="review-file-status" class:untracked={file.untracked}>{captions[file.status]}</span>
                 <span class="review-file-name">{file.path}</span>
                 {#if file.staged}<span class="review-staged" title="包含已暂存的改动">暂存</span>{/if}
@@ -104,14 +141,18 @@
       <div class="review-diff" aria-label="文件文本差异">
         {#if chosenPath}
           <div class="review-diff-title"><strong title={chosenPath}>{chosenPath.split(/[\\/]/).pop()}</strong>
-            <button disabled={!detail?.diff} onclick={copyDiff}><Copy size={14}/>{copied ? '已复制' : '复制差异'}</button>
+            <button disabled={busy || !detail?.diff} onclick={copyDiff}><Copy size={14}/><span aria-live="polite">{copied ? '已复制' : copyError ? '复制失败，重试' : '复制差异'}</span></button>
           </div>
           {#if detailBusy}
             <div class="review-placeholder"><LoaderCircle size={18} class="spin"/> 正在读取差异…</div>
           {:else if detailError}
-            <p class="review-error" role="alert">{detailError}</p>
+            <p class="review-error" role="alert">{detailError}
+              <button class="secondary small" onclick={() => void selectFile(chosenPath)}>重试</button></p>
+          {:else if busy}
+            <div class="review-placeholder"><LoaderCircle size={18} class="spin"/> 正在刷新工作区变更…</div>
           {:else if detail?.diff}
-            <pre class="review-diff-pre"><code>{#each detail.diff.split('\n').slice(0,1500) as line,i (i)}<span class:added={line.startsWith('+')&&!line.startsWith('+++')} class:removed={line.startsWith('-')&&!line.startsWith('---')} class:hunk={line.startsWith('@@')}>{line || ' '}{'\n'}</span>{/each}</code></pre>
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard users need to scroll this read-only diff.) -->
+            <pre class="review-diff-pre" tabindex="0" aria-label="工作区文件差异"><code>{#each detail.diff.split('\n').slice(0,1500) as line,i (i)}<span class:added={line.startsWith('+')&&!line.startsWith('+++')} class:removed={line.startsWith('-')&&!line.startsWith('---')} class:hunk={line.startsWith('@@')}>{line || ' '}{'\n'}</span>{/each}</code></pre>
             {#if detail.truncated || detail.diff.split('\n').length>1500}
               <p class="review-limit">差异过长，已截断显示；完整代码仍保留在磁盘中。</p>
             {/if}
@@ -124,4 +165,4 @@
       </div>
     </div>
   </div>
-</div>
+</dialog>

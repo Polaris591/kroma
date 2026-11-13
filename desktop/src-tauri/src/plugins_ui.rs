@@ -20,21 +20,38 @@ pub fn start_ui_forwarder(host: &mut Host, ui_bus: Arc<PluginUiBus>) {
     let Some(app) = host.app_handle.clone() else {
         return;
     };
+    let project = host.project.to_string_lossy().into_owned();
+    let session = host.session.clone();
     let mut rx = ui_bus.subscribe();
     let handle = tauri::async_runtime::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(event) => {
-                    let _ = app.emit("plugin_ui", json!(event));
+                    // The renderer must only apply a plugin event to the
+                    // conversation that produced it. The envelope carries the
+                    // owner so a background turn cannot overwrite the visible
+                    // composer, theme or widgets.
+                    let _ = app.emit(
+                        "plugin_ui",
+                        json!({"project": project, "session": session, "event": event}),
+                    );
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     let _ = app.emit(
                         "plugin_ui",
-                        json!({"kind": "status_changed", "statuses": ui_bus.statuses()}),
+                        json!({
+                            "project": project,
+                            "session": session,
+                            "event": {"kind": "status_changed", "statuses": ui_bus.statuses()},
+                        }),
                     );
                     let _ = app.emit(
                         "plugin_ui",
-                        json!({"kind": "widgets_changed", "widgets": ui_bus.widget_values()}),
+                        json!({
+                            "project": project,
+                            "session": session,
+                            "event": {"kind": "widgets_changed", "widgets": ui_bus.widget_values()},
+                        }),
                     );
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -45,13 +62,21 @@ pub fn start_ui_forwarder(host: &mut Host, ui_bus: Arc<PluginUiBus>) {
 }
 
 pub fn sync_active_plugins(host: &mut Host) {
-    host.active_plugins = host.runtime.as_ref().map(|runtime| {
-        (
-            runtime.plugins.clone(),
-            runtime.agent.session_id().to_owned(),
-            runtime.agent.archive_path().to_path_buf(),
-        )
-    });
+    host.active_plugins = host
+        .runtime
+        .as_ref()
+        .filter(|runtime| {
+            runtime
+                .capabilities()
+                .any_enabled(kroma::capabilities::CapabilityGroup::Plugins)
+        })
+        .map(|runtime| {
+            (
+                runtime.plugins.clone(),
+                runtime.agent.session_id().to_owned(),
+                runtime.agent.archive_path().to_path_buf(),
+            )
+        });
 }
 
 pub(crate) fn validate_plugin_source(directory: &Path) -> Result<PathBuf> {
@@ -103,6 +128,7 @@ pub(crate) fn parse_setting(value: Value) -> Result<toml::Value> {
 }
 
 pub fn plugin_presentation_value(plugins: &PluginCatalog) -> Value {
+    let layout = plugins.ui_layout().ok().flatten();
     json!({
         "tool_labels": plugins.ui_tool_labels().unwrap_or_default(),
         "activity_frames": plugins.ui_activity_frames().unwrap_or_default(),
@@ -117,15 +143,29 @@ pub fn plugin_presentation_value(plugins: &PluginCatalog) -> Value {
             .map(|(id, title, dynamic)| json!({"id": id, "title": title, "dynamic": dynamic}))
             .collect::<Vec<_>>(),
         "colors": plugins.ui_colors().unwrap_or_default(),
-        "composer_max_rows": plugins.ui_layout().ok().flatten().and_then(|layout| layout.composer_max_rows),
+        "composer_max_rows": layout.as_ref().and_then(|layout| layout.composer_max_rows),
+        "layout": {
+            "content_width": layout.as_ref().and_then(|layout| layout.desktop_content_width),
+            "sidebar": layout.as_ref().and_then(|layout| layout.desktop_sidebar.clone()),
+            "density": layout.as_ref().and_then(|layout| layout.desktop_density.clone()),
+        },
     })
 }
 
 fn active_plugins_snapshot(
     state: &State<'_, DesktopState>,
 ) -> Result<(PluginCatalog, String, PathBuf)> {
-    let host = state.0.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (_, host) = state
+        .active_host()
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let host = host.lock().map_err(|error| anyhow::anyhow!("{error}"))?;
     if let Some(runtime) = host.runtime.as_ref() {
+        if !runtime
+            .capabilities()
+            .any_enabled(kroma::capabilities::CapabilityGroup::Plugins)
+        {
+            bail!("Plugins are disabled for this session");
+        }
         return Ok((
             runtime.plugins.clone(),
             runtime.agent.session_id().to_owned(),
@@ -147,6 +187,7 @@ pub async fn plugin_presentation(
                 "tool_labels": {}, "activity_frames": [], "statuses": [],
                 "widgets": [], "desktop_surfaces": [], "live_panel": null,
                 "shortcuts": [], "panels": [], "colors": {}, "composer_max_rows": null,
+                "layout": {"content_width": null, "sidebar": null, "density": null},
             })),
         },
     })
@@ -226,8 +267,15 @@ pub fn answer_question(
     picked: Vec<String>,
     typed: Option<String>,
     dismissed: bool,
+    project: Option<String>,
+    session: Option<String>,
 ) -> std::result::Result<(), String> {
-    let host = state.0.lock().map_err(ui_error)?;
+    let key = crate::target_key(&state, project.as_deref(), session.as_deref())?;
+    let host = state
+        .host_for(&key)
+        .context("That conversation is no longer open")
+        .map_err(ui_error)?;
+    let host = host.lock().map_err(ui_error)?;
     let answer = if dismissed {
         kroma::tools::AskAnswer::Dismissed
     } else {
@@ -236,7 +284,7 @@ pub fn answer_question(
             typed: typed.filter(|text| !text.trim().is_empty()),
         }
     };
-    if host.asker.answer(id, answer) {
+    if host.asker.answer(&key.session, id, answer) {
         Ok(())
     } else {
         Err("That question is no longer open".into())
@@ -256,9 +304,28 @@ pub async fn plugin_action(
         require_idle(host)?;
         let catalog = PluginCatalog::discover(&host.project)?;
         let plugin = id.as_deref().unwrap_or("");
+        if matches!(action.as_str(), "enable" | "disable") {
+            anyhow::ensure!(
+                catalog
+                    .summaries()?
+                    .iter()
+                    .any(|item| item["id"].as_str() == Some(plugin)),
+                "plugin '{plugin}' not found"
+            );
+            crate::set_capability_items_value(
+                host,
+                "defaults",
+                kroma::capabilities::CapabilityGroup::Plugins,
+                &std::collections::BTreeMap::from([(plugin.to_owned(), Some(action == "enable"))]),
+            )?;
+            return Ok(json!({
+                "message": format!("Plugin '{plugin}' {}", if action == "enable" { "enabled" } else { "disabled" }),
+                "restart_required": false,
+                "warning": null,
+                "plugins": PluginCatalog::discover(&host.project)?.summaries()?,
+            }));
+        }
         let message = match action.as_str() {
-            "enable" => catalog.set_enabled(plugin, true),
-            "disable" => catalog.set_enabled(plugin, false),
             "install" => {
                 let source = validate_plugin_source(Path::new(
                     path.as_deref().context("Plugin directory required")?,
@@ -288,7 +355,12 @@ pub async fn plugin_action(
 }
 
 pub fn attach_app(state: &DesktopState, app: AppHandle) {
-    if let Ok(mut host) = state.0.lock() {
-        host.app_handle = Some(app);
+    if let Ok(mut registry) = state.0.lock() {
+        registry.app_handle = Some(app.clone());
+        for host in registry.hosts.values() {
+            if let Ok(mut host) = host.lock() {
+                host.app_handle = Some(app.clone());
+            }
+        }
     }
 }

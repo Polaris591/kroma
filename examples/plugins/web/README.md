@@ -29,9 +29,9 @@ Environment keys work as a fallback and are never shown in settings:
 in the plugin settings file in plaintext, so prefer the environment on shared
 machines.
 
-`auto` (default) walks a chain ordered by answer quality — Exa public (keyless), Exa, Tavily, Brave,
+`auto` (default) walks a chain ordered by answer quality — Exa, Tavily, Brave,
 Kagi, You.com, Serper, Perplexity, Parallel, SerpApi, SearchApi, Linkup, Bocha,
-Search1API, Valyu, Firecrawl, SearXNG, Mwmbl — skipping backends that have no key. A Chinese query
+Search1API, Valyu, Exa public (keyless), Firecrawl, SearXNG, Mwmbl — skipping backends that have no key. A Chinese query
 starts at Bocha when that key exists. The chain advances only after a failure
 (network, timeout, rate limit, empty results, malformed answer); a
 misconfiguration or a bad query stops immediately. Explicit providers never
@@ -180,11 +180,13 @@ page, which is the cheapest way to answer a narrow question:
 {"url":"https://nodejs.org/api/globals.html","find":"AbortSignal.timeout"}
 ```
 
-Snapshots live in memory only, bounded to eight address names (a redirect uses
-two), and expire after two idle minutes. The window refreshes on every read, so
-a document that takes twenty continuations stays readable. After expiry or a
-restart, continuation returns `CACHE_MISS` without refetching: restart at 0 and
-use the new `next_start`.
+Snapshots live in memory only, bounded to twenty-four address names (a redirect
+uses two). A page read in one pass expires after two idle minutes. While a page
+has an open `next_start`, its snapshot is held for up to 30 idle minutes, so a
+long download, render or build between continuations does not invalidate it;
+finishing the page releases it back to the short window. After expiry or
+eviction, continuation returns `CACHE_MISS` without refetching: the previous
+`start_char` is invalid, so restart at 0 and use the new `next_start`.
 
 Downloads stop at 1.5 MB with a warning. PDFs are converted through the rendering
 service; other binary files are refused with an explanation.
@@ -213,16 +215,16 @@ Errors set `is_error: true`, a message that names the next step and a code:
 
 - HTTP(S) only; URLs with embedded credentials are rejected. Provider keys and
   error bodies never appear in results.
-- Any HTTP(S) destination is fetched, including a local development server, an
+- Any HTTP(S) destination is fetched directly, including a local development server, an
   intranet host or a proxy endpoint: the agent already has `shell` on the same
   machine, so blocking local addresses only broke ordinary work. The redirect
   limit still applies, and each hop is still an HTTP(S) URL.
-- No JavaScript execution, browser session, cookie jar, CAPTCHA solving or PDF
-  parsing. A page that returns only navigation (a JavaScript application shell)
-  fails with `UNREADABLE_PAGE` instead of pretending to be read.
-- Pages that need JavaScript, paywalls or logins need a static/raw URL or the
-  search snippet. There is no remote rendering service: no page URL leaves the
-  machine except to the search backend you configured.
+- Private/local addresses (such as `localhost`, `.local`, `.internal`, RFC 1918,
+  loopback and link-local IPs) are never forwarded to `exa_public` or Firecrawl if
+  the direct fetch fails or returns an unreadable shell.
+- No local headless browser execution, cookie jar, login session or CAPTCHA
+  solving. Static pages that return only navigation without a public remote fallback
+  fail with `UNREADABLE_PAGE` instead of pretending to be read.
 - Titles, snippets and fetched text are untrusted source data, not instructions.
 
 ## Verification
@@ -232,6 +234,6 @@ node --test examples/plugins/web/web.test.js examples/plugins/web/http.test.js e
 cargo test --test plugins_e2e
 ```
 
-At startup the plugin resolves every vendor host in the background, so the first search of a session does not pay the resolver cold start. Tests stub search APIs and use local HTTP servers for transport, redirects,
+Tests stub search APIs and use local HTTP servers for transport, redirects,
 gzip, continuation, cache expiry and protocol recovery. They do not prove
 provider uptime or relevance.

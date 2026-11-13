@@ -1,9 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { api, type PluginPresentation } from './api';
 import { get } from 'svelte/store';
 import {
-  activityGlyph, applyPluginUiEvent, applyPresentation, clearSessionPluginUi, livePluginPanel,
+  activityGlyph, applyPluginUiEvent, applyPresentation, applySnapshotPluginUi, clearSessionPluginUi, livePluginPanel, loadPresentation,
   pluginPanels, pluginShortcuts, pluginStatuses, pluginThemeStyle, pluginWidgets,
   composerCap, slotColor, toolLabel, toolLabels, shortcutFor,
+  EMPTY_LAYOUT, layoutStyle, normalizeLayout,
 } from './plugin-ui';
 
 describe('plugin presentation', () => {
@@ -97,7 +99,18 @@ describe('plugin colours and composer height', () => {
     expect(slotColor('accent', {accent: '#abc'})).toBe('#abc');
     expect(slotColor('accent', {accent: 'red'})).toBeNull();
     expect(slotColor('border', {})).toBeNull();
-    expect(pluginThemeStyle({background: '#111111', accent: 'bad'})).toBe('--surface:#111111');
+    expect(pluginThemeStyle({background: '#111111', accent: 'bad'})).toBe(
+      '--surface:#111111;color-scheme:dark;--text:#ffffff;--muted:#aaa7b4;--line:#aaa4bc30',
+    );
+  });
+
+  it('adapts background-only themes without overriding explicit plugin slots', () => {
+    expect(pluginThemeStyle({background: '#fff'})).toContain('color-scheme:light');
+    expect(pluginThemeStyle({background: '#fff'})).toContain('--text:#211b32');
+    const styled = pluginThemeStyle({background: '#fff', text: '#202020', muted: '#666666', border: '#cccccc', accent: '#262060'});
+    expect(styled).toBe('--surface:#fff;--line:#cccccc;--text:#202020;--muted:#666666;--plugin-accent:#262060;color-scheme:light;--plugin-accent-ink:#ffffff');
+    expect(pluginThemeStyle({accent: 'red;position:fixed', background: 'invalid'})).toBe('');
+    expect(pluginThemeStyle({})).toBe('');
   });
 
   it('caps the composer at the declared rows without exceeding the built-in limit', () => {
@@ -105,5 +118,59 @@ describe('plugin colours and composer height', () => {
     expect(composerCap(40)).toBe(186);
     expect(composerCap(null)).toBe(186);
     expect(composerCap(0)).toBe(186);
+  });
+});
+
+describe('plugin desktop layout', () => {
+  it('accepts a complete layout and clamps the reading width', () => {
+    expect(normalizeLayout({content_width: 620, sidebar: 'hidden', density: 'compact'}))
+      .toEqual({content_width: 620, sidebar: 'hidden', density: 'compact'});
+    expect(normalizeLayout({content_width: 5000}).content_width).toBe(1400);
+    expect(normalizeLayout({content_width: 40}).content_width).toBe(360);
+  });
+
+  it('drops anything it cannot use instead of breaking the built-in look', () => {
+    expect(normalizeLayout(null)).toEqual(EMPTY_LAYOUT);
+    expect(normalizeLayout({content_width: NaN, sidebar: 'aside', density: 'dense'}))
+      .toEqual(EMPTY_LAYOUT);
+  });
+
+  it('turns a declared width into one custom property', () => {
+    expect(layoutStyle({content_width: 640, sidebar: null, density: null}))
+      .toBe('--content-width:640px');
+    expect(layoutStyle(EMPTY_LAYOUT)).toBe('');
+  });
+});
+
+describe('plugin presentation request ordering', () => {
+  it('ignores an older reply after a newer session presentation', async () => {
+    let resolveOld!: (value: PluginPresentation) => void;
+    const empty: PluginPresentation = {tool_labels: {}, activity_frames: [], statuses: [], shortcuts: [], panels: [], colors: {}, composer_max_rows: null};
+    const mock = vi.spyOn(api, 'pluginPresentation')
+      .mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; }))
+      .mockResolvedValueOnce(empty);
+    try {
+      const old = loadPresentation();
+      await loadPresentation();
+      resolveOld({...empty, tool_labels: {stale: '旧会话'}});
+      await old;
+      expect(get(toolLabels)).toEqual({});
+    } finally { mock.mockRestore(); applyPresentation(null); }
+  });
+
+  it('clears disabled plugin UI and invalidates an in-flight reply', async () => {
+    let resolve!: (value: PluginPresentation) => void;
+    const presentation: PluginPresentation = {tool_labels: {stale: '旧插件'}, activity_frames: [], statuses: [], shortcuts: [], panels: [], colors: {}, composer_max_rows: null};
+    const mock = vi.spyOn(api, 'pluginPresentation').mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    try {
+      applyPresentation(presentation);
+      const pending = loadPresentation();
+      applySnapshotPluginUi({capabilities: {tools: true, mcp: true, skills: true, plugins: false}} as import('./api').SessionSnapshot);
+      resolve(presentation);
+      await pending;
+      expect(get(toolLabels)).toEqual({});
+      expect(get(pluginWidgets)).toEqual([]);
+      expect(get(livePluginPanel)).toBeNull();
+    } finally { mock.mockRestore(); applyPresentation(null); }
   });
 });

@@ -29,7 +29,7 @@ export function composerAction(state: ComposerGate): ComposerAction {
 export function composerPlaceholder(state: ComposerGate): string {
   if (state.compacting) return COMPACTING_PLACEHOLDER;
   if (state.running) return '向正在运行的任务补充指令…';
-  return state.ready ? '告诉 Kroma 你想做什么…' : '连接模型后开始对话';
+  return state.ready ? '想做什么？' : '连接模型后开始对话';
 }
 
 /** The single hint line under the composer. File navigation wins while the

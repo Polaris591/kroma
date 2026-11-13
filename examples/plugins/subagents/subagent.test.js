@@ -97,6 +97,25 @@ async function start(h, request, extra = {}) {
     dataDir: dir, killGraceMs: 20, ...extra});
 }
 
+test("a child resolves its own model instead of the parent's live connection", async () => {
+  const dir = workspace();
+  try {
+    const request = {...batch([{task: "do the thing"}], {workdir: dir}),
+      model_connection: {model: "parent-model", base_url: "https://parent.example/v1",
+        api_protocol: "responses", reasoning_effort: "high", provider_profile: "parent"}};
+    const h = harness();
+    const started = await start(h, request, {taskTimeoutMs: 5000});
+    const env = h.calls[0].options.env;
+    for (const [name, parent] of [["KROMA_MODEL", "parent-model"],
+      ["KROMA_BASE_URL", "https://parent.example/v1"], ["KROMA_API_PROTOCOL", "responses"],
+      ["KROMA_REASONING_EFFORT", "high"], ["KROMA_PROVIDER_PROFILE", "parent"]]) {
+      assert.notEqual(env[name], parent);
+    }
+    h.calls[0].finish({frames: [{type: "result", text: "the answer"}]});
+    assert.equal((await started.done).status, "completed");
+  } finally { cleanup(dir); }
+});
+
 test("evidence retention prunes aged runs but preserves active and resumed work", () => {
   const root = workspace();
   const runs = path.join(root, "runs");
@@ -146,7 +165,14 @@ test("startBatch hands back a run while its child is still working", async () =>
     assert.equal(call.options.env.KROMA_WORKDIR, fs.realpathSync(dir));
     assert.equal(call.options.env.KROMA_SUBAGENT_DEPTH, "1");
     const policy = read(started.tasks[0].artifacts, "policy.json");
-    assert.deepEqual(policy.hostDeniedTools, ["subagent", "memory_remember", "memory_forget"]);
+    assert.deepEqual(policy.hostDeniedTools, [
+      "subagent",
+      "memory_remember",
+      "memory_forget",
+      "ask",
+      "goal_checkpoint",
+      "todo_write",
+    ]);
     call.finish({frames: [{type: "result", text: "the answer"}]});
     const summary = await started.done;
     assert.equal(summary.status, "completed");
@@ -401,4 +427,26 @@ test("the label defaults to the first task line and is bounded", async () => {
     h.calls.forEach(call => call.finish({frames: [{type: "result", text: "ok"}]}));
     await started.done;
   } finally { cleanup(dir); }
+});
+
+test("depth > 8 reports DEPTH_LIMIT and dispatch rejects mixed tasks + shorthand", async () => {
+  const dir = workspace();
+  const h = harness();
+  const prevDepth = process.env.KROMA_SUBAGENT_DEPTH;
+  try {
+    process.env.KROMA_SUBAGENT_DEPTH = "9";
+    await assert.rejects(start(h, batch([{task: "x"}], {workdir: dir})), {code: "DEPTH_LIMIT"});
+    delete process.env.KROMA_SUBAGENT_DEPTH;
+    await assert.rejects(dispatch({
+      type: "tool",
+      name: "subagent",
+      workdir: dir,
+      data_dir: dir,
+      arguments: {tasks: [{task: "a"}], cwd: dir},
+    }, {spawn: h.spawn, dataDir: dir}), {code: "INVALID_ARGUMENT"});
+  } finally {
+    if (prevDepth === undefined) delete process.env.KROMA_SUBAGENT_DEPTH;
+    else process.env.KROMA_SUBAGENT_DEPTH = prevDepth;
+    cleanup(dir);
+  }
 });

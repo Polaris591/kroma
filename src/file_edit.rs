@@ -20,14 +20,35 @@ use std::{
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Deserialize)]
+struct EditHunk {
+    /// Text to replace; must occur exactly once in the file.
+    old: String,
+    /// Replacement text; an empty string deletes the matched text.
+    new: String,
+}
+
+#[derive(Deserialize)]
 struct EditArgs {
     /// Path relative to the agent's working directory, or an absolute path
     /// inside it.
     path: String,
     /// Text to replace; must occur exactly once in the file.
-    old: String,
+    old: Option<String>,
     /// Replacement text; an empty string deletes the matched text.
-    new: String,
+    new: Option<String>,
+    /// Ordered list of `{old, new}` replacements applied atomically.
+    edits: Option<Vec<EditHunk>>,
+}
+
+impl EditArgs {
+    fn into_hunks(self) -> Result<(String, Vec<EditHunk>)> {
+        let hunks = match (self.old, self.new, self.edits) {
+            (Some(old), Some(new), None) => vec![EditHunk { old, new }],
+            (None, None, Some(edits)) if !edits.is_empty() => edits,
+            _ => bail!("provide either (`old` and `new`) or a non-empty `edits` array"),
+        };
+        Ok((self.path, hunks))
+    }
 }
 
 pub struct FileEdit;
@@ -42,15 +63,29 @@ impl Tool for FileEdit {
             "type": "function",
             "function": {
                 "name": "edit_file",
-                "description": "Replace one exact, uniquely occurring snippet in a text file inside the working directory, or create a new file by passing an empty `old`. Prefer this over shell heredoc/sed/perl when changing code: it fails without writing when `old` is missing or appears more than once, reports the line of the edit, preserves the file's CRLF or LF line endings and its mode.",
+                "description": "Replace one exact, uniquely occurring snippet (or multiple ordered snippets via `edits`) in a text file inside the working directory, or create a new file by passing an empty `old` (missing parent directories inside the working directory are created automatically). Prefer this over shell heredoc/sed/perl when changing code: it fails without writing if any hunk is missing or matches more than once, reports the edited line, preserves the file's CRLF or LF line endings and its mode.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "File path relative to the working directory, or an absolute path inside it; `..` is rejected"},
                         "old": {"type": "string", "description": "Exact original text to replace; must occur exactly once. Empty only when creating a new file."},
-                        "new": {"type": "string", "description": "Replacement text; an empty string deletes the matched text. For a new file, the whole content."}
+                        "new": {"type": "string", "description": "Replacement text; an empty string deletes the matched text. For a new file, the whole content."},
+                        "edits": {
+                            "type": "array",
+                            "minItems": 1,
+                            "description": "Multiple ordered `{old, new}` replacements applied atomically to an existing file instead of top-level `old`/`new`.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "old": {"type": "string", "description": "Exact original text to replace; must occur exactly once."},
+                                    "new": {"type": "string", "description": "Replacement text; an empty string deletes the matched text."}
+                                },
+                                "required": ["old", "new"],
+                                "additionalProperties": false
+                            }
+                        }
                     },
-                    "required": ["path", "old", "new"],
+                    "required": ["path"],
                     "additionalProperties": false
                 }
             }
@@ -73,51 +108,69 @@ fn edit(call: &ToolCall, workdir: &Path) -> Result<Value> {
     }
     let args: EditArgs =
         serde_json::from_str(&call.function.arguments).context("invalid edit_file arguments")?;
-    let (target, exists) = resolve_target(workdir, &args.path)?;
+    let (path, hunks) = args.into_hunks()?;
+    let (target, exists) = resolve_target(workdir, &path)?;
     if !exists {
         // Creating a file: an empty `old` means "no text to replace yet".
-        if !args.old.is_empty() {
-            bail!("file not found: {}", args.path);
+        let [only] = hunks.as_slice() else {
+            bail!("file not found: {path}");
+        };
+        if !only.old.is_empty() {
+            bail!("file not found: {path}");
         }
-        let data = args.new.into_bytes();
-        write_atomic(&target, &data, None)?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let data = only.new.as_bytes();
+        write_atomic(&target, data, None)?;
         return Ok(json!({
-            "path": args.path,
+            "path": path,
             "bytes": data.len(),
             "created": true,
         }));
     }
-    if args.old.is_empty() {
-        bail!("old must not be empty; pass the exact text to replace");
-    }
-    let bytes =
-        fs::read(&target).with_context(|| format!("cannot read {}: file not found", args.path))?;
-    let original = String::from_utf8(bytes)
-        .with_context(|| format!("{} is not valid UTF-8 text", args.path))?;
+    let bytes = fs::read(&target).with_context(|| format!("cannot read {path}: file not found"))?;
+    let original =
+        String::from_utf8(bytes).with_context(|| format!("{path} is not valid UTF-8 text"))?;
     // Match on LF-normalized text so a CRLF file accepts snippets written with
-    // either style, then restore the file's own endings before writing.
-    let (content, old, new, crlf) = normalize(original, &args.old, &args.new);
-    let occurrences = content.matches(&old).count();
-    match occurrences {
-        0 => bail!("old text not found in {}", args.path),
-        1 => {}
-        count => bail!(
-            "old text appears {count} times in {}; include more surrounding context to make it unique",
-            args.path
-        ),
-    }
-    let position = content.find(&old).expect("counted occurrence");
-    let line = content[..position].matches('\n').count() + 1;
-    let replaced = format!(
-        "{}{}{}",
-        &content[..position],
-        new,
-        &content[position + old.len()..]
-    );
-    let data = if crlf {
-        replaced.replace('\n', "\r\n").into_bytes()
+    // either style, then restore the file's own endings once after all hunks.
+    let mut lines = Vec::with_capacity(hunks.len());
+    let crlf = original.contains("\r\n");
+    let mut content = if crlf {
+        original.replace("\r\n", "\n")
     } else {
-        replaced.into_bytes()
+        original
+    };
+    for hunk in &hunks {
+        if hunk.old.is_empty() {
+            bail!("old must not be empty; pass the exact text to replace");
+        }
+        // `content` is already LF-normalized above, so strip `\r\n` from each
+        // hunk unconditionally rather than only when `content` still contains CRLF.
+        let old = hunk.old.replace("\r\n", "\n");
+        let new = hunk.new.replace("\r\n", "\n");
+        let occurrences = content.matches(&old).count();
+        match occurrences {
+            0 => bail!("old text not found in {path}"),
+            1 => {}
+            count => bail!(
+                "old text appears {count} times in {path}; include more surrounding context to make it unique"
+            ),
+        }
+        let position = content.find(&old).expect("counted occurrence");
+        let line = content[..position].matches('\n').count() + 1;
+        lines.push(line);
+        content = format!(
+            "{}{}{}",
+            &content[..position],
+            new,
+            &content[position + old.len()..]
+        );
+    }
+    let data = if crlf {
+        content.replace('\n', "\r\n").into_bytes()
+    } else {
+        content.into_bytes()
     };
     // A rewritten script must stay executable: reuse the file's own mode.
     #[cfg(unix)]
@@ -130,26 +183,30 @@ fn edit(call: &ToolCall, workdir: &Path) -> Result<Value> {
     #[cfg(not(unix))]
     let mode = None;
     write_atomic(&target, &data, mode)?;
-    Ok(json!({
-        "path": args.path,
-        "bytes": data.len(),
-        "line": line,
-    }))
+    if lines.len() == 1 {
+        Ok(json!({
+            "path": path,
+            "bytes": data.len(),
+            "line": lines[0],
+        }))
+    } else {
+        Ok(json!({
+            "path": path,
+            "bytes": data.len(),
+            "line": lines[0],
+            "lines": lines,
+            "applied": hunks.len(),
+        }))
+    }
 }
 
-/// Split the file into match text and (optionally) a CRLF flag. Both the file
-/// and the snippets are normalized together, so neither style can silently
-/// produce mixed endings after the write.
-fn normalize(original: String, old: &str, new: &str) -> (String, String, String, bool) {
-    if !original.contains("\r\n") {
-        return (original, old.to_owned(), new.to_owned(), false);
+/// Resolve a workspace file that must already exist as a regular file inside `workdir`.
+pub(crate) fn resolve_existing_file(workdir: &Path, raw: &str) -> Result<PathBuf> {
+    let (target, exists) = resolve_target(workdir, raw)?;
+    if !exists {
+        bail!("file not found: {raw}");
     }
-    (
-        original.replace("\r\n", "\n"),
-        old.replace("\r\n", "\n"),
-        new.replace("\r\n", "\n"),
-        true,
-    )
+    Ok(target)
 }
 
 /// Resolve a model-supplied path inside the working directory. An absolute path
@@ -187,17 +244,42 @@ fn resolve_target(workdir: &Path, raw: &str) -> Result<(PathBuf, bool)> {
         }
         Err(_) if joined.exists() => bail!("not a regular file: {raw}"),
         Err(_) => {
-            // A new file: its existing directory is what must stay inside the
-            // workspace, including through a link.
-            let parent = joined.parent().context("path has no parent directory")?;
-            let parent = parent
-                .canonicalize()
-                .with_context(|| format!("directory not found: {}", parent.display()))?;
-            if path_display::strip_prefix_equivalent(&parent, &root).is_none() {
+            if fs::symlink_metadata(&joined).is_ok() {
                 bail!("path resolves outside the working directory: {raw}");
             }
+            // A new file: walk up to the nearest existing ancestor directory and
+            // confirm it canonicalizes inside the working directory before
+            // re-attaching non-existent subdirectories.
             let name = joined.file_name().context("path has no file name")?;
-            Ok((parent.join(name), false))
+            let mut missing = vec![name];
+            let mut cursor = joined.parent().context("path has no parent directory")?;
+            while !cursor.exists() {
+                if fs::symlink_metadata(cursor).is_ok() {
+                    bail!("path resolves outside the working directory: {raw}");
+                }
+                missing.push(
+                    cursor
+                        .file_name()
+                        .context("path resolves outside the working directory")?,
+                );
+                cursor = cursor
+                    .parent()
+                    .context("path resolves outside the working directory")?;
+            }
+            let ancestor = cursor
+                .canonicalize()
+                .with_context(|| format!("directory not found: {}", cursor.display()))?;
+            if path_display::strip_prefix_equivalent(&ancestor, &root).is_none() {
+                bail!("path resolves outside the working directory: {raw}");
+            }
+            if !ancestor.is_dir() {
+                bail!("not a directory: {}", cursor.display());
+            }
+            let mut target = ancestor;
+            for part in missing.into_iter().rev() {
+                target.push(part);
+            }
+            Ok((target, false))
         }
     }
 }
@@ -422,9 +504,11 @@ mod tests {
             fs::read_to_string(dir.join("code.rs"))?,
             "fn main() { run(); }\n"
         );
-        let created = run(&dir, "src/new.rs", "", "pub fn new() {}\n").await;
-        assert!(created.is_error, "a missing directory is reported");
-        fs::create_dir_all(dir.join("src"))?;
+        let missing_edit = run(&dir, "src/missing.rs", "old", "new").await;
+        assert!(
+            missing_edit.is_error,
+            "editing a missing file is still rejected"
+        );
         let created = run(&dir, "src/new.rs", "", "pub fn new() {}\n").await;
         assert!(!created.is_error, "{}", created.content);
         assert!(
@@ -484,6 +568,83 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(entries, vec!["code.rs".to_owned()]);
+        fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn creates_missing_parent_directories_for_new_file_inside_workspace() -> Result<()> {
+        let dir = scratch_dir("nested-create");
+        let outside = scratch_dir("nested-outside");
+        let result = run(&dir, "deep/sub/dir/new.txt", "", "hello nested\n").await;
+        assert!(!result.is_error, "{}", result.content);
+        let report: Value = serde_json::from_str(&result.content)?;
+        assert_eq!(report["created"], true);
+        assert_eq!(
+            fs::read_to_string(dir.join("deep/sub/dir/new.txt"))?,
+            "hello nested\n"
+        );
+
+        // Must still reject creating through a parent directory that stays outside workspace.
+        let outside_path = outside
+            .join("nested/escape.txt")
+            .to_string_lossy()
+            .into_owned();
+        let rejected = run(&dir, &outside_path, "", "nope").await;
+        assert!(rejected.is_error);
+        assert!(!outside.join("nested").exists());
+
+        fs::remove_dir_all(dir)?;
+        fs::remove_dir_all(outside)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multi_hunk_edits_apply_atomically_and_rollback_on_failure() -> Result<()> {
+        let dir = scratch_dir("multi-hunk");
+        let path = dir.join("code.rs");
+        fs::write(&path, "one\ntwo\nthree\n")?;
+        let bad_call = ToolCall {
+            id: "multi-bad".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "edit_file".into(),
+                arguments: json!({
+                    "path": "code.rs",
+                    "edits": [
+                        {"old": "one", "new": "ONE"},
+                        {"old": "missing", "new": "THREE"}
+                    ]
+                })
+                .to_string(),
+            },
+        };
+        let failed = FileEdit.execute(&bad_call, context(&dir)).await;
+        assert!(failed.is_error);
+        assert_eq!(fs::read_to_string(&path)?, "one\ntwo\nthree\n");
+
+        let good_call = ToolCall {
+            id: "multi-good".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "edit_file".into(),
+                arguments: json!({
+                    "path": "code.rs",
+                    "edits": [
+                        {"old": "one", "new": "ONE"},
+                        {"old": "three", "new": "THREE"}
+                    ]
+                })
+                .to_string(),
+            },
+        };
+        let ok = FileEdit.execute(&good_call, context(&dir)).await;
+        assert!(!ok.is_error, "{}", ok.content);
+        let report: Value = serde_json::from_str(&ok.content)?;
+        assert_eq!(report["applied"], 2);
+        assert_eq!(report["lines"], json!([1, 3]));
+        assert_eq!(fs::read_to_string(&path)?, "ONE\ntwo\nTHREE\n");
+
         fs::remove_dir_all(dir)?;
         Ok(())
     }

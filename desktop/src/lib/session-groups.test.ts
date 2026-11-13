@@ -14,7 +14,7 @@ const groups: SessionGroup[] = [
 
 describe('matchedContentIds', () => {
   it('scopes ids by project', () => {
-    expect(matchedContentIds([{ project: 'p://one', id: 'b', snippet: '' }]))
+    expect(matchedContentIds([{ project: 'p://one', id: 'b', snippet: '', role: 'user', message_index: 1 }]))
       .toEqual(new Set(['p://one\u0000b']));
   });
 });

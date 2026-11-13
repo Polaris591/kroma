@@ -63,7 +63,7 @@ cleanup rather than a claim that adding an ignore rule makes it private.
 
 | Tool | Purpose |
 | --- | --- |
-| `memory_remember(kind,text,quote?,core?,paths?,evidence?,supersedes?)` | Verified user rules or optional review notes. User-rule `text` is a compatibility/paraphrase field; the verified quote is authoritative. |
+| `memory_remember(kind,text,quote?,core?,paths?,evidence?,supersedes?)` | Save durable rules (`text`) backed by a verified user quote (`quote`, 3..=4000 chars), or optional review notes with evidence. |
 | `memory_search(query,paths?,limit?)` | Keywords or a natural sentence, up to 512 characters. The total result count honors `limit`. |
 | `memory_read(ids)` | Up to eight IDs; available records plus missing IDs. Oversized batches return whole records and deferred IDs for the next read. |
 | `memory_forget(id)` | Stop future use when the user asks; reversible with restore. |

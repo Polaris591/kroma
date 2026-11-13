@@ -449,7 +449,7 @@ function policyDocument() {
     prompt: "You are a delegated subagent. Complete the task and return the answer, the evidence and the limits of what you verified. Do not ask the parent questions.",
     tools: null,
     disallowedTools: [],
-    hostDeniedTools: ["subagent", "memory_remember", "memory_forget"],
+    hostDeniedTools: ["subagent", "memory_remember", "memory_forget", "ask", "goal_checkpoint", "todo_write"],
     shell: "allow",
     maxTurns: 0,
     maxTokens: 0,
@@ -589,7 +589,6 @@ async function runTask(entry, context) {
     }
 
     try {
-      const connection = context.connection;
       child = context.run.spawn(context.executable, ["--json"], {
         cwd: entry.cwd,
         env: {
@@ -601,11 +600,6 @@ async function runTask(entry, context) {
           KROMA_CHILD_DEPTH: "1",
           KROMA_CHILD_SKIP_TASK_SUMMARY: "1",
           ...(context.plugins === "inherit" ? {} : {KROMA_PLUGINS: "off"}),
-          ...(connection?.base_url ? {KROMA_BASE_URL: connection.base_url} : {}),
-          ...(connection?.api_protocol ? {KROMA_API_PROTOCOL: connection.api_protocol} : {}),
-          ...(connection?.provider_profile ? {KROMA_PROVIDER_PROFILE: connection.provider_profile} : {}),
-          ...(connection?.reasoning_effort ? {KROMA_REASONING_EFFORT: connection.reasoning_effort} : {}),
-          ...(connection?.model ? {KROMA_MODEL: connection.model} : {}),
         },
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
@@ -735,13 +729,11 @@ async function runTask(entry, context) {
 async function startBatch(request, options = {}) {
   const workdir = options.workdir ?? request?.workdir ?? process.cwd();
   const config = {...(request?.config ?? {}), ...(options.config ?? {})};
-  // Host-supplied identity is an out-of-band, non-secret snapshot of the
-  // current parent session, so a child uses the same model as its parent.
-  const connection = request?.model_connection && typeof request.model_connection === "object"
-    && !Array.isArray(request.model_connection) ? request.model_connection : null;
+  // A child resolves its own model: the parent's live connection is never
+  // forwarded, so a child always runs the machine's configured default model.
   // A malformed depth is refused rather than read as zero: reading it as
   // "top level" is what would allow unbounded nesting.
-  const depth = integer(process.env.KROMA_SUBAGENT_DEPTH, "KROMA_SUBAGENT_DEPTH", 0, 8, 0);
+  const depth = integer(process.env.KROMA_SUBAGENT_DEPTH, "KROMA_SUBAGENT_DEPTH", 0, Number.MAX_SAFE_INTEGER, 0);
   if (depth >= 1) {
     throw new SubagentError("DEPTH_LIMIT", "a subagent cannot delegate further; do the work directly");
   }
@@ -763,11 +755,11 @@ async function startBatch(request, options = {}) {
   const rawDataDir = options.dataDir ?? request?.data_dir;
   const dataDir = rawDataDir ? localPath(rawDataDir) : null;
   if (!dataDir) throw new SubagentError("ARCHIVE_ERROR", "plugin data directory is unavailable", true);
-  if (liveChildren.size + maxParallel > LIMITS.maxChildren) {
+  const entries = tasks(request, workdir, dataDir, options.isActive ?? (() => false));
+  if (liveChildren.size + Math.min(maxParallel, entries.length) > LIMITS.maxChildren) {
     throw new SubagentError("RUN_LIMIT",
       `too many subagents are already running (${liveChildren.size}); wait for one to finish`);
   }
-  const entries = tasks(request, workdir, dataDir, options.isActive ?? (() => false));
 
   pruneRuns(dataDir, new Set(entries
     .filter(entry => entry.resume)
@@ -799,7 +791,7 @@ async function startBatch(request, options = {}) {
     for (const child of run.children) run.terminate(child);
     for (const stop of [...run.stops]) stop(error.message);
   };
-  const context = {runId: id, runDir, executable, connection, taskTimeoutMs,
+  const context = {runId: id, runDir, executable, taskTimeoutMs,
     killGraceMs, run, depth: depth + 1, total: entries.length, plugins: childPlugins,
     progress: typeof options.onProgress === "function" ? options.onProgress : () => {}};
 
@@ -880,9 +872,9 @@ function renderTask(task, index, total, budget, chinese) {
   } else {
     lines.push(chinese ? "（该子代理没有留下文字回答）" : "(no text answer)");
   }
-  lines.push(`   证据目录: ${task.artifacts}`);
+  lines.push(chinese ? `   证据目录: ${task.artifacts}` : `   artifacts: ${task.artifacts}`);
   if (fs.existsSync(path.join(task.artifacts, "session.json"))) {
-    lines.push(`   继续该子代理：tasks[].resume = "${task.resume}"`);
+    lines.push(chinese ? `   继续该子代理：tasks[].resume = "${task.resume}"` : `   resume: tasks[].resume = "${task.resume}"`);
   }
   return {text: lines.join("\n") + "\n", used: text.length};
 }
@@ -919,8 +911,17 @@ async function dispatch(request, options = {}) {
   }
   const progress = typeof options.onProgress === "function" ? options.onProgress : () => {};
   const args = taskOptions(request.arguments ?? {});
-  const batch = args.tasks ?? (args.task ? [{task: args.task,
-    ...(args.cwd ? {cwd: args.cwd} : {}), ...(args.label ? {label: args.label} : {})}] : null);
+  const hasBatch = args.tasks !== undefined;
+  const hasShorthand = ["task", "cwd", "label", "resume"].some(key => args[key] !== undefined);
+  if (hasBatch && hasShorthand) {
+    throw new SubagentError("INVALID_ARGUMENT", "do not combine tasks with top-level task, cwd, label or resume");
+  }
+  const batch = hasBatch ? args.tasks : (args.task !== undefined ? [{
+    task: args.task,
+    ...(args.cwd !== undefined ? {cwd: args.cwd} : {}),
+    ...(args.label !== undefined ? {label: args.label} : {}),
+    ...(args.resume !== undefined ? {resume: args.resume} : {}),
+  }] : null);
   if (!batch) throw new SubagentError("INVALID_ARGUMENT", "tasks must be a nonempty array");
   const started = await startBatch({...request, arguments: {tasks: batch}},
     {...options, onProgress: progress});

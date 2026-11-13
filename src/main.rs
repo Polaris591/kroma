@@ -552,6 +552,11 @@ fn handle_running_input(handle: &TaskInput, text: &str) {
         }
     } else if text == "/queue" || text == "/steer" {
         eprintln!("Usage: /steer <instruction> or /queue <task>.");
+    } else if let Some(instruction) = text.strip_prefix("/steer ") {
+        match handle.steer(instruction) {
+            Ok(()) => eprintln!("[steer] Accepted; will apply at the next model turn."),
+            Err(error) => eprintln!("[steer] {error:#}"),
+        }
     } else if matches!(
         text,
         "/exit"
@@ -572,9 +577,10 @@ fn handle_running_input(handle: &TaskInput, text: &str) {
         || text.starts_with("/restore-files ")
     {
         eprintln!("[task] Session commands are available after the current task. Ctrl+C cancels.");
+    } else if kroma::commands::looks_like_command(text) {
+        eprintln!("[task] Command unavailable while a task is running. Ctrl+C cancels.");
     } else {
-        let instruction = text.strip_prefix("/steer ").unwrap_or(text);
-        match handle.steer(instruction) {
+        match handle.steer(text) {
             Ok(()) => eprintln!("[steer] Accepted; will apply at the next model turn."),
             Err(error) => eprintln!("[steer] {error:#}"),
         }
@@ -668,7 +674,9 @@ async fn dispatch(command: kroma::cli::Command) -> Result<()> {
             let dir = PathBuf::from(home).join(".kroma").join("sessions");
             let report = kroma::sessions_prune::prune(
                 &dir,
-                std::time::Duration::from_secs(days * 24 * 60 * 60),
+                std::time::Duration::from_secs(
+                    days.checked_mul(86_400).context("prune age is too large")?,
+                ),
                 std::time::SystemTime::now(),
             )?;
             let unit = if days == 1 { "day" } else { "days" };
@@ -696,24 +704,10 @@ async fn dispatch(command: kroma::cli::Command) -> Result<()> {
             );
             Ok(())
         }
-        Command::TrustProject { revoke } => {
-            let dir = env::var("KROMA_WORKDIR")
-                .map(PathBuf::from)
-                .or_else(|_| env::current_dir())?
-                .canonicalize()?;
-            if revoke {
-                kroma::mcp::revoke_project_mcp(&dir)?;
-                kroma::cli_println!(
-                    "Revoked project MCP trust for {}. The project's .kroma/mcp.json will not load until approved again.",
-                    dir.display()
-                );
-            } else {
-                let config = kroma::mcp::trust_project_mcp(&dir)?;
-                kroma::cli_println!(
-                    "Trusted project MCP config {}. Re-run this command after editing the file.",
-                    config.display()
-                );
-            }
+        Command::TrustProject { .. } => {
+            kroma::cli_println!(
+                "trust-project is obsolete and has no effect (including --revoke). Project .kroma/mcp.json loads directly; MCP approval is not required."
+            );
             Ok(())
         }
         Command::RecoverContext(session) => {

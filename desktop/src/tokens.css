@@ -1,0 +1,71 @@
+:root {
+  color-scheme: dark;
+  --bg: #19191e;
+  --surface: var(--bg);
+  --text: #eeedf2;
+  --muted: #aaa7b4;
+  --default-accent: #b8ace8;
+  --accent: var(--default-accent);
+  --accent-ink: #211b32;
+  --danger: #e6a0a7;
+  --warning: #d8b580;
+  --success: #98bba5;
+  --info: #a8b8e2;
+  --line: #aaa4bc30;
+  --bg-2: #212127;
+  --bg-3: #29282f;
+  --hairline: #aaa4bc17;
+  --hairline-strong: var(--line);
+  --wash-1: #eeedf208;
+  --wash-2: #eeedf211;
+  --wash-3: #eeedf21a;
+  --feint: #eeedf204;
+  --radius-sm: 6px;
+  --radius-md: 9px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --content-width: 744px;
+  --page-gutter: 32px;
+  --sidebar-width: 244px;
+  --mono: "Cascadia Code", "JetBrains Mono", Consolas, ui-monospace, monospace;
+  font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  color: var(--text);
+  background: var(--bg);
+}
+
+/* Surfaces are derived at the theme boundary: plugin colour overrides must
+   still reach host UI, including a light theme's native form controls. Accent
+   is a small interaction cue, not the colour of every primary button. */
+.app-shell {
+  --accent: var(--plugin-accent, light-dark(#6850a4, var(--default-accent)));
+  --accent-ink: var(--plugin-accent-ink, #211b32);
+  --action-bg: var(--plugin-accent, var(--text));
+  --action-ink: var(--plugin-accent-ink, var(--surface));
+  --action-hover: color-mix(in srgb, var(--action-bg), var(--surface) 12%);
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
+  --accent-line: color-mix(in srgb, var(--accent) 32%, transparent);
+  --danger: light-dark(#a6374b, #e6a0a7);
+  --danger-ink: light-dark(#fff, #30151c);
+  --warning: light-dark(#89601f, #d8b580);
+  --success: light-dark(#3b7954, #98bba5);
+  --info: light-dark(#4e679f, #a8b8e2);
+  --bg-2: color-mix(in srgb, var(--surface), var(--text) 3.5%);
+  --bg-3: color-mix(in srgb, var(--surface), var(--text) 7%);
+  --panel-surface: light-dark(color-mix(in srgb, var(--surface), #fff 65%), var(--bg-2));
+  --floating-surface: light-dark(color-mix(in srgb, var(--surface), #fff 80%), var(--bg-3));
+  --field-surface: light-dark(color-mix(in srgb, var(--surface), #fff 75%), color-mix(in srgb, var(--surface), #000 16%));
+  --sidebar-surface: light-dark(color-mix(in srgb, var(--surface), var(--text) 3%), color-mix(in srgb, var(--surface), #000 16%));
+  --code-surface: light-dark(color-mix(in srgb, var(--surface), var(--text) 2%), color-mix(in srgb, var(--surface), #000 16%));
+  --hairline: color-mix(in srgb, var(--line) 48%, transparent);
+  --hairline-strong: var(--line);
+  --wash-1: color-mix(in srgb, var(--text) 3%, transparent);
+  --wash-2: color-mix(in srgb, var(--text) 6%, transparent);
+  --wash-3: color-mix(in srgb, var(--text) 10%, transparent);
+  --overlay-dim: light-dark(#19132235, #08070eb3);
+  --shadow-sm: 0 2px 6px light-dark(#20162c08, #0002);
+  --shadow-float: 0 16px 48px light-dark(#20162c1f, #0006), 0 4px 12px light-dark(#20162c0d, #0003);
+  --shadow-dialog: 0 28px 80px light-dark(#20162c2b, #0008), 0 6px 20px light-dark(#20162c14, #0004);
+}

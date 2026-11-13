@@ -2,19 +2,22 @@
   import { onDestroy, tick } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import {
-    ChevronDown, ChevronUp, FileText, ListTodo, Paperclip, Pause, Play,
-    Send, Square, X,
+    ArrowUp, ChevronDown, ChevronUp, CornerUpLeft, FileText, ListTodo, Paperclip, Pause, Play,
+    Square, X,
   } from '@lucide/svelte';
   import { api, type SessionSnapshot } from '../lib/api';
+  import { attachmentName, attachmentStateMessage, looksLikeImage } from '../lib/attachments';
+  import { desktopCommandMessage } from '../lib/native-error';
+  import AttachmentImage from './AttachmentImage.svelte';
+  import AttachmentPreviewDialog from './AttachmentPreviewDialog.svelte';
   import { cachePercentage } from '../lib/format';
   import {
-    canCompose, composerAction, composerPlaceholder, composerTip,
-    COMPACTING_TIP, type ComposerGate,
+    canCompose, composerPlaceholder, type ComposerGate,
   } from '../lib/composer';
-  import { appDrafts, browserDraftStorage, persistDraftText, readStoredDraft } from '../lib/draft-cache';
-  import { draftStorageKey } from '../lib/drafts';
+  import { appDrafts, browserDraftStorage, persistDraft, readStoredDraft } from '../lib/draft-cache';
+  import { draftStorageKey, MAX_DRAFT_LENGTH, type DraftWrite } from '../lib/drafts';
   import { atTokenRange, insertFileReference } from '../lib/file-suggest';
-  import type { FollowupTask } from '../lib/followups';
+  import { followupLabel, type FollowupTask } from '../lib/followups';
   import type { SteerOutcome } from '../lib/steering';
   import type { TaskResultStatus } from '../lib/ui-types';
   import ContextMeter from './ContextMeter.svelte';
@@ -42,7 +45,7 @@
   export let onSend: (text: string, paths: string[]) => void;
   export let onSteer: (instruction: string) => Promise<SteerOutcome | null>;
   export let onBlocked: () => void;
-  export let onQueueFollowup: (text: string) => boolean;
+  export let onQueueFollowup: (text: string, paths: string[]) => Promise<boolean>;
   export let onCompact: () => Promise<void>;
   export let onShowAbilities: () => void;
   export let onCancelTask: () => void;
@@ -58,10 +61,19 @@
 
   let prompt = '';
   let attached: string[] = [];
-  // Blob URLs for pasted images only; paths picked from disk have none.
+  // Blob URLs for pasted images only; paths picked from disk are read through
+  // the backend preview command, bounded and verified there.
   let attachmentPreviews: Record<string, string> = {};
   // A preview that fails to load must degrade to the file icon, never to alt text.
   let brokenPreviews: Record<string, boolean> = {};
+  // The image the person asked to see in full; nothing is loaded until then.
+  let previewOpen: {path: string; name: string} | null = null;
+  const maxAttachments = 8;
+  // Pasting and file selection finish asynchronously. Restoring, clearing or
+  // replacing the draft retires everything still in flight, so a late answer
+  // can neither revive the first draft of A -> B -> A nor report its failure
+  // against the new one. Typing never changes the draft on purpose.
+  let attachEpoch = 0;
   let fileQuery: string | null = null;
   let fileResults: string[] = [];
   let fileIndex = 0;
@@ -69,13 +81,19 @@
   let draftWriteTimer: ReturnType<typeof setTimeout> | null = null;
   let editorInput: HTMLTextAreaElement;
   let steeringBusy = false;
+  // Restored draft attachments are checked once, off the input path. A failed
+  // file keeps its label with a visible reason and can be removed or replaced.
+  let invalidAttachments: Record<string, string> = {};
+  let validationEpoch = 0;
+  let queueing = false;
+  let storageWarned = false;
+  let truncationWarned = false;
 
   $: gate = {
     ready, busy, running, compacting,
     hasContent: prompt.trim().length > 0 || attached.length > 0,
   } satisfies ComposerGate;
   $: canSend = canCompose(gate);
-  $: composerStep = composerAction(gate);
   $: usage = snapshot?.usage?.coding;
 
   function persistentDraftKey(forProject = project, forSession = sessionId) {
@@ -88,17 +106,62 @@
     }
   }
 
+  /** Report a refused or shortened storage write without interrupting typing. */
+  function reportDraftWrite(outcome: DraftWrite) {
+    if (outcome === 'unavailable' && !storageWarned) {
+      storageWarned = true;
+      toast('本机存储不可用，草稿只在本次运行中保留');
+    }
+    if (outcome === 'truncated' && !truncationWarned) {
+      truncationWarned = true;
+      toast(`草稿超过 ${MAX_DRAFT_LENGTH} 字：重启后只能恢复前面的 ${MAX_DRAFT_LENGTH} 字`);
+    }
+  }
+
+  function storeDraft(forProject = project, forSession = sessionId) {
+    return persistDraft(browserDraftStorage(), persistentDraftKey(forProject, forSession),
+      {text: prompt, paths: attached});
+  }
+
   export function saveDraft(forProject = project, forSession = sessionId) {
     cancelDraftTimer();
     appDrafts.remember(forProject, forSession, {text: prompt, paths: [...attached]});
-    persistDraftText(browserDraftStorage(), persistentDraftKey(forProject, forSession), prompt);
+    reportDraftWrite(storeDraft(forProject, forSession));
+  }
+
+  /** Re-check restored files once. The epoch retires answers that belong to a
+   * draft the person has already left. */
+  function validateAttachments() {
+    const epoch = ++validationEpoch;
+    if (!attached.length) { invalidAttachments = {}; return; }
+    void api.inspectAttachments([...attached]).then(result => {
+      if (epoch !== validationEpoch) return;
+      const next: Record<string, string> = {};
+      for (const entry of result.entries) {
+        if (entry.state !== 'ok') next[entry.path] = attachmentStateMessage(entry.state);
+      }
+      invalidAttachments = next;
+    }).catch(failure => {
+      if (epoch === validationEpoch) toast(desktopCommandMessage('附件检查', failure));
+    });
   }
 
   export function restoreDraft(forProject = project, forSession = sessionId) {
     cancelDraftTimer();
+    closeFileSuggestions();
+    attachEpoch += 1;
     const saved = appDrafts.recall(forProject, forSession);
-    prompt = saved?.text ?? readStoredDraft(browserDraftStorage(), persistentDraftKey(forProject, forSession));
-    attached = [...(saved?.paths ?? [])];
+    const stored = saved
+      ? {text: saved.text, paths: saved.paths, truncated: false}
+      : readStoredDraft(browserDraftStorage(), persistentDraftKey(forProject, forSession));
+    prompt = stored.text;
+    attached = [...stored.paths];
+    invalidAttachments = {};
+    if (stored.truncated && !truncationWarned) {
+      truncationWarned = true;
+      toast(`草稿过长：只恢复了前面的 ${MAX_DRAFT_LENGTH} 字`);
+    }
+    validateAttachments();
     void tick().then(() => {
       if (editorInput) setEditorHeight(editorInput);
     });
@@ -106,10 +169,14 @@
 
   export function clearForTask(forProject = project, forSession = sessionId) {
     cancelDraftTimer();
+    closeFileSuggestions();
+    attachEpoch += 1;
+    validationEpoch += 1;
     appDrafts.forget(forProject, forSession);
-    persistDraftText(browserDraftStorage(), persistentDraftKey(forProject, forSession), '');
     prompt = '';
     attached = [];
+    invalidAttachments = {};
+    persistDraft(browserDraftStorage(), persistentDraftKey(forProject, forSession), {text: '', paths: []});
     if (editorInput) editorInput.style.height = 'auto';
   }
 
@@ -118,8 +185,11 @@
   }
 
   export function restoreInput(text: string, paths: string[], forProject = project, forSession = sessionId) {
+    attachEpoch += 1;
     prompt = text;
     attached = paths;
+    invalidAttachments = {};
+    closeFileSuggestions();
     saveDraft(forProject, forSession);
   }
 
@@ -129,20 +199,31 @@
 
   export function setPrompt(text: string) {
     prompt = text;
+    closeFileSuggestions();
     editorInput?.focus();
   }
 
   export function setDraftText(text: string, mode = 'replace') {
     prompt = mode === 'append' ? (prompt ? `${prompt}${text}` : text) : text;
+    closeFileSuggestions();
     void tick().then(() => {
       editorInput?.focus();
       if (editorInput) setEditorHeight(editorInput);
     });
   }
 
+  // Only the paths this draft actually takes may produce a preview URL, and
+  // pasted images are only written to disk while there is still room.
+  function acceptPaths(paths: string[]) {
+    const candidates = [...new Set(paths)].filter(path => !attached.includes(path));
+    const accepted = candidates.slice(0, Math.max(0, maxAttachments - attached.length));
+    if (accepted.length) attached = [...attached, ...accepted];
+    if (accepted.length < candidates.length) toast(`最多添加 ${maxAttachments} 个附件，超出的文件未添加`);
+    return accepted;
+  }
+
   export function addPaths(paths: string[]) {
-    if (running) { toast('当前任务执行中，文件请在任务结束后添加'); return; }
-    attached = [...new Set([...attached, ...paths])].slice(0, 8);
+    acceptPaths(paths);
   }
 
   export function releasePreviews(keep: string[] = []) {
@@ -167,41 +248,56 @@
     }
   }
   onDestroy(() => {
+    attachEpoch += 1;
     cancelDraftTimer();
-    if (fileTimer !== null) { clearTimeout(fileTimer); fileTimer = null; }
+    closeFileSuggestions();
     if (frameTimer !== null) { clearInterval(frameTimer); frameTimer = null; }
   });
 
   let maxEditorHeight = 186;
-  // A plugin may ask for a shorter composer; never taller than the built-in cap.
-  $: maxEditorHeight = composerCap($composerMaxRows);
+  let viewportHeight = 850;
+  // Keep room for the conversation when a queue and a multiline draft coexist.
+  $: maxEditorHeight = Math.min(composerCap($composerMaxRows), Math.max(44, Math.floor(viewportHeight * .22)));
+  $: resizeForPrompt(editorInput, prompt, maxEditorHeight);
+  function resizeForPrompt(input: HTMLTextAreaElement | undefined, _text: string, _cap: number) {
+    void tick().then(() => { if (input?.isConnected) setEditorHeight(input); });
+  }
   $: statusAccent = slotColor("accent", $pluginColors);
   function setEditorHeight(input: HTMLTextAreaElement) {
     input.style.height = "auto";
     input.style.height = Math.min(input.scrollHeight, maxEditorHeight) + "px";
   }
-  function resizeEditor(event: Event) {
-    setEditorHeight(event.currentTarget as HTMLTextAreaElement);
-  }
   function onEditorInput(event: Event) {
-    resizeEditor(event);
     const input = event.currentTarget as HTMLTextAreaElement;
     syncFileSuggestions(input.value, input.selectionStart ?? input.value.length);
     const text = input.value;
     const key = persistentDraftKey();
     cancelDraftTimer();
     draftWriteTimer = setTimeout(() => {
-      persistDraftText(browserDraftStorage(), key, text);
       draftWriteTimer = null;
+      reportDraftWrite(persistDraft(browserDraftStorage(), key, {text, paths: attached}));
     }, 350);
   }
 
+  // Attachments may be chosen while a task runs: they belong to the queued
+  // task. Each answer still belongs to one draft only, and the epoch retires
+  // work that was in flight when the draft changed.
+  function acceptingAttachments(scope: number) {
+    return scope === attachEpoch;
+  }
+
   async function attachFile() {
+    const scope = attachEpoch;
     try {
       const selected = await open({multiple: true, title: '添加图片或文件'});
+      // The dialog stays open across a session switch or task start.
+      if (scope !== attachEpoch) return;
       if (typeof selected === 'string') addPaths([selected]);
       else if (Array.isArray(selected)) addPaths(selected);
-    } catch (failure) { showError(failure); }
+    } catch (failure) {
+      if (scope !== attachEpoch) return;
+      showError(failure);
+    }
   }
 
   async function pasteImages(event: ClipboardEvent) {
@@ -210,19 +306,29 @@
     if (!items.length) return;
     event.preventDefault();
     clearError();
+    const scope = attachEpoch;
     for (const item of items) {
       const file = item.getAsFile();
       if (!file) continue;
       try {
         const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+        // A full draft writes no file and creates no preview URL.
+        if (!acceptingAttachments(scope)) return;
+        if (attached.length >= maxAttachments) { toast(`最多添加 ${maxAttachments} 个附件，请先移除一个再粘贴`); return; }
         const extension = file.type.split('/')[1] || 'png';
         const path = await api.savePastedImage(bytes, extension);
+        if (!acceptingAttachments(scope)) return;
+        if (!acceptPaths([path]).length) return;
         attachmentPreviews = {...attachmentPreviews, [path]: URL.createObjectURL(file)};
-        attached = [...attached, path].slice(0, 8);
       } catch (failure) {
+        if (!acceptingAttachments(scope)) return;
         showError(failure);
       }
     }
+  }
+
+  function openPreview(path: string) {
+    previewOpen = {path, name: attachmentName(path)};
   }
 
   function detachAt(index: number) {
@@ -237,7 +343,14 @@
     attached = attached.filter((_, position) => position !== index);
   }
 
+  // Only the newest request may install candidates: a newer query, a
+  // programmatic prompt replacement, a session change or unmount supersedes
+  // everything still in flight. Comparing query strings alone would revive an
+  // older request when the same query comes back (a -> b -> a).
+  let fileRequest = 0;
+
   function closeFileSuggestions() {
+    fileRequest += 1;
     fileQuery = null;
     fileResults = [];
     fileIndex = 0;
@@ -247,17 +360,23 @@
   function syncFileSuggestions(value: string, caret: number) {
     const token = atTokenRange(value, caret);
     if (!token) { closeFileSuggestions(); return; }
-    fileQuery = token.query;
     if (fileTimer !== null) clearTimeout(fileTimer);
-    const epoch = fileQuery;
+    // Candidates for the previous query must not stay insertable while the
+    // replaced query is still being resolved.
+    if (token.query !== fileQuery) { fileResults = []; fileIndex = 0; }
+    fileQuery = token.query;
+    const request = ++fileRequest;
     fileTimer = setTimeout(async () => {
       fileTimer = null;
       try {
-        const paths = await api.projectFiles(epoch);
-        if (fileQuery !== epoch) return;
+        const paths = await api.projectFiles(token.query);
+        if (request !== fileRequest) return;
         fileResults = paths;
         fileIndex = 0;
-      } catch { fileResults = []; }
+      } catch {
+        // A failure a newer query already replaced leaves that query's results alone.
+        if (request === fileRequest) fileResults = [];
+      }
     }, 120);
   }
 
@@ -275,17 +394,41 @@
     });
   }
 
-  function queueTypedFollowup() {
+  /** Queue the exact text and attachment references. The answer is awaited
+   * because the native side first copies the files; only this draft is cleared,
+   * and only while it is still the draft that was queued. */
+  async function queueTypedFollowup() {
     const text = prompt.trim();
-    if (!running || !text) return;
-    if (!onQueueFollowup(text)) return;
+    const paths = [...attached];
+    if (!running || (!text && !paths.length) || queueing) return;
+    const scope = attachEpoch;
+    queueing = true;
+    let queued = false;
+    try {
+      queued = await onQueueFollowup(text, paths);
+    } finally {
+      queueing = false;
+    }
+    if (!queued || scope !== attachEpoch) return;
+    // The person may have kept typing or changed attachments while the copy
+    // ran; that newer draft belongs to them, not to the queued task.
+    if (prompt.trim() !== text || attached.join('\u0000') !== paths.join('\u0000')) return;
     prompt = '';
+    attached = [];
+    invalidAttachments = {};
+    closeFileSuggestions();
     cancelDraftTimer();
-    persistDraftText(browserDraftStorage(), persistentDraftKey(), '');
+    persistDraft(browserDraftStorage(), persistentDraftKey(), {text: '', paths: []});
   }
 
   async function submit() {
     if (running) {
+      // Attachments have no steering meaning; they are queued with the next
+      // task instead of being silently left behind in the draft.
+      if (attached.length) {
+        toast('附件会随排队任务一起发送，请使用“排队”');
+        return;
+      }
       const instruction = prompt.trim();
       if (!instruction || steeringBusy) return;
       steeringBusy = true;
@@ -294,6 +437,7 @@
         // Do not erase edits typed while the IPC request was in flight.
         if (outcome !== null && prompt.trim() === instruction) {
           prompt = '';
+          closeFileSuggestions();
           saveDraft();
         }
       } finally {
@@ -306,6 +450,7 @@
   }
 
   function handleEditor(event: KeyboardEvent) {
+    if (event.isComposing) return;
     if (fileQuery !== null && fileResults.length) {
       if (event.key === 'ArrowDown') { event.preventDefault(); fileIndex = (fileIndex + 1) % fileResults.length; return; }
       if (event.key === 'ArrowUp') { event.preventDefault(); fileIndex = (fileIndex - 1 + fileResults.length) % fileResults.length; return; }
@@ -316,7 +461,7 @@
     }
     if (event.key === 'Enter' && event.ctrlKey && running && !event.isComposing) {
       event.preventDefault();
-      queueTypedFollowup();
+      void queueTypedFollowup();
       return;
     }
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
@@ -327,6 +472,7 @@
   function cacheRate() { return cachePercentage(usage?.input, usage?.cached); }
 </script>
 
+<svelte:window bind:innerHeight={viewportHeight}/>
 <div class="composer-outer">
   {#if $pluginStatuses.length || (running && $activityFrames.length)}
     <div class="plugin-shelf" aria-label="插件状态">
@@ -358,9 +504,14 @@
       {#if followupExpanded}
         <div class="followup-list" aria-label="后续任务列表">
           {#each followups as queued,i (queued.id)}
+            {@const label = followupLabel(queued)}
             <div class="followup-item">
               <span class="followup-number">{i + 1}</span>
-              <span class="followup-text" title={queued.text}>{queued.text}</span>
+              <span class="followup-text" title={label}>{label}</span>
+              {#if queued.paths.length}
+                <span class="followup-attachments" title="入队时已复制进会话附件目录">
+                  <Paperclip size={11}/>{queued.paths.length}</span>
+              {/if}
               <div class="followup-item-actions">
                 <button title="上移" aria-label={'上移任务 '+(i+1)} disabled={i===0}
                   onclick={() => onReorderFollowup(queued.id,-1)}><ChevronUp size={14}/></button>
@@ -373,25 +524,10 @@
           {/each}
           <div class="followup-footnote">
             <span>按顺序独立执行；失败或停止后自动暂停</span>
-            <button onclick={onClearFollowups}>清空</button>
+            <button title="移除全部待执行任务，不影响当前任务" onclick={onClearFollowups}>清空</button>
           </div>
         </div>
       {/if}
-    </div>
-  {/if}
-  {#if !ask && fileQuery !== null && fileResults.length}
-    <div class="file-suggest" role="listbox" aria-label="引用项目文件">
-      <div class="file-suggest-head">引用文件 · {fileResults.length}</div>
-      {#each fileResults as path, index (path)}
-        <button class="file-suggest-row" class:active={index === fileIndex}
-          role="option" aria-selected={index === fileIndex}
-          onmouseenter={() => fileIndex = index}
-          onclick={() => applyFileSuggestion(path)}>
-          <FileText size={13}/>
-          <span class="file-suggest-path">{path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : ''}<b>{path.split('/').pop()}</b></span>
-        </button>
-      {/each}
-      <div class="file-suggest-foot">↑↓ 选择 · Enter 插入 · Esc 关闭</div>
     </div>
   {/if}
   {#if ask}
@@ -403,55 +539,95 @@
   {/if}
   <!-- Kept mounted but hidden, so the draft, attachments and loaded history
        survive the question exactly as they survive a tab switch. -->
-  <div class="composer" hidden={!!ask}>
+  <div class="composer" hidden={!!ask} style:--composer-height-cap={`${maxEditorHeight}px`}>
+    {#if !ask && fileQuery !== null && fileResults.length}
+      <div class="file-suggest" id="composer-file-suggestions" role="listbox" aria-label="引用项目文件">
+        <div class="file-suggest-head">引用文件 · {fileResults.length}</div>
+        {#each fileResults as path, index (path)}
+          <button class="file-suggest-row" class:active={index === fileIndex}
+            id={`composer-file-${index}`} tabindex="-1" role="option" aria-selected={index === fileIndex}
+            onmouseenter={() => fileIndex = index}
+            onclick={() => applyFileSuggestion(path)}>
+            <FileText size={13}/>
+            <span class="file-suggest-path">{path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : ''}<b>{path.split('/').pop()}</b></span>
+          </button>
+        {/each}
+        <div class="file-suggest-foot">↑↓ 选择 · Enter 插入 · Esc 关闭</div>
+      </div>
+    {/if}
     {#if attached.length}
       <div class="draft-files">
         {#each attached as file, i}
-          <span class="file-chip" class:is-image={!!attachmentPreviews[file]}>
-            {#if attachmentPreviews[file] && !brokenPreviews[file]}
-              <img class="file-thumb" src={attachmentPreviews[file]} alt="" onerror={() => brokenPreviews = {...brokenPreviews, [file]: true}}/>
+          {@const pasted = attachmentPreviews[file]}
+          {@const previewable = !!pasted || looksLikeImage(file)}
+          {@const invalid = invalidAttachments[file]}
+          <span class="file-chip" class:is-image={previewable} class:invalid={!!invalid}
+            title={invalid ? `附件已失效：${invalid}，请移除或重新选择` : file}>
+            {#if previewable}
+              <button class="file-thumb-button" title="查看图片"
+                aria-label={'查看图片 ' + attachmentName(file)} onclick={() => openPreview(file)}>
+                {#if pasted && !brokenPreviews[file]}
+                  <img class="file-thumb" src={pasted} alt=""
+                    onerror={() => brokenPreviews = {...brokenPreviews, [file]: true}}/>
+                {:else}
+                  <AttachmentImage origin="draft" path={file} className="file-thumb"
+                    alt={attachmentName(file)}>
+                    <FileText size={14}/>
+                  </AttachmentImage>
+                {/if}
+              </button>
             {:else}
               <FileText size={14}/>
             {/if}
-            <span class="file-chip-name">{file.slice(Math.max(file.lastIndexOf("/"), file.lastIndexOf("\\")) + 1)}</span>
-            <button title="移除附件" onclick={() => detachAt(i)}><X size={14}/></button></span>
+            <span class="file-chip-name">{attachmentName(file)}</span>
+            {#if invalid}<span class="file-chip-invalid" role="status">已失效</span>{/if}
+            <button title={invalid ? `移除失效附件（${invalid}）` : '移除附件'}
+              aria-label="移除附件" onclick={() => detachAt(i)}><X size={14}/></button></span>
         {/each}
       </div>
     {/if}
     <textarea bind:this={editorInput} bind:value={prompt} onkeydown={handleEditor} oninput={onEditorInput} onpaste={pasteImages}
+      style:padding-block={maxEditorHeight < 44 ? '0px' : undefined}
       disabled={navigationBusy}
       placeholder={composerPlaceholder(gate)}
-      rows="1" aria-label="输入任务"></textarea>
+      rows="1" aria-label="输入任务" aria-describedby="composer-help"
+      aria-autocomplete="list" aria-controls={fileResults.length ? 'composer-file-suggestions' : undefined}
+      aria-activedescendant={fileResults.length ? `composer-file-${fileIndex}` : undefined}></textarea>
     <div class="composer-actions">
       <div class="composer-left">
-        <button class="icon-button" title="添加图片或文件" disabled={running || !ready} onclick={attachFile}><Paperclip size={17}/></button>
-        <span class="composer-tip">{composerTip(composerStep, running, fileQuery !== null && fileResults.length > 0)}</span>
+        <button class="icon-button" title={attached.length >= maxAttachments ? '已达到 8 个附件上限，移除后可继续添加' : !ready ? '连接模型后可添加附件' : '添加图片或文件'} aria-label="添加图片或文件" disabled={!ready || navigationBusy || attached.length >= maxAttachments} onclick={attachFile}><Paperclip size={17}/></button>
+        <ContextMeter total={snapshot?.context_window ?? null}
+          report={snapshot?.context ?? null} usage={usage ?? null} cache={cacheRate()}
+          toolNames={snapshot?.tool_names ?? []} skills={snapshot?.skills ?? []}
+          {compacting} compactDisabled={running || busy || navigationBusy} onCompact={onCompact} onShowAbilities={onShowAbilities}/>
       </div>
       <div class="composer-right">
+        {#if !running && taskResult === 'failed'}<span class="footer-stopped failed">本轮执行失败</span>
+        {:else if !running && taskResult === 'cancelled'}<span class="footer-stopped">本轮已停止</span>{/if}
         {#if running}
           <button class="stop-button" title="取消当前任务" onclick={onCancelTask}><Square size={14} fill="currentColor"/> 停止</button>
-          {#if prompt.trim()}
-            <button class="followup-add-button" title="完成当前任务后再执行这一条"
-              onclick={queueTypedFollowup}><ListTodo size={15}/> 排队</button>
-            <button class="send-button" title={steeringBusy ? '正在插入指令…' : '插入当前任务'}
-              disabled={steeringBusy} onclick={submit}><Send size={16}/></button>
+          {#if prompt.trim() || attached.length}
+            <button class="followup-add-button" title="完成当前任务后再执行这一条（含附件）"
+              disabled={queueing} onclick={() => void queueTypedFollowup()}><ListTodo size={15}/> 排队</button>
+          {/if}
+          {#if prompt.trim() && !attached.length}
+            <button class="send-button" title={steeringBusy ? '正在插入指令…' : '插入当前任务'} aria-label="插入当前任务"
+              disabled={steeringBusy} onclick={submit}><CornerUpLeft size={17}/></button>
           {/if}
         {:else}
-          <button class="send-button" title="发送" disabled={!canSend} onclick={submit}><Send size={17}/></button>
+          <button class="send-button" title="发送 · Enter" aria-label="发送任务" disabled={!canSend} onclick={submit}><ArrowUp size={18}/></button>
         {/if}
       </div>
     </div>
   </div>
-  <div class="footer-metrics">
-    <ContextMeter total={snapshot?.context_window ?? null} available={snapshot?.available_input ?? null}
-      report={snapshot?.context ?? null} usage={usage ?? null} cache={cacheRate()}
-      toolNames={snapshot?.tool_names ?? []} skills={snapshot?.skills ?? []}
-      compacting={compacting} onCompact={onCompact} onShowAbilities={onShowAbilities}/>
-    <div class="footer-usage">
-      {#if running}<span class="footer-working"><span class="live-dot"></span> 正在运行</span>
-      {:else if taskResult === 'completed'}<span class="footer-finished">本轮已结束</span>
-      {:else if taskResult === 'failed'}<span class="footer-stopped">本轮执行失败</span>
-      {:else if taskResult === 'cancelled'}<span class="footer-stopped">本轮已停止</span>{/if}
-    </div>
-  </div>
+  {#if !ask}<p class="composer-hint" id="composer-help">
+    <span><kbd>Enter</kbd> {running ? '插话' : '发送'}</span>
+    {#if running}<span><kbd>Ctrl+Enter</kbd> 排队</span>{/if}
+    <span><kbd>Shift+Enter</kbd> 换行</span>
+    {#if !running}<span><kbd>@</kbd> 引用文件</span>{/if}
+  </p>{/if}
 </div>
+{#if previewOpen}
+  <AttachmentPreviewDialog origin="draft" path={previewOpen.path} name={previewOpen.name}
+    onClose={() => previewOpen = null}/>
+{/if}

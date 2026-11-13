@@ -35,7 +35,7 @@ struct ActiveScope {
 impl ActiveScope {
     fn for_messages(messages: &[crate::protocol::Message], vision: Option<bool>) -> Self {
         let mut users = messages.iter().enumerate().rev().filter(|(_, message)| {
-            message.role == "user"
+            crate::protocol::is_actual_user_message(message)
                 && !message
                     .provider_items
                     .as_deref()
@@ -168,7 +168,7 @@ fn inline_log(part: &Value) -> bool {
 /// Read at most `limit + 1` bytes from an opened file. A size check against
 /// metadata is not enough: the file can grow between `metadata` and `read`, and
 /// an unbounded read would allocate the whole growth before rejecting it.
-pub(crate) fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
+pub(crate) fn read_bounded(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
     let file = fs::File::open(path)?;
     let mut bytes = Vec::new();
     file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
@@ -197,7 +197,7 @@ fn inline_log_text(part: &Value, index: usize, total: usize) -> Result<String> {
 /// turns are references and are not charged as inline logs.
 pub(crate) fn inline_log_extra_bytes(messages: &[crate::protocol::Message]) -> Result<usize> {
     let Some(message) = messages.iter().rev().find(|message| {
-        message.role == "user"
+        crate::protocol::is_actual_user_message(message)
             && !message
                 .provider_items
                 .as_deref()

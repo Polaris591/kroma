@@ -1,16 +1,24 @@
 <script lang="ts">
+  import { modal } from '../lib/modal';
   import { Undo2 } from '@lucide/svelte';
   export let files = 0;
   export let added = 0;
   export let removed = 0;
   export let busy = false;
+  export let error = '';
+  let attempted = false;
+  function confirm(restoreFiles: boolean) {
+    attempted = true;
+    onConfirm(restoreFiles);
+  }
   export let onCancel: () => void;
   export let onConfirm: (restoreFiles: boolean) => void;
 </script>
 
-<div class="dialog-overlay" role="presentation">
+<dialog class="dialog-overlay" aria-labelledby="rewind-heading"
+  use:modal={{ onClose: onCancel, busy, initialFocus: '.dialog-secondary' }}>
   <div class="dialog-dim"></div>
-  <div class="dialog-panel" role="dialog" aria-modal="true" aria-labelledby="rewind-heading">
+  <div class="dialog-panel">
     <div class="dialog-heading">
       <span class="dialog-emblem"><Undo2 size={19}/></span>
       <div><h2 id="rewind-heading">回到这一轮之前</h2><p>之后的对话会移出本会话</p></div>
@@ -24,14 +32,15 @@
         <br/>这一轮没有文件改动，只有对话会被回退。
       {/if}
     </p>
+    {#if attempted && !busy && error}<p class="dialog-error" role="alert">{error}</p>{/if}
     <div class="dialog-actions">
       <button class="dialog-secondary" disabled={busy} onclick={onCancel}>取消</button>
-      <button class="dialog-secondary" disabled={busy} onclick={() => onConfirm(false)}>只回退对话</button>
+      <button class="dialog-secondary" disabled={busy} onclick={() => confirm(false)}>{busy ? '正在回退…' : '只回退对话'}</button>
       {#if files}
-        <button class="dialog-primary" disabled={busy} onclick={() => onConfirm(true)}>
+        <button class="dialog-primary" disabled={busy} onclick={() => confirm(true)}>
           {busy ? '正在回退…' : '回退并还原文件'}
         </button>
       {/if}
     </div>
   </div>
-</div>
+</dialog>

@@ -16,7 +16,15 @@ pub(super) fn payload(
     origin: &str,
 ) -> Result<Value> {
     payload_with_cache(
-        model, messages, tools, max_tokens, effort, info, origin, None,
+        model,
+        messages,
+        tools,
+        max_tokens,
+        effort,
+        info,
+        origin,
+        None,
+        &CacheSettings::default(),
     )
 }
 
@@ -32,6 +40,7 @@ pub(super) fn payload_with_cache(
     info: &ModelInfo,
     origin: &str,
     image_cache: Option<&crate::model::TaskImageCache>,
+    settings: &CacheSettings,
 ) -> Result<Value> {
     payload_with_cache_at(
         model,
@@ -43,7 +52,29 @@ pub(super) fn payload_with_cache(
         origin,
         image_cache,
         None,
+        settings,
     )
+}
+
+/// Explicit, profile-supplied prompt-cache controls. Defaults reproduce the
+/// automatic caching Kroma has always sent; nothing is inferred from a model
+/// name or gateway vendor.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct CacheSettings {
+    /// Automatic-breakpoint TTL (`5m` default, `1h` when configured).
+    pub ttl: Option<String>,
+    /// Keep one breakpoint on the stable system prefix so a changing tail does
+    /// not move the whole cached prefix with it.
+    pub stable_breakpoint: bool,
+}
+
+impl CacheSettings {
+    fn cache_control(&self) -> Value {
+        match &self.ttl {
+            Some(ttl) => json!({"type":"ephemeral","ttl":ttl}),
+            None => json!({"type":"ephemeral"}),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -57,13 +88,14 @@ pub(super) fn payload_with_cache_at(
     origin: &str,
     image_cache: Option<&crate::model::TaskImageCache>,
     active_turn_override: Option<usize>,
+    settings: &CacheSettings,
 ) -> Result<Value> {
     let mut system = Vec::new();
     let mut items: Vec<Value> = Vec::new();
     let active_turn = active_turn_override.unwrap_or_else(|| {
         messages
             .iter()
-            .rposition(|msg| msg.role == "user")
+            .rposition(crate::protocol::is_actual_user_message)
             .unwrap_or(0)
     });
     for (index, msg) in messages.iter().enumerate() {
@@ -132,7 +164,7 @@ pub(super) fn payload_with_cache_at(
             "tool" => {
                 let mut block = json!({"type":"tool_result",
                     "tool_use_id":msg.tool_call_id.as_deref().context("missing tool result call ID")?,
-                    "content":msg.content.as_deref().unwrap_or("")});
+                    "content":crate::tool_archive::model_content(msg)});
                 if msg.tool_failed() {
                     block["is_error"] = json!(true);
                 }
@@ -161,16 +193,43 @@ pub(super) fn payload_with_cache_at(
         "model":model,"max_tokens":max_tokens,"stream":true,
         "system":system.join("\n\n"),"messages":items,"tools":tools,
         // Automatic prompt caching moves the breakpoint with the growing
-        // conversation; no hand-maintained cache markers or settings.
-        "cache_control":{"type":"ephemeral"}
+        // conversation. A profile may request the one-hour TTL or pin one
+        // explicit breakpoint to the stable system prefix.
+        "cache_control":settings.cache_control()
     });
     if !tools.is_empty() {
         // No tool_choice override: the model chooses whether to call tools.
     } else {
         request.as_object_mut().unwrap().remove("tools");
     }
+    if settings.stable_breakpoint {
+        pin_stable_breakpoint(&mut request, settings);
+    }
     apply_reasoning(&mut request, effort, info, max_tokens)?;
     Ok(request)
+}
+
+/// Keep one explicit breakpoint on the part of the request that is identical on
+/// every turn: the composed system prompt, or the last tool definition when
+/// there is no system text. Anthropic looks back a bounded number of blocks
+/// from each breakpoint, so a pinned static prefix still hits when the tail is
+/// rewritten by a checkpoint.
+fn pin_stable_breakpoint(request: &mut Value, settings: &CacheSettings) {
+    let control = settings.cache_control();
+    let system = request
+        .get("system")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    if !system.is_empty() {
+        request["system"] = json!([{"type":"text","text":system,"cache_control":control}]);
+        return;
+    }
+    if let Some(tools) = request.get_mut("tools").and_then(Value::as_array_mut) {
+        if let Some(last) = tools.last_mut() {
+            last["cache_control"] = control;
+        }
+    }
 }
 
 pub(super) fn apply_reasoning(
@@ -246,13 +305,16 @@ enum Block {
 
 // Anthropic reports *uncached* input separately from cache writes and reads.
 // The common Usage.input field must include all three, while Usage.cached
-// remains just the read portion (a subset of Usage.input). Missing optional
+// remains just the read portion (a subset of Usage.input) and Usage.cache_write
+// the created portion (another subset, never added twice). Missing optional
 // cache counters mean no reported cache traffic; keep the read count unknown
 // instead of presenting it as a measured zero.
 #[derive(Default)]
 struct InputBreakdown {
     uncached: Option<u64>,
     created: Option<u64>,
+    created_5m: Option<u64>,
+    created_1h: Option<u64>,
     read: Option<u64>,
 }
 
@@ -264,14 +326,35 @@ impl InputBreakdown {
         if let Some(tokens) = usage["cache_creation_input_tokens"].as_u64() {
             self.created = Some(tokens);
         }
+        if let Some(tokens) = usage
+            .pointer("/cache_creation/ephemeral_5m_input_tokens")
+            .and_then(Value::as_u64)
+        {
+            self.created_5m = Some(tokens);
+        }
+        if let Some(tokens) = usage
+            .pointer("/cache_creation/ephemeral_1h_input_tokens")
+            .and_then(Value::as_u64)
+        {
+            self.created_1h = Some(tokens);
+        }
         if let Some(tokens) = usage["cache_read_input_tokens"].as_u64() {
             self.read = Some(tokens);
         }
     }
 
+    /// Cache writes the endpoint reported as a total, or as the sum of a TTL
+    /// breakdown when it did not repeat the total.
+    fn written(&self) -> Option<u64> {
+        self.created.or_else(|| {
+            (self.created_5m.is_some() || self.created_1h.is_some())
+                .then(|| self.created_5m.unwrap_or(0) + self.created_1h.unwrap_or(0))
+        })
+    }
+
     fn total(&self) -> Option<u64> {
         self.uncached?
-            .checked_add(self.created.unwrap_or(0))?
+            .checked_add(self.written().unwrap_or(0))?
             .checked_add(self.read.unwrap_or(0))
     }
 }
@@ -561,6 +644,8 @@ impl Stream {
             cached: self.input.read,
             reasoning: None,
             web_searches: self.web_searches,
+            cache_write: self.input.written(),
+            cache_write_1h: self.input.created_1h,
         })
     }
 
@@ -677,6 +762,8 @@ impl Stream {
                 cached: self.input.read,
                 reasoning: None,
                 web_searches: self.web_searches,
+                cache_write: self.input.written(),
+                cache_write_1h: self.input.created_1h,
             }),
         ))
     }
@@ -696,6 +783,8 @@ pub(super) fn parse_text(body: &str) -> Result<ApecTextAttempt> {
         cached: breakdown.read,
         reasoning: None,
         web_searches: None,
+        cache_write: breakdown.written(),
+        cache_write_1h: breakdown.created_1h,
     });
     if v["stop_reason"] == "max_tokens" {
         return Ok(ApecTextAttempt::Truncated(stats));
@@ -893,6 +982,37 @@ mod tests {
         assert_eq!(usage.cached, Some(31));
         assert_eq!(usage.output, Some(5));
         assert_eq!(usage.total, Some(68));
+        assert_eq!(
+            usage.cache_write,
+            Some(20),
+            "cache creation stays a subset of input, never an extra term"
+        );
+        assert_eq!(usage.cache_write_1h, None, "no TTL breakdown was reported");
+    }
+
+    #[test]
+    fn cache_creation_ttl_breakdown_stays_a_subset_of_input() {
+        let mut stream = Stream::default();
+        let mut feed = |event: Value| {
+            stream
+                .apply_with_reasoning(&event.to_string(), &mut |_| {}, &mut |_| {})
+                .unwrap();
+        };
+        // Only the TTL breakdown is reported: the total is their sum, and the
+        // three input categories remain the only terms of input.
+        feed(json!({"type":"message_start","message":{"usage":{
+            "input_tokens":10,"cache_creation":{
+                "ephemeral_5m_input_tokens":4,"ephemeral_1h_input_tokens":6},
+            "cache_read_input_tokens":0,"output_tokens":1
+        }}}));
+        feed(json!({"type":"message_stop"}));
+        // message_stop alone cannot finish a stream without a stop_reason, so
+        // read the reported usage from the accumulator directly.
+        let usage = stream.reported_usage().unwrap();
+        assert_eq!(usage.input, Some(20));
+        assert_eq!(usage.cache_write, Some(10));
+        assert_eq!(usage.cache_write_1h, Some(6));
+        assert_eq!(usage.cached, Some(0));
     }
 
     #[test]
