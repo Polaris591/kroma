@@ -9,14 +9,18 @@ use kroma::{
 };
 use std::{
     env,
-    io::{self, IsTerminal, Write},
+    io::{self, IsTerminal, Read, Write},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::Duration,
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader, Lines, Stdin};
+
+const MAX_PIPED_STDIN_BYTES: usize = 8 * 1024 * 1024;
+const STDIN_PROBE_TIMEOUT: Duration = Duration::from_millis(150);
 
 type InputLines = Lines<BufReader<Stdin>>;
 
@@ -87,16 +91,7 @@ async fn run_legacy(options: kroma::cli::RunOptions) -> Result<()> {
         );
     }
     if print_mode {
-        let mut piped = String::new();
-        if !io::stdin().is_terminal() {
-            tokio::io::stdin()
-                .take(8 * 1024 * 1024 + 1)
-                .read_to_string(&mut piped)
-                .await?;
-            if piped.len() > 8 * 1024 * 1024 {
-                bail!("stdin exceeds 8 MiB; pipe a file path instead");
-            }
-        }
+        let piped = read_one_shot_stdin(!task.trim().is_empty()).await?;
         let prompt = if !piped.is_empty() {
             let referenced = if piped.len() > 16 * 1024 {
                 let path = kroma::convenience::save_pipe_input(piped.as_bytes())?;
@@ -852,6 +847,91 @@ fn exit_code(error: &anyhow::Error) -> u8 {
     }
 }
 
+async fn read_one_shot_stdin(has_cli_task: bool) -> Result<String> {
+    if io::stdin().is_terminal() {
+        return Ok(String::new());
+    }
+    if !has_cli_task {
+        let mut piped = String::new();
+        tokio::io::stdin()
+            .take((MAX_PIPED_STDIN_BYTES + 1) as u64)
+            .read_to_string(&mut piped)
+            .await?;
+        if piped.len() > MAX_PIPED_STDIN_BYTES {
+            bail!("stdin exceeds 8 MiB; pipe a file path instead");
+        }
+        return Ok(piped);
+    }
+    // Use an OS thread instead of tokio::task::spawn_blocking so an inherited,
+    // never-closed idle stdin pipe does not pin Tokio runtime shutdown.
+    read_piped_with_probe(io::stdin, STDIN_PROBE_TIMEOUT).await
+}
+
+async fn read_piped_with_probe<R>(
+    open_reader: impl FnOnce() -> R + Send + 'static,
+    probe_timeout: Duration,
+) -> Result<String>
+where
+    R: Read + Send + 'static,
+{
+    let (first_tx, first_rx) = tokio::sync::oneshot::channel::<bool>();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Result<String>>();
+    std::thread::spawn(move || {
+        let mut reader = open_reader();
+        let mut chunk = [0u8; 4096];
+        let first_read = loop {
+            match reader.read(&mut chunk) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                other => break other,
+            }
+        };
+        let n = match first_read {
+            Ok(0) => {
+                let _ = first_tx.send(false);
+                return;
+            }
+            Ok(n) => {
+                let _ = first_tx.send(true);
+                n
+            }
+            Err(error) => {
+                let _ = first_tx.send(true);
+                let _ = done_tx.send(Err(error.into()));
+                return;
+            }
+        };
+
+        let mut bytes = Vec::with_capacity(n);
+        bytes.extend_from_slice(&chunk[..n]);
+        while bytes.len() <= MAX_PIPED_STDIN_BYTES {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let take = n.min(MAX_PIPED_STDIN_BYTES + 1 - bytes.len());
+                    bytes.extend_from_slice(&chunk[..take]);
+                    if bytes.len() > MAX_PIPED_STDIN_BYTES {
+                        let _ =
+                            done_tx.send(Err(anyhow::anyhow!("stdin exceeds 8 MiB; pipe a file path instead")));
+                        return;
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    let _ = done_tx.send(Err(error.into()));
+                    return;
+                }
+            }
+        }
+        let result = String::from_utf8(bytes).map_err(anyhow::Error::from);
+        let _ = done_tx.send(result);
+    });
+
+    match tokio::time::timeout(probe_timeout, first_rx).await {
+        Ok(Ok(true)) => done_rx.await.context("reading piped stdin")?,
+        Ok(Ok(false)) | Ok(Err(_)) | Err(_) => Ok(String::new()),
+    }
+}
+
 async fn test_profile(name: &str) -> Result<()> {
     let profiles = profiles::Profiles::load()?;
     let profile = profiles
@@ -890,5 +970,80 @@ mod tests {
         handle_running_input(&inbox, "/queue list");
         handle_running_input(&inbox, "/queue clear");
         assert!(inbox.queued().is_empty());
+    }
+
+    struct ChannelReader {
+        rx: std::sync::mpsc::Receiver<Vec<u8>>,
+        buf: Vec<u8>,
+        offset: usize,
+    }
+
+    impl ChannelReader {
+        fn new(rx: std::sync::mpsc::Receiver<Vec<u8>>) -> Self {
+            Self {
+                rx,
+                buf: Vec::new(),
+                offset: 0,
+            }
+        }
+    }
+
+    impl Read for ChannelReader {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            while self.offset >= self.buf.len() {
+                match self.rx.recv() {
+                    Ok(chunk) if chunk.is_empty() => continue,
+                    Ok(chunk) => {
+                        self.buf = chunk;
+                        self.offset = 0;
+                    }
+                    Err(_) => return Ok(0),
+                }
+            }
+            let n = (self.buf.len() - self.offset).min(out.len());
+            out[..n].copy_from_slice(&self.buf[self.offset..self.offset + n]);
+            self.offset += n;
+            Ok(n)
+        }
+    }
+
+    #[tokio::test]
+    async fn one_shot_stdin_probe_does_not_hang_on_idle_open_pipe() {
+        let (_tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let started = std::time::Instant::now();
+        let out = read_piped_with_probe(
+            move || ChannelReader::new(rx),
+            Duration::from_millis(25),
+        )
+        .await
+        .expect("idle open pipe should not error");
+        assert!(out.is_empty());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(_tx);
+    }
+
+    #[tokio::test]
+    async fn one_shot_stdin_probe_collects_multi_chunk_pipe_after_first_byte() {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let _ = tx.send(b"hello ".to_vec());
+            std::thread::sleep(Duration::from_millis(50));
+            let _ = tx.send(b"world".to_vec());
+        });
+        let out = read_piped_with_probe(
+            move || ChannelReader::new(rx),
+            Duration::from_millis(30),
+        )
+        .await
+        .expect("multi-chunk pipe should succeed");
+        assert_eq!(out, "hello world");
+    }
+
+    #[tokio::test]
+    async fn one_shot_stdin_probe_returns_empty_on_immediate_eof() {
+        let out = read_piped_with_probe(|| io::Cursor::new(Vec::<u8>::new()), Duration::from_millis(25))
+            .await
+            .expect("empty stdin should succeed");
+        assert!(out.is_empty());
     }
 }

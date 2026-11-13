@@ -56,7 +56,10 @@ fn ensure_user_destination_with(
         .canonicalize()
         .with_context(|| format!("保存目录不存在：{}", raw.parent().unwrap_or(raw).display()))?;
     let target = parent.join(name);
-    if internal_root.is_some_and(|root| target.starts_with(root)) {
+    if internal_root.is_some_and(|root| {
+        let canonical = root.canonicalize().unwrap_or(root);
+        target.starts_with(canonical)
+    }) {
         bail!("不能覆盖 Kroma 的本地数据（配置、会话或附件）");
     }
     if let Some(source) = source {
@@ -371,7 +374,7 @@ mod tests {
         fs::write(&plain, b"data")?;
         assert_eq!(
             ensure_user_destination(plain.to_str().unwrap(), None)?,
-            plain
+            plain.canonicalize()?
         );
         let internal = temp_dir("internal-store");
         let blocked = internal.join("escape.bin");

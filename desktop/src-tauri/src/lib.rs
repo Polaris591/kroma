@@ -915,6 +915,27 @@ fn sessions_for(project: &Path) -> Result<Value> {
     Ok(json!(entries))
 }
 
+/// A busy host keeps a complete durable projection. If the pre-task cache is
+/// unavailable, read the archive without trying to reopen its writer lock;
+/// never publish an empty or session-id-only replacement for existing history.
+fn retained_snapshot(host: &Host) -> Result<Option<Value>> {
+    if let Some(snapshot) = &host.last_snapshot {
+        return Ok(Some(snapshot.clone()));
+    }
+    if host.session.is_empty() || host.session == "unknown" {
+        return Ok(None);
+    }
+    let catalog = SessionCatalog::new(&host.project)?;
+    let archive = catalog.resolve(&host.session)?;
+    let mut snapshot = desktop_host::archive_history_page(&archive, &host.session, None, 120)?;
+    snapshot["usage"] = serde_json::to_value(catalog.usage(&host.session)?)?;
+    snapshot["context_window"] = json!(0);
+    snapshot["available_input"] = json!(0);
+    snapshot["context"] = Value::Null;
+    snapshot["tool_names"] = json!([]);
+    Ok(Some(snapshot))
+}
+
 pub(crate) fn view(host: &mut Host) -> Result<Value> {
     let snapshot = if let Some(runtime) = &host.runtime {
         let current = desktop_host::snapshot_with_plugins(&runtime.agent, Some(&runtime.plugins))?;
@@ -924,19 +945,7 @@ pub(crate) fn view(host: &mut Host) -> Result<Value> {
         // Ready still means "a runtime is installed", but the open
         // conversation keeps its last durable projection while a command owns
         // the runtime; it must never flash as an empty/new session.
-        host.last_snapshot.clone().or_else(|| {
-            (!host.session.is_empty()).then(|| {
-                json!({
-                    "session_id":host.session,
-                    "messages":[],
-                    "usage":{"coding":{"calls":0,"input":0,"output":0,"cached":0,"reasoning":0},
-                        "title":{"calls":0,"input":0,"output":0,"cached":0,"reasoning":0},
-                        "apec":{"calls":0,"input":0,"output":0,"cached":0,"reasoning":0},
-                        "context_input":null,"context_estimated":true},
-                    "context_window":0,"available_input":0,"tool_names":[],
-                })
-            })
-        })
+        retained_snapshot(host)?
     };
     let plugins = PluginCatalog::discover(&host.project)?;
     Ok(json!({
@@ -2115,8 +2124,13 @@ async fn history_page(
     limit: Option<usize>,
 ) -> std::result::Result<Value, String> {
     with_host(state, move |host| {
-        let runtime = host.runtime.as_ref().context("Connect a model first")?;
-        desktop_host::snapshot_page(&runtime.agent, before, limit.unwrap_or(200))
+        if let Some(runtime) = host.runtime.as_ref() {
+            desktop_host::snapshot_page(&runtime.agent, before, limit.unwrap_or(200))
+        } else {
+            let catalog = SessionCatalog::new(&host.project)?;
+            let archive = catalog.resolve(&host.session)?;
+            desktop_host::archive_history_page(&archive, &host.session, before, limit.unwrap_or(200))
+        }
     })
     .await
 }
@@ -2214,9 +2228,10 @@ async fn switch_session(
             // The conversation is running its own task right now. Its last
             // durable projection is what the window can show immediately.
             (
-                host.last_snapshot
-                    .clone()
-                    .unwrap_or_else(|| json!({"session_id":id})),
+                retained_snapshot(&host)
+                    .map_err(ui_error)?
+                    .context("该会话尚无可读的历史记录")
+                    .map_err(ui_error)?,
                 None,
                 None,
                 None,
@@ -2965,7 +2980,138 @@ fn allows_webview_navigation(raw: &str) -> bool {
     }
 }
 
+struct SingleInstanceGuard {
+    _lock: fs::File,
+    port_path: PathBuf,
+}
+
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.port_path);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InstanceRole {
+    /// No lock held (home unavailable or non-contention I/O error): proceed.
+    Bypass,
+    /// Secondary launch notified (or attempted to notify) the primary window.
+    Secondary,
+}
+
+fn try_acquire_single_instance(
+    kroma_dir: &Path,
+) -> std::result::Result<SingleInstanceGuard, InstanceRole> {
+    if fs::create_dir_all(kroma_dir).is_err() {
+        return Err(InstanceRole::Bypass);
+    }
+    let lock_path = kroma_dir.join("desktop-instance.lock");
+    let port_path = kroma_dir.join("desktop-instance.port");
+    match kroma::try_acquire_lock(&lock_path) {
+        Ok(lock) => Ok(SingleInstanceGuard {
+            _lock: lock,
+            port_path,
+        }),
+        Err(error) if kroma::is_lock_contended(&error) => {
+            let _ = signal_existing_instance(&port_path, Duration::from_millis(800));
+            Err(InstanceRole::Secondary)
+        }
+        Err(_) => Err(InstanceRole::Bypass),
+    }
+}
+
+fn start_focus_listener(
+    port_path: &Path,
+    on_focus: impl Fn() + Send + Sync + 'static,
+) -> Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let token = format!("{}-{}", std::process::id(), nanos);
+    let expected = format!("FOCUS {token}");
+    let payload = format!("{port} {token}\n");
+    let tmp_path = port_path.with_extension(format!("tmp.{}", std::process::id()));
+    fs::write(&tmp_path, payload.as_bytes())?;
+    kroma::replace_file_atomically(&tmp_path, port_path)?;
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+            let Ok(mut writer) = stream.try_clone() else {
+                continue;
+            };
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_ok() && line.trim() == expected {
+                on_focus();
+                let _ = writer.write_all(b"OK\n");
+            }
+        }
+    });
+    Ok(())
+}
+
+fn signal_existing_instance(port_path: &Path, timeout: Duration) -> bool {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{SocketAddr, TcpStream};
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(raw) = fs::read_to_string(port_path) {
+            let mut parts = raw.split_whitespace();
+            if let (Some(port_str), Some(token)) = (parts.next(), parts.next()) {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+                    if let Ok(mut stream) =
+                        TcpStream::connect_timeout(&addr, Duration::from_millis(250))
+                    {
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+                        let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+                        if writeln!(stream, "FOCUS {token}").is_ok() {
+                            let mut ack = String::new();
+                            if BufReader::new(stream).read_line(&mut ack).is_ok()
+                                && ack.trim() == "OK"
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
+
+fn focus_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 pub fn run() {
+    let instance_guard = match home().map(|h| h.join(".kroma")) {
+        Ok(kroma_dir) => match try_acquire_single_instance(&kroma_dir) {
+            Ok(guard) => Some(guard),
+            Err(InstanceRole::Secondary) => return,
+            Err(InstanceRole::Bypass) => None,
+        },
+        Err(_) => None,
+    };
+    let listener_port_path = instance_guard.as_ref().map(|guard| guard.port_path.clone());
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -2975,9 +3121,13 @@ pub fn run() {
                 .build(),
         )
         .manage(DesktopState::new())
-        .setup(|app| {
+        .setup(move |app| {
             let state = app.state::<DesktopState>();
             plugins_ui::attach_app(&state, app.handle().clone());
+            if let Some(port_path) = listener_port_path.as_deref() {
+                let handle = app.handle().clone();
+                let _ = start_focus_listener(port_path, move || focus_main_window(&handle));
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -3031,6 +3181,7 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("unable to start Kroma Desktop");
+    drop(instance_guard);
 }
 
 #[cfg(test)]
@@ -3160,6 +3311,7 @@ mod tests {
         // A new conversation receives its real id once: the old key stops
         // resolving and the registry never holds the same host twice.
         let real = SessionKey::new(Path::new("D:/one"), "new-id");
+        first_host.lock().unwrap().session = "new-id".into();
         state.rekey(&first, &real, &first_host).unwrap();
         assert_eq!(state.registry().unwrap().hosts.len(), 2);
         assert!(state.host_for(&first).is_none());
@@ -3182,7 +3334,7 @@ mod tests {
             None,
             Arc::new(DesktopAsker::default()),
         )));
-        let (first_sender, first_wait) = tokio::sync::oneshot::channel();
+        let (first_sender, mut first_wait) = tokio::sync::oneshot::channel();
         let (second_sender, second_wait) = tokio::sync::oneshot::channel();
         first
             .lock()
@@ -3208,7 +3360,7 @@ mod tests {
             .asker
             .answer("same", 5, kroma::tools::AskAnswer::Dismissed));
         assert!(second_wait.blocking_recv().is_ok());
-        assert!(first_wait.blocking_recv().is_err());
+        assert!(first_wait.try_recv().is_err());
         assert!(first.lock().unwrap().asker.has_pending_for("same"));
     }
 
@@ -3647,6 +3799,32 @@ mod tests {
     }
 
     #[test]
+    fn retained_snapshot_keeps_complete_history_while_the_task_owns_the_agent() {
+        let mut host = idle_host(std::env::temp_dir());
+        host.session = "A".into();
+        host.last_snapshot = Some(json!({
+            "session_id":"A","messages":[
+                {"role":"user","content":"previous question"},
+                {"role":"assistant","content":"previous answer"},
+            ],"total_messages":2,
+        }));
+        host.cancel = Some(tokio::sync::watch::channel(false).0);
+        let snapshot = retained_snapshot(&host).unwrap().unwrap();
+        assert_eq!(snapshot["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(snapshot["messages"][0]["content"], "previous question");
+        assert!(host.runtime.is_none());
+        assert!(host.is_ready());
+    }
+
+    #[test]
+    fn retained_snapshot_does_not_invent_history_for_an_unsaved_workspace() {
+        let mut host = idle_host(std::env::temp_dir());
+        assert!(retained_snapshot(&host).unwrap().is_none());
+        host.session = "unknown".into();
+        assert!(retained_snapshot(&host).unwrap().is_none());
+    }
+
+    #[test]
     fn a_command_that_owns_the_runtime_blocks_other_mutations() {
         let mut host = idle_host(std::env::temp_dir());
         assert!(
@@ -3694,6 +3872,10 @@ mod tests {
             Arc::new(DesktopAsker::default()),
         );
         connected.last_snapshot = Some(json!({"session_id": "session-a", "messages": []}));
+        connected.runtime_owned = Some(RuntimeOwner {
+            token: 1,
+            purpose: RuntimePurpose::Rewind,
+        });
         assert!(connected.is_ready());
         fs::remove_dir_all(project).unwrap();
     }
@@ -3797,5 +3979,39 @@ mod tests {
             require_idle(&host).is_err(),
             "switching sessions or plugins while a task runs must be refused"
         );
+    }
+
+    #[test]
+    fn single_instance_lock_focuses_primary_instead_of_opening_second_webview() {
+        let dir = std::env::temp_dir().join(format!(
+            "kroma-desktop-single-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let guard = match try_acquire_single_instance(&dir) {
+            Ok(guard) => guard,
+            Err(_) => panic!("first instance must acquire lock"),
+        };
+        let focused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&focused);
+        start_focus_listener(&guard.port_path, move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .expect("focus listener should bind");
+
+        assert!(matches!(
+            try_acquire_single_instance(&dir),
+            Err(InstanceRole::Secondary)
+        ));
+        assert!(
+            focused.load(std::sync::atomic::Ordering::SeqCst),
+            "secondary launch must wake the primary instance"
+        );
+
+        drop(guard);
+        assert!(try_acquire_single_instance(&dir).is_ok());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

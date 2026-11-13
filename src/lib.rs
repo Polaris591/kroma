@@ -50,6 +50,7 @@ mod cache_trace;
 mod catalog_file;
 mod file_edit;
 mod file_lock;
+pub use file_lock::{contended as is_lock_contended, try_acquire as try_acquire_lock};
 mod file_read;
 mod history_tools;
 mod path_display;

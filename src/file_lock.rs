@@ -16,7 +16,7 @@ pub(crate) fn acquire(path: &Path, timeout: Duration) -> std::io::Result<File> {
         }
     }
 }
-pub(crate) fn contended(error: &std::io::Error) -> bool {
+pub fn contended(error: &std::io::Error) -> bool {
     #[cfg(windows)]
     {
         matches!(error.raw_os_error(), Some(32 | 33))
@@ -26,7 +26,7 @@ pub(crate) fn contended(error: &std::io::Error) -> bool {
         error.kind() == std::io::ErrorKind::WouldBlock
     }
 }
-pub(crate) fn try_acquire(path: &Path) -> std::io::Result<File> {
+pub fn try_acquire(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(windows)]
